@@ -1002,58 +1002,35 @@ class AnsiLexer(Lexer):
 class JtconTUI:
     """prompt_toolkit full-screen TUI for jtcon."""
 
-    def __init__(
-        self,
-        args,
-        cty,
-        adif_log,
-        json_fh,
-        call_patterns,
-        msg_patterns,
-        state_set,
-        hamdat,
-        cycle_tracker,
-        alerted,
-        prompted,
-        sock,
-        tx_sock,
-    ):
-        self.args          = args
-        self.cty           = cty
-        self.adif_log      = adif_log
-        self.json_fh       = json_fh
-        self.call_patterns = call_patterns
-        self.msg_patterns  = msg_patterns
-        self.state_set     = state_set
-        self.hamdat        = hamdat
-        self.cycle_tracker = cycle_tracker
-        self.alerted       = alerted
-        self.prompted      = prompted
-        self.sock          = sock
-        self.tx_sock       = tx_sock
+    def __init__(self, args, sock, tx_sock):
+        self.args = args
+        self.sock = sock
+        self.tx_sock = tx_sock
+
+        # Data objects — all set to empty defaults; populated by _startup_then_udp().
+        self.cty           = CtyDat()
+        self.adif_log      = None
+        self.json_fh       = None
+        self.call_patterns = []
+        self.msg_patterns  = []
+        self.state_set     = set()
+        self.hamdat        = None
+        self.cycle_tracker = CycleTracker()
+        self.alerted:  set = set()
+        self.prompted: set = set()
 
         self._running      = True
         self._output_lock  = threading.Lock()
         self._output_text  = ""
-        self._transmitting = False   # updated from WSJT-X Status messages
+        self._transmitting = False
 
-        # callsign → (decoded_dict, wsjt_addr) for the most recent decode of each call
-        self._last_decode: dict = {}
-        # callsign of the most recent NEEDED contact this session
+        self._last_decode: dict      = {}
         self._last_needed_call: str | None = None
-
-        # {path: mtime} for every ADIF file being watched; checked each UDP cycle.
-        self._adif_mtimes: dict = {}
-        if adif_log:
-            for p in adif_log.paths:
-                try:
-                    self._adif_mtimes[p] = p.stat().st_mtime
-                except OSError:
-                    pass
+        self._adif_mtimes:     dict  = {}
 
         # ── Widgets ──────────────────────────────────────────────────────────
         self.output_area = TextArea(
-            text=_header_line(args, has_adif=adif_log is not None) + "\n",
+            text="",
             read_only=True,
             scrollbar=True,
             wrap_lines=False,
@@ -1289,15 +1266,146 @@ class JtconTUI:
             for line in out_lines:
                 self._append_line(line)
 
+    # ── Startup (runs in background thread before UDP loop) ──────────────────
+
+    def _startup_then_udp(self) -> None:
+        """
+        Load all data files, logging each step to the decode pane, then fall
+        straight into the UDP receive loop.  Runs entirely in a background thread
+        so the TUI is already visible when the messages appear.
+        """
+        log  = self._append_line
+        args = self.args
+
+        # ── cty.dat ───────────────────────────────────────────────────────────
+        cty_path = Path(args.cty)
+        if not cty_path.exists():
+            log(f"[cty.dat] Downloading from {CTY_DAT_URL} …")
+            try:
+                download_cty(cty_path)
+                log(f"[cty.dat] Saved to {cty_path}")
+            except Exception as exc:
+                log(f"[cty.dat] Download failed: {exc} — entity lookup unavailable")
+
+        cty = CtyDat()
+        if cty_path.exists():
+            try:
+                cty.load(cty_path)
+                log(f"[cty.dat] Loaded {len(cty._prefixes)} prefixes"
+                    f" + {len(cty._exact)} exact callsigns")
+            except Exception as exc:
+                log(f"[cty.dat] Load error: {exc} — entity lookup unavailable")
+        else:
+            log("[cty.dat] File not found — entity lookup unavailable")
+        self.cty = cty
+
+        # ── hamdat ────────────────────────────────────────────────────────────
+        if args.match_state:
+            try:
+                self.state_set = load_state_set(args.match_state)
+                log(f"[match-state] {len(self.state_set)} state(s):"
+                    f" {', '.join(sorted(self.state_set))}")
+            except OSError as exc:
+                log(f"[match-state] Cannot load state list: {exc}")
+                self._running = False
+                return
+
+        db_path = Path(args.hamdat).expanduser()
+        if db_path.exists():
+            try:
+                self.hamdat = HamdatLookup(db_path)
+                label = "Auto-detected" if args.hamdat == str(HAMDAT_DB_DEFAULT) else "Using"
+                log(f"[hamdat] {label}: {db_path}")
+            except Exception as exc:
+                if args.match_state:
+                    log(f"[hamdat] Failed to open {db_path}: {exc}")
+                    self._running = False
+                    return
+                log(f"[hamdat] Warning: found but could not open {db_path}: {exc}")
+        elif args.match_state:
+            log(f"[match-state] hamdat database not found: {db_path}")
+            self._running = False
+            return
+
+        # ── ADIF ──────────────────────────────────────────────────────────────
+        adif_paths: list[Path] = []
+        for p in _find_wsjt_logs():
+            log(f"[adif] Auto-discovered: {p}")
+            adif_paths.append(p)
+        for f in (args.adif or []):
+            p = Path(f).expanduser().resolve()
+            if not p.exists():
+                log(f"[adif] File not found: {p}")
+                self._running = False
+                return
+            if p not in adif_paths:
+                adif_paths.append(p)
+
+        if adif_paths:
+            try:
+                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat)
+                for p in adif_paths:
+                    log(f"[adif] Loaded: {p.name}")
+                al = self.adif_log
+                log(f"[adif] {al.total_qsos} QSOs across {len(adif_paths)} file(s)"
+                    f" — {len(al.worked_calls)} calls,"
+                    f" {len(al.worked_dxcc)} DXCC,"
+                    f" {len(al.worked_cqz)} CQ zones worked")
+                for p in adif_paths:
+                    try:
+                        self._adif_mtimes[p] = p.stat().st_mtime
+                    except OSError:
+                        pass
+            except Exception as exc:
+                log(f"[adif] Failed to load: {exc}")
+        else:
+            log("[adif] No ADIF log found — NEEDED detection disabled")
+
+        # ── Pattern files ─────────────────────────────────────────────────────
+        if args.match_calls:
+            self.call_patterns = load_regex_patterns(args.match_calls)
+            log(f"[match-calls] {len(self.call_patterns)} pattern(s)"
+                f" from {', '.join(args.match_calls)}")
+        if args.match_message:
+            self.msg_patterns = load_regex_patterns(args.match_message)
+            log(f"[match-message] {len(self.msg_patterns)} pattern(s)"
+                f" from {', '.join(args.match_message)}")
+        for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
+            if flag:
+                self.msg_patterns.append(re.compile(rf"\b{keyword}\b", re.IGNORECASE))
+                log(f"[match-message] {keyword} pattern active")
+
+        # ── JSON output ───────────────────────────────────────────────────────
+        if args.save:
+            try:
+                self.json_fh = open(args.save, "a", encoding="utf-8")
+                log(f"[save] Appending JSON records to: {args.save}")
+            except OSError as exc:
+                log(f"[save] Cannot open {args.save}: {exc}")
+                self._running = False
+                return
+
+        # ── Column header then ready banner ───────────────────────────────────
+        log(_header_line(args, has_adif=self.adif_log is not None))
+        log(f"[ready] Listening on {args.host}:{args.port}"
+            f"  ({'all decodes' if args.raw else 'CQ calls only'})")
+
+        # ── Hand off to UDP receive loop ──────────────────────────────────────
+        self._udp_loop()
+
     # ── Entry point ───────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        t = threading.Thread(target=self._udp_loop, daemon=True)
+        t = threading.Thread(target=self._startup_then_udp, daemon=True)
         t.start()
         try:
             self._app.run()
         finally:
             self._running = False
+            if self.json_fh:
+                self.json_fh.close()
+            if self.hamdat:
+                self.hamdat.close()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1339,114 +1447,9 @@ def main() -> None:
                         help="Disable ANSI colorization of the decode output")
 
     args = parser.parse_args()
+    args.stats = True   # always on; status bar needs it
 
-    # Always track cycle stats in TUI (status bar needs them)
-    args.stats = True
-
-    # ── cty.dat ───────────────────────────────────────────────────────────────
-    cty_path = Path(args.cty)
-    if not cty_path.exists():
-        print(f"[cty.dat] Downloading from {CTY_DAT_URL} …", file=sys.stderr)
-        try:
-            download_cty(cty_path)
-            print(f"[cty.dat] Saved to {cty_path}", file=sys.stderr)
-        except Exception as exc:
-            print(f"[cty.dat] Download failed: {exc}", file=sys.stderr)
-
-    cty = CtyDat()
-    if cty_path.exists():
-        try:
-            cty.load(cty_path)
-        except Exception as exc:
-            print(f"[cty.dat] Load error: {exc}", file=sys.stderr)
-
-    # ── hamdat ────────────────────────────────────────────────────────────────
-    state_set: set = set()
-    hamdat = None
-
-    if args.match_state:
-        try:
-            state_set = load_state_set(args.match_state)
-        except OSError as exc:
-            print(f"[match-state] {exc}", file=sys.stderr)
-            sys.exit(1)
-
-    # Open the hamdat DB whenever it is available — not just with --match-state.
-    # This enables the ST column and ADIF state tracking even without a state filter.
-    db_path = Path(args.hamdat).expanduser()
-    if db_path.exists():
-        try:
-            hamdat = HamdatLookup(db_path)
-            label = "Auto-detected" if args.hamdat == str(HAMDAT_DB_DEFAULT) else "Using"
-            print(f"[hamdat] {label}: {db_path}", file=sys.stderr)
-        except Exception as exc:
-            if args.match_state:
-                print(f"[hamdat] Failed to open {db_path}: {exc}", file=sys.stderr)
-                sys.exit(1)
-            print(f"[hamdat] Warning: found but could not open {db_path}: {exc}",
-                  file=sys.stderr)
-    elif args.match_state:
-        print(f"[match-state] hamdat database not found: {db_path}", file=sys.stderr)
-        sys.exit(1)
-
-    # ── ADIF log ──────────────────────────────────────────────────────────────
-    adif_paths: list[Path] = []
-
-    # Auto-discover WSJT-X logs from common locations.
-    for p in _find_wsjt_logs():
-        print(f"[adif] Auto-discovered: {p}", file=sys.stderr)
-        adif_paths.append(p)
-
-    # Append any explicitly supplied files (deduplicated).
-    for f in (args.adif or []):
-        p = Path(f).expanduser().resolve()
-        if not p.exists():
-            print(f"[adif] File not found: {p}", file=sys.stderr)
-            sys.exit(1)
-        if p not in adif_paths:
-            adif_paths.append(p)
-
-    adif_log = None
-    if adif_paths:
-        try:
-            adif_log = AdifLog(adif_paths, cty, hamdat)
-            for p in adif_paths:
-                print(f"[adif] Loaded: {p.name}", file=sys.stderr)
-            print(
-                f"[adif] {adif_log.total_qsos} QSOs total across"
-                f" {len(adif_paths)} file(s) —"
-                f" {len(adif_log.worked_calls)} calls,"
-                f" {len(adif_log.worked_dxcc)} DXCC,"
-                f" {len(adif_log.worked_cqz)} CQ zones worked.",
-                file=sys.stderr,
-            )
-        except Exception as exc:
-            print(f"[adif] Failed to load: {exc}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        print("[adif] No ADIF log found — NEEDED detection disabled.", file=sys.stderr)
-
-    # ── Pattern files ─────────────────────────────────────────────────────────
-    call_patterns: list = []
-    msg_patterns:  list = []
-    if args.match_calls:
-        call_patterns = load_regex_patterns(args.match_calls)
-    if args.match_message:
-        msg_patterns = load_regex_patterns(args.match_message)
-    for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
-        if flag:
-            msg_patterns.append(re.compile(rf"\b{keyword}\b", re.IGNORECASE))
-
-    # ── JSON output ───────────────────────────────────────────────────────────
-    json_fh = None
-    if args.save:
-        try:
-            json_fh = open(args.save, "a", encoding="utf-8")
-        except OSError as exc:
-            print(f"[save] Cannot open {args.save}: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-    # ── UDP sockets ───────────────────────────────────────────────────────────
+    # ── UDP sockets (must bind before TUI starts so the port is held) ─────────
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -1454,29 +1457,15 @@ def main() -> None:
     except AttributeError:
         pass
     sock.bind((args.host, args.port))
-
     tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
-    cycle_tracker = CycleTracker()
-    alerted:  set = set()
-    prompted: set = set()
-
-    # ── Launch TUI ────────────────────────────────────────────────────────────
-    tui = JtconTUI(
-        args, cty, adif_log, json_fh,
-        call_patterns, msg_patterns, state_set, hamdat,
-        cycle_tracker, alerted, prompted,
-        sock, tx_sock,
-    )
+    # ── Launch TUI — all remaining startup happens inside, logged to the pane ─
+    tui = JtconTUI(args, sock, tx_sock)
     try:
         tui.run()
     finally:
         sock.close()
         tx_sock.close()
-        if json_fh:
-            json_fh.close()
-        if hamdat:
-            hamdat.close()
 
 
 if __name__ == "__main__":
