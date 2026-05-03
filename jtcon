@@ -280,7 +280,7 @@ def load_state_set(value: str) -> set:
 class HamdatLookup:
     def __init__(self, db_path: Path):
         self.db_path = db_path
-        self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
         self._cache: dict = {}
 
     def state(self, callsign: str) -> str | None:
