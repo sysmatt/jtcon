@@ -108,6 +108,32 @@ CTY_DAT_URL     = "https://www.country-files.com/cty/cty.dat"
 CTY_DAT_DEFAULT = Path.home() / ".jtcon_cty.dat"
 HAMDAT_DB_DEFAULT = Path.home() / ".hamdat" / "hamdat.db"
 
+# Candidate locations searched in order when no --adif flag is given.
+WSJT_LOG_SEARCH_PATHS: list[Path] = [
+    # Linux — XDG standard (WSJT-X 2.x)
+    Path.home() / ".local" / "share" / "WSJT-X" / "wsjtx_log.adi",
+    # Linux — XDG experimental / nightly builds
+    Path.home() / ".local" / "share" / "WSJT-X Exp" / "wsjtx_log.adi",
+    # macOS
+    Path.home() / "Library" / "Application Support" / "WSJT-X" / "wsjtx_log.adi",
+    # Windows default AppData\Roaming path
+    Path.home() / "AppData" / "Roaming" / "WSJT-X" / "wsjtx_log.adi",
+    # Older Linux installs / portable installs
+    Path.home() / "WSJT-X" / "wsjtx_log.adi",
+]
+
+
+def _find_wsjt_logs() -> list[Path]:
+    """Return all WSJT_LOG_SEARCH_PATHS entries that currently exist on disk."""
+    found = []
+    for p in WSJT_LOG_SEARCH_PATHS:
+        try:
+            if p.exists():
+                found.append(p)
+        except OSError:
+            pass
+    return found
+
 _MODE_NAMES = {
     "~": "FT8",
     "+": "FT4",
@@ -469,8 +495,9 @@ def parse_adif(path: Path) -> list:
 
 
 class AdifLog:
-    def __init__(self, path: Path, cty: CtyDat, hamdat=None):
-        self.path    = path
+    def __init__(self, paths: list[Path], cty: CtyDat, hamdat=None):
+        # Accept a single Path for convenience, normalise to list.
+        self.paths   = [paths] if isinstance(paths, Path) else list(paths)
         self.cty     = cty
         self._hamdat = hamdat
         self.worked_calls:   set = set()
@@ -483,30 +510,44 @@ class AdifLog:
         self._load()
 
     def _load(self) -> None:
-        qsos = parse_adif(self.path)
-        self.total_qsos = len(qsos)
-        for q in qsos:
-            call    = q.get("call", "").strip().upper()
-            cqz_raw = (q.get("cqz") or q.get("cq_zone") or "").strip()
-            country = (q.get("country") or q.get("entity") or "").strip().upper()
-            grid    = q.get("gridsquare", "").strip().upper()[:4]
+        self.worked_calls.clear()
+        self.worked_grids.clear()
+        self.worked_states.clear()
+        self.worked_dxcc.clear()
+        self.worked_cqz.clear()
+        self.worked_country.clear()
+        self.total_qsos = 0
+
+        for path in self.paths:
             try:
-                self.worked_cqz.add(int(cqz_raw))
-            except ValueError:
-                pass
-            if country:
-                self.worked_country.add(country)
-            if grid:
-                self.worked_grids.add(grid)
-            if call:
-                self.worked_calls.add(call)
-                info = self.cty.lookup(call)
-                if info:
-                    self.worked_dxcc.add(info["primary_prefix"].upper())
-                    if not cqz_raw:
-                        self.worked_cqz.add(info["cqz"])
-                    if not country:
-                        self.worked_country.add(info["country"].upper())
+                qsos = parse_adif(path)
+            except Exception as exc:
+                print(f"[adif] Cannot read {path.name}: {exc}", file=sys.stderr)
+                continue
+            self.total_qsos += len(qsos)
+            for q in qsos:
+                call    = q.get("call", "").strip().upper()
+                cqz_raw = (q.get("cqz") or q.get("cq_zone") or "").strip()
+                country = (q.get("country") or q.get("entity") or "").strip().upper()
+                grid    = q.get("gridsquare", "").strip().upper()[:4]
+                try:
+                    self.worked_cqz.add(int(cqz_raw))
+                except ValueError:
+                    pass
+                if country:
+                    self.worked_country.add(country)
+                if grid:
+                    self.worked_grids.add(grid)
+                if call:
+                    self.worked_calls.add(call)
+                    info = self.cty.lookup(call)
+                    if info:
+                        self.worked_dxcc.add(info["primary_prefix"].upper())
+                        if not cqz_raw:
+                            self.worked_cqz.add(info["cqz"])
+                        if not country:
+                            self.worked_country.add(info["country"].upper())
+
         if self._hamdat:
             for call in self.worked_calls:
                 state = self._hamdat.state(call)
@@ -1001,8 +1042,14 @@ class JtconTUI:
         # callsign of the most recent NEEDED contact this session
         self._last_needed_call: str | None = None
 
-        self._adif_path  = Path(args.adif) if args.adif else None
-        self._adif_mtime = self._adif_path.stat().st_mtime if self._adif_path else None
+        # {path: mtime} for every ADIF file being watched; checked each UDP cycle.
+        self._adif_mtimes: dict = {}
+        if adif_log:
+            for p in adif_log.paths:
+                try:
+                    self._adif_mtimes[p] = p.stat().st_mtime
+                except OSError:
+                    pass
 
         # ── Widgets ──────────────────────────────────────────────────────────
         self.output_area = TextArea(
@@ -1189,16 +1236,24 @@ class JtconTUI:
             except OSError:
                 break
 
-            # Hot-reload ADIF on file change
-            if self._adif_path:
+            # Hot-reload ADIF when any watched file changes.
+            if self.adif_log and self._adif_mtimes:
                 try:
-                    mtime = self._adif_path.stat().st_mtime
-                    if mtime != self._adif_mtime:
-                        self._adif_mtime = mtime
+                    changed = any(
+                        p.stat().st_mtime != self._adif_mtimes.get(p)
+                        for p in self.adif_log.paths
+                    )
+                    if changed:
                         self.adif_log = AdifLog(
-                            self._adif_path, self.cty, self.hamdat
+                            self.adif_log.paths, self.cty, self.hamdat
                         )
-                        self._append_line("[adif] File changed — reloaded.")
+                        self._adif_mtimes = {
+                            p: p.stat().st_mtime for p in self.adif_log.paths
+                        }
+                        self._append_line(
+                            f"[adif] Reloaded {self.adif_log.total_qsos} QSOs"
+                            f" from {len(self.adif_log.paths)} file(s)."
+                        )
                 except OSError:
                     pass
 
@@ -1261,7 +1316,9 @@ def main() -> None:
     parser.add_argument("--raw", action="store_true")
     parser.add_argument("--save", metavar="FILE")
     parser.add_argument("--cty", metavar="PATH", default=str(CTY_DAT_DEFAULT))
-    parser.add_argument("--adif", metavar="FILE")
+    parser.add_argument("--adif", metavar="FILE", nargs="+",
+                        help="Additional ADIF log file(s) for NEEDED detection "
+                             "(auto-discovered WSJT-X logs are always loaded if found)")
     parser.add_argument("--no-need-entity",  dest="need_entity",  action="store_false", default=True)
     parser.add_argument("--no-need-cqz",     dest="need_cqz",     action="store_false", default=True)
     parser.add_argument("--no-need-country", dest="need_country", action="store_false", default=True)
@@ -1323,17 +1380,41 @@ def main() -> None:
             sys.exit(1)
 
     # ── ADIF log ──────────────────────────────────────────────────────────────
-    adif_log = None
-    if args.adif:
-        adif_path = Path(args.adif)
-        if not adif_path.exists():
-            print(f"[adif] File not found: {adif_path}", file=sys.stderr)
+    adif_paths: list[Path] = []
+
+    # Auto-discover WSJT-X logs from common locations.
+    for p in _find_wsjt_logs():
+        print(f"[adif] Auto-discovered: {p}", file=sys.stderr)
+        adif_paths.append(p)
+
+    # Append any explicitly supplied files (deduplicated).
+    for f in (args.adif or []):
+        p = Path(f).expanduser().resolve()
+        if not p.exists():
+            print(f"[adif] File not found: {p}", file=sys.stderr)
             sys.exit(1)
+        if p not in adif_paths:
+            adif_paths.append(p)
+
+    adif_log = None
+    if adif_paths:
         try:
-            adif_log = AdifLog(adif_path, cty, hamdat)
+            adif_log = AdifLog(adif_paths, cty, hamdat)
+            for p in adif_paths:
+                print(f"[adif] Loaded: {p.name}", file=sys.stderr)
+            print(
+                f"[adif] {adif_log.total_qsos} QSOs total across"
+                f" {len(adif_paths)} file(s) —"
+                f" {len(adif_log.worked_calls)} calls,"
+                f" {len(adif_log.worked_dxcc)} DXCC,"
+                f" {len(adif_log.worked_cqz)} CQ zones worked.",
+                file=sys.stderr,
+            )
         except Exception as exc:
             print(f"[adif] Failed to load: {exc}", file=sys.stderr)
             sys.exit(1)
+    else:
+        print("[adif] No ADIF log found — NEEDED detection disabled.", file=sys.stderr)
 
     # ── Pattern files ─────────────────────────────────────────────────────────
     call_patterns: list = []
