@@ -105,6 +105,12 @@ Type in the `CMD>` line and press Enter:
 |---|---|
 | `quit` / `exit` / `q` | Exit the program |
 | `clear` | Clear the decode pane |
+| `L` | Send a WSJT-X reply to the last NEEDED contact this session |
+| `W1ABC` *(any callsign)* | Send a WSJT-X reply to the most recent decode from that callsign |
+
+Replies use the WSJT-X UDP Reply message (type 4), equivalent to double-clicking a
+decode in the WSJT-X UI.  WSJT-X must have **Settings → Reporting → Accept UDP requests**
+checked, and must have received at least one decode from the target callsign this session.
 
 ## Options
 

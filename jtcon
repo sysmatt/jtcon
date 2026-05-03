@@ -115,6 +115,10 @@ _W_MSG  = 24
 _W_CALL = 12
 _W_GRID = 6
 
+# Matches any string that looks like an amateur callsign: ≥3 chars, at least one digit,
+# alphanumeric plus optional slash (for portable/country prefixes).
+_CALLSIGN_RE = re.compile(r'^(?=[A-Z0-9/]*\d)[A-Z0-9/]{3,}$', re.IGNORECASE)
+
 _BAR_WIDTH = 14   # characters wide for the cycle bargraph
 
 
@@ -654,10 +658,17 @@ def handle_packet(
     prompted:      set,
     tx_sock,
     wsjt_addr:     tuple,
+    out_meta:      dict | None = None,
 ) -> list:
     """
     Decode one UDP datagram and return a list of formatted display strings.
     Never prints directly; caller appends lines to the TUI output pane.
+
+    If *out_meta* is provided it is populated with:
+      'decoded'   — raw parsed decode dict (for sending replies)
+      'callsign'  — resolved CQ callsign or None
+      'is_needed' — True when the contact is flagged NEEDED
+      'wsjt_addr' — source address of the packet
     """
     lines = []
 
@@ -836,6 +847,12 @@ def handle_packet(
         json_fh.write(json.dumps(record) + "\n")
         json_fh.flush()
 
+    if out_meta is not None:
+        out_meta['decoded']   = decoded
+        out_meta['callsign']  = callsign
+        out_meta['is_needed'] = is_needed
+        out_meta['wsjt_addr'] = wsjt_addr
+
     return lines
 
 
@@ -927,6 +944,11 @@ class JtconTUI:
         self._output_lock  = threading.Lock()
         self._output_text  = ""
         self._transmitting = False   # updated from WSJT-X Status messages
+
+        # callsign → (decoded_dict, wsjt_addr) for the most recent decode of each call
+        self._last_decode: dict = {}
+        # callsign of the most recent NEEDED contact this session
+        self._last_needed_call: str | None = None
 
         self._adif_path  = Path(args.adif) if args.adif else None
         self._adif_mtime = self._adif_path.stat().st_mtime if self._adif_path else None
@@ -1047,17 +1069,51 @@ class JtconTUI:
     # ── Command handler ───────────────────────────────────────────────────────
 
     def _handle_command(self, buffer) -> None:
-        cmd = buffer.text.strip().lower()
+        raw = buffer.text.strip()
+        cmd = raw.lower()
+
         if cmd in ("quit", "exit", "q"):
             self._running = False
             self._app.exit()
+
         elif cmd == "clear":
             header = _header_line(self.args, has_adif=self.adif_log is not None) + "\n"
             with self._output_lock:
                 self._output_text = header
             self.output_area.text = header
-        elif cmd:
-            self._append_line(f"[cmd] Unknown command: {cmd!r}  (try: quit, clear)")
+
+        elif cmd == "l":
+            if not self._last_needed_call:
+                self._append_line("[cmd] No NEEDED contact recorded this session.")
+            else:
+                self._append_line(f"[cmd] Replying to last NEEDED: {self._last_needed_call}")
+                self._reply_to_call(self._last_needed_call)
+
+        elif _CALLSIGN_RE.match(raw):
+            self._reply_to_call(raw.upper())
+
+        elif raw:
+            self._append_line(
+                f"[cmd] Unknown: {raw!r}  "
+                "(commands: quit, clear, L, or enter a callsign to reply)"
+            )
+
+    def _reply_to_call(self, callsign: str) -> None:
+        """Send a WSJT-X Reply message for the most recent decode of *callsign*."""
+        entry = self._last_decode.get(callsign)
+        if not entry:
+            self._append_line(f"[cmd] No recent decode on record for {callsign}.")
+            return
+        decoded, wsjt_addr = entry
+        try:
+            _send_reply(self.tx_sock, wsjt_addr, decoded)
+            self._append_line(
+                f"[cmd] ► Reply sent to {callsign}"
+                f"  msg={decoded.get('message', '?')!r}"
+                f"  → {wsjt_addr[0]}:{wsjt_addr[1]}"
+            )
+        except Exception as exc:
+            self._append_line(f"[cmd] Reply to {callsign} failed: {exc}")
 
     # ── Output append (thread-safe) ───────────────────────────────────────────
 
@@ -1101,15 +1157,23 @@ class JtconTUI:
                 self._app.invalidate()
                 continue
 
+            meta: dict = {}
             try:
                 out_lines = handle_packet(
                     data, self.args, self.cty, self.adif_log, self.json_fh,
                     self.call_patterns, self.msg_patterns, self.state_set,
                     self.hamdat, self.cycle_tracker, self.alerted, self.prompted,
-                    self.tx_sock, wsjt_addr,
+                    self.tx_sock, wsjt_addr, meta,
                 )
             except Exception as exc:
                 out_lines = [f"[error] packet handler: {exc}"]
+
+            # Track the most recent decode for each callsign so commands can reply.
+            call = meta.get('callsign')
+            if call and meta.get('decoded'):
+                self._last_decode[call] = (meta['decoded'], wsjt_addr)
+            if call and meta.get('is_needed'):
+                self._last_needed_call = call
 
             for line in out_lines:
                 self._append_line(line)
