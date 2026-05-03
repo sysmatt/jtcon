@@ -1197,8 +1197,16 @@ class JtconTUI:
         with self._output_lock:
             self._output_text += text + "\n"
             new_text = self._output_text
-        # TextArea.text setter calls set_document with cursor at end → auto-scroll
         self.output_area.text = new_text
+        # prompt_toolkit only auto-scrolls the focused window; when cmd_area has
+        # focus the output pane stays put.  Drive vertical_scroll manually so live
+        # decodes always pin to the bottom, but leave it alone when the user has
+        # tabbed into the output pane for manual review.
+        try:
+            if not self._app.layout.has_focus(self.output_area):
+                self.output_area.window.vertical_scroll = len(new_text.splitlines())
+        except Exception:
+            pass
         self._app.invalidate()
 
     # ── UDP receive loop (runs in background thread) ──────────────────────────
