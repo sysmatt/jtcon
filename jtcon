@@ -88,10 +88,12 @@ from pathlib import Path
 
 from prompt_toolkit import Application
 from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
@@ -114,6 +116,21 @@ _MODE_NAMES = {
 _W_MSG  = 24
 _W_CALL = 12
 _W_GRID = 6
+
+# ANSI colour codes used in the decode output pane.
+_RST  = "\033[0m"
+_DIM  = "\033[2m"
+_BOLD = "\033[1m"
+_GRN  = "\033[32m"    # green      — worked grid/entity
+_BGRN = "\033[1;32m"  # bold green — worked callsign
+_CYN  = "\033[36m"    # cyan       — entity block
+_BRED = "\033[1;31m"  # bold red   — NEEDED alert
+_BYEL = "\033[1;33m"  # bold yellow — MATCH alert
+
+
+def _col(text: str, code: str, on: bool) -> str:
+    return f"{code}{text}{_RST}" if on else text
+
 
 # Matches any string that looks like an amateur callsign: ≥3 chars, at least one digit,
 # alphanumeric plus optional slash (for portable/country prefixes).
@@ -769,57 +786,69 @@ def handle_packet(
     dt  = decoded["dt"]
     df  = decoded["df"]
 
-    # ── Build the output line (fixed-width columns, no ANSI) ──────────────────
+    # ── Build the output line (fixed-width columns) ───────────────────────────
+    color = args.color
     cols: list = []
 
     if args.show_time:
-        cols.append(f"[{datetime.now().strftime('%H:%M:%S')}]")
+        cols.append(_col(f"[{datetime.now().strftime('%H:%M:%S')}]", _DIM, color))
 
-    cols.append(period_utc)
-    cols.append(f"{snr:+4d}")
-    cols.append(f"{dt:+6.1f}s")
-    cols.append(f"{df:5d}")
-    cols.append(f"{mode:<4}")
+    cols.append(_col(period_utc,       _DIM, color))
+    cols.append(_col(f"{snr:+4d}",     _DIM, color))
+    cols.append(_col(f"{dt:+6.1f}s",   _DIM, color))
+    cols.append(_col(f"{df:5d}",       _DIM, color))
+    cols.append(_col(f"{mode:<4}",     _DIM, color))
+
     cols.append(f"{msg_text:<{_W_MSG}}")
 
-    call_col = callsign if (is_cq and callsign) else ""
-    cols.append(f"{call_col:<{_W_CALL}}")
+    call_col    = callsign if (is_cq and callsign) else ""
+    call_str    = f"{call_col:<{_W_CALL}}"
+    call_worked = bool(adif_log and call_col and call_col in adif_log.worked_calls)
+    if call_col:
+        call_color = _BGRN if call_worked else _BOLD
+        cols.append(_col(call_str, call_color, color))
+    else:
+        cols.append(call_str)
 
-    grid_col = grid if grid else ""
-    cols.append(f"{grid_col:<{_W_GRID}}")
+    grid_col    = grid if grid else ""
+    grid_str    = f"{grid_col:<{_W_GRID}}"
+    grid_worked = bool(adif_log and grid_col and grid_col[:4] in adif_log.worked_grids)
+    cols.append(_col(grid_str, _GRN, color) if (grid_worked and grid_col) else grid_str)
 
     if hamdat and is_cq:
-        cols.append(f"{station_state or '':<2}")
+        st_val    = station_state or ""
+        st_str    = f"{st_val:<2}"
+        st_worked = bool(adif_log and st_val and st_val in adif_log.worked_states)
+        cols.append(_col(st_str, _GRN, color) if st_worked else st_str)
 
     if entity_info:
         em1 = em2 = em3 = ""
         if adif_log and is_cq:
             wf = set(adif_log.worked_flags(entity_info, args))
             if args.need_entity:
-                em1 = "+" if "dxcc"    in wf else "-"
+                em1 = "✅" if "dxcc"    in wf else "❌"
             if args.need_cqz:
-                em2 = "+" if "cqz"     in wf else "-"
+                em2 = "✅" if "cqz"     in wf else "❌"
             if args.need_country:
-                em3 = "+" if "country" in wf else "-"
+                em3 = "✅" if "country" in wf else "❌"
         entity_str = (
             f"| {entity_info['entity']:<30}"
             f"  {em1}CQ{entity_info['cq_zone']:<3}"
             f" {em2}ITU{entity_info['itu_zone']:<3}"
             f" {em3}{entity_info['continent']:<2}"
         )
-        cols.append(entity_str)
+        cols.append(_col(entity_str, _CYN, color))
 
     line = "  ".join(cols)
-
-    # NEEDED / MATCH prefix markers
-    if is_needed or is_match:
-        line = "*** " + line
     lines.append(line)
 
+    alert_parts: list = []
     if adif_log and is_cq and needed_flags:
-        lines.append(f"    NEEDED: {', '.join(needed_flags)}")
+        alert_parts.append(_col(f"*** NEEDED: {', '.join(needed_flags)} ***", _BRED, color))
     if match_flags:
-        lines.append(f"    MATCH:  {', '.join(match_flags)}")
+        alert_parts.append(_col(f"*** MATCH: {', '.join(match_flags)} ***", _BYEL, color))
+    if alert_parts:
+        lines.append("  " + "  ".join(alert_parts))
 
     # ── Interactive call prompt (--call, not used in TUI yet) ─────────────────
     # Deferred: --call requires blocking stdin which conflicts with the TUI.
@@ -852,6 +881,7 @@ def handle_packet(
         out_meta['callsign']  = callsign
         out_meta['is_needed'] = is_needed
         out_meta['wsjt_addr'] = wsjt_addr
+        out_meta['bell']      = is_needed or is_match
 
     return lines
 
@@ -901,6 +931,27 @@ def _bargraph(cycle_tracker: CycleTracker | None) -> str:
     fraction = (ms % cycle_ms) / cycle_ms
     filled   = int(fraction * _BAR_WIDTH)
     return "█" * filled + "░" * (_BAR_WIDTH - filled)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ANSI lexer — lets the output TextArea render ANSI escape codes as colours
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AnsiLexer(Lexer):
+    """Parse ANSI escape sequences in each buffer line for prompt_toolkit."""
+
+    def lex_document(self, document):
+        lines = document.lines
+
+        def get_line(lineno):
+            if 0 <= lineno < len(lines):
+                try:
+                    return list(to_formatted_text(ANSI(lines[lineno])))
+                except Exception:
+                    return [("", lines[lineno])]
+            return []
+
+        return get_line
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -960,6 +1011,7 @@ class JtconTUI:
             scrollbar=True,
             wrap_lines=False,
             focusable=True,
+            lexer=AnsiLexer(),
             style="class:output",
         )
         self.cmd_area = TextArea(
@@ -1175,6 +1227,10 @@ class JtconTUI:
             if call and meta.get('is_needed'):
                 self._last_needed_call = call
 
+            if meta.get('bell'):
+                sys.stderr.write('\a')
+                sys.stderr.flush()
+
             for line in out_lines:
                 self._append_line(line)
 
@@ -1222,11 +1278,10 @@ def main() -> None:
                         help="Enable cycle stats (always visible in TUI status bar)")
     parser.add_argument("--debug", action="store_true")
 
-    # --color is accepted but ignored in TUI mode (prompt_toolkit handles presentation)
-    parser.add_argument("--color", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-color", dest="color", action="store_false", default=True,
+                        help="Disable ANSI colorization of the decode output")
 
     args = parser.parse_args()
-    args.color = False   # TUI mode: no ANSI escape codes in buffer text
 
     # Always track cycle stats in TUI (status bar needs them)
     args.stats = True
