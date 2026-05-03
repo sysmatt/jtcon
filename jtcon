@@ -1197,16 +1197,16 @@ class JtconTUI:
         with self._output_lock:
             self._output_text += text + "\n"
             new_text = self._output_text
-        self.output_area.text = new_text
-        # prompt_toolkit only auto-scrolls the focused window; when cmd_area has
-        # focus the output pane stays put.  Drive vertical_scroll manually so live
-        # decodes always pin to the bottom, but leave it alone when the user has
-        # tabbed into the output pane for manual review.
-        # NOTE: has_focus() requires Window/Buffer/UIControl — TextArea is not accepted,
-        # so we pass output_area.window.  Large scroll value is clamped to the valid
-        # maximum by the Window renderer, which keeps the last visible rows on screen.
-        if not self._app.layout.has_focus(self.output_area.window):
-            self.output_area.window.vertical_scroll = 10 ** 9
+        # TextArea.text setter uses Document(value, 0) — cursor at top — so the
+        # Window's do_scroll() always scrolls back to line 0.  Set the Document
+        # directly with cursor at the end so do_scroll() tracks the bottom.
+        # When the user has tabbed into the pane for manual review, preserve their
+        # cursor position so the view stays stable.
+        if self._app.layout.has_focus(self.output_area.window):
+            cursor = self.output_area.buffer.cursor_position
+        else:
+            cursor = len(new_text)
+        self.output_area.document = Document(new_text, cursor)
         self._app.invalidate()
 
     # ── UDP receive loop (runs in background thread) ──────────────────────────
