@@ -1202,11 +1202,11 @@ class JtconTUI:
         # focus the output pane stays put.  Drive vertical_scroll manually so live
         # decodes always pin to the bottom, but leave it alone when the user has
         # tabbed into the output pane for manual review.
-        try:
-            if not self._app.layout.has_focus(self.output_area):
-                self.output_area.window.vertical_scroll = len(new_text.splitlines())
-        except Exception:
-            pass
+        # NOTE: has_focus() requires Window/Buffer/UIControl — TextArea is not accepted,
+        # so we pass output_area.window.  Large scroll value is clamped to the valid
+        # maximum by the Window renderer, which keeps the last visible rows on screen.
+        if not self._app.layout.has_focus(self.output_area.window):
+            self.output_area.window.vertical_scroll = 10 ** 9
         self._app.invalidate()
 
     # ── UDP receive loop (runs in background thread) ──────────────────────────
