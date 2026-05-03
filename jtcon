@@ -1,0 +1,1273 @@
+#!/usr/bin/env python3
+"""
+jtcon
+=====
+Listen for WSJT-X UDP broadcasts, display CQ calls in a scrollable TUI pane
+enriched with entity / CQ-zone / country / grid info from cty.dat, optionally
+save as newline-delimited JSON, and optionally load an ADIF logbook so that
+contacts whose entity, CQ zone, or country have NOT been worked before are
+flagged as NEEDED.
+
+TUI layout
+----------
+  ┌─────────────────────────────────────┐
+  │  scrollable decode output           │  ← top pane, Tab to focus & scroll
+  ├─────────────────────────────────────┤
+  │  CMD>                               │  ← single-line command input
+  ├─────────────────────────────────────┤
+  │  [████████░░] even  dec=…  cq=…     │  ← status line (cycle bar + stats)
+  └─────────────────────────────────────┘
+
+Key bindings
+------------
+  Tab       Toggle focus between output pane and command input
+  Ctrl-C / Ctrl-Q   Quit
+
+Commands (type in CMD> line, press Enter)
+-----------------------------------------
+  quit / exit / q    Exit the program
+  clear              Clear the decode output
+
+Dependencies
+------------
+  prompt_toolkit  (python3-prompt-toolkit)
+  Everything else is Python standard library.
+
+First run
+---------
+  cty.dat (AD1C Big CTY prefix database) is downloaded automatically from
+  country-files.com and cached at ~/.jtcon_cty.dat.
+
+Usage
+-----
+  jtcon
+  jtcon --adif ~/Documents/wsjtx_log.adi
+  jtcon --adif ~/wsjtx_log.adi --save cq.jsonl
+  jtcon --raw --show-time
+  jtcon --match-calls watchlist.txt
+  jtcon --pota --sota
+
+Options
+-------
+  --host HOST           UDP bind address           (default: 0.0.0.0)
+  --port PORT           UDP port                   (default: 2237)
+  --show-time           Prepend local wall-clock HH:MM:SS to every line
+  --raw                 Show ALL decoded messages, not just CQ
+  --save FILE           Append each CQ record as a JSON line to FILE
+  --cty PATH            Path to cty.dat            (default: ~/.jtcon_cty.dat)
+  --adif FILE           ADIF log file for NEEDED detection
+  --no-need-entity      Disable DXCC-entity NEEDED check
+  --no-need-cqz         Disable CQ-zone NEEDED check
+  --no-need-country     Disable country-name NEEDED check
+  --match-calls FILE    File(s) of callsign regex patterns
+  --match-message FILE  File(s) of decoded-message regex patterns
+  --alert-command SCRIPT  Script to exec on NEEDED/MATCH events
+  --alert-ntfy TOPIC    POST NEEDED/MATCH alerts to ntfy.sh topic
+  --pota                Flag CQ POTA calls as MATCH
+  --sota                Flag CQ SOTA calls as MATCH
+  --iota                Flag CQ IOTA calls as MATCH
+  --match-state STATES  Comma-separated US state abbreviations or file
+  --hamdat DB           Path to hamdat SQLite database
+  --stats               Enable cycle stats (always shown in status bar)
+  --debug               Dump raw hex + parsed fields to the decode pane
+"""
+
+import argparse
+import json
+import re
+import select
+import socket
+import sqlite3
+import struct
+import subprocess
+import sys
+import threading
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+from prompt_toolkit import Application
+from prompt_toolkit.document import Document
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import TextArea
+
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+MAGIC      = 0xADBCCBDA
+MSG_STATUS = 1
+MSG_DECODE = 2
+MSG_REPLY  = 4
+
+CTY_DAT_URL     = "https://www.country-files.com/cty/cty.dat"
+CTY_DAT_DEFAULT = Path.home() / ".jtcon_cty.dat"
+HAMDAT_DB_DEFAULT = Path.home() / ".hamdat" / "hamdat.db"
+
+_MODE_NAMES = {
+    "~": "FT8",
+    "+": "FT4",
+}
+
+_W_MSG  = 24
+_W_CALL = 12
+_W_GRID = 6
+
+_BAR_WIDTH = 14   # characters wide for the cycle bargraph
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  cty.dat parser
+# ══════════════════════════════════════════════════════════════════════════════
+
+_OVERRIDE_RE = re.compile(r"[\(\[\{<~][^\)\]\}>~]*[\)\]\}>~]")
+
+
+def _strip_overrides(token: str) -> tuple:
+    overrides = {}
+    m = re.search(r"\((\d+)\)", token)
+    if m:
+        overrides["cqz"] = int(m.group(1))
+    m = re.search(r"\[(\d+)\]", token)
+    if m:
+        overrides["ituz"] = int(m.group(1))
+    m = re.search(r"\{([A-Z]+)\}", token)
+    if m:
+        overrides["continent"] = m.group(1)
+    clean = _OVERRIDE_RE.sub("", token).strip()
+    return clean, overrides
+
+
+class CtyDat:
+    def __init__(self):
+        self._exact:    dict = {}
+        self._prefixes: list = []
+
+    def load(self, path: Path) -> None:
+        self._parse(path.read_text(encoding="utf-8", errors="replace"))
+
+    def _parse(self, text: str) -> None:
+        for record in re.split(r"\n(?=[A-Z*])", text):
+            lines = record.strip().splitlines()
+            if not lines:
+                continue
+            parts = [p.strip() for p in lines[0].split(":")]
+            if len(parts) < 8:
+                continue
+            try:
+                base = {
+                    "country":        parts[0].lstrip("*"),
+                    "cqz":            int(parts[1]),
+                    "ituz":           int(parts[2]),
+                    "continent":      parts[3],
+                    "latitude":       float(parts[4]),
+                    "longitude":      -float(parts[5]),
+                    "primary_prefix": parts[7].rstrip(";").strip(),
+                }
+            except (ValueError, IndexError):
+                continue
+            body = " ".join(lines[1:]).split(";")[0]
+            for raw in body.split(","):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                exact = raw.startswith("=")
+                clean, overrides = _strip_overrides(raw.lstrip("="))
+                if not clean:
+                    continue
+                entry = {**base, **overrides}
+                if exact:
+                    self._exact[clean.upper()] = entry
+                else:
+                    self._prefixes.append((clean.upper(), entry))
+        self._prefixes.sort(key=lambda x: len(x[0]), reverse=True)
+
+    def lookup(self, callsign: str) -> dict | None:
+        call = callsign.upper().strip()
+        if call in self._exact:
+            return dict(self._exact[call])
+        parts = call.split("/")
+        if len(parts) == 2:
+            a, b = parts
+            portable = {"P", "M", "MM", "AM", "QRP", "QRPP", "A", "B"}
+            if b in portable:
+                call = a
+            elif a in portable:
+                call = b
+            elif len(a) <= 3 and not a[-1].isdigit():
+                r = self._prefix_match(a)
+                if r:
+                    return r
+                call = b
+            else:
+                call = a if len(a) >= len(b) else b
+        return self._prefix_match(call)
+
+    def _prefix_match(self, call: str) -> dict | None:
+        for prefix, entry in self._prefixes:
+            if call.startswith(prefix):
+                return dict(entry)
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Cycle tracker
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CycleTracker:
+    """Counts decodes per WSJT-X cycle and maintains running averages."""
+
+    _SLOT_MS = {"FT4": 7500}   # default 15000 ms for FT8
+
+    def __init__(self):
+        self.current_time_ms: int | None = None
+        self._parity: str = "even"
+        self.cycle_total: int = 0
+        self.cycle_cq:    int = 0
+        self.current_mode: str = "FT8"
+        self._sums: dict = {"even": [0, 0, 0], "odd": [0, 0, 0]}
+
+    @staticmethod
+    def _slot_parity(time_ms: int, mode: str) -> str:
+        slot_ms = CycleTracker._SLOT_MS.get(mode, 15000)
+        return "even" if (time_ms // slot_ms) % 2 == 0 else "odd"
+
+    def _close_cycle(self) -> None:
+        s = self._sums[self._parity]
+        s[0] += self.cycle_total
+        s[1] += self.cycle_cq
+        s[2] += 1
+
+    def record(self, time_ms: int, is_cq: bool, is_new: bool, mode: str) -> None:
+        if not is_new:
+            return
+        if self.current_time_ms is not None and time_ms != self.current_time_ms:
+            self._close_cycle()
+            self.cycle_total = 0
+            self.cycle_cq    = 0
+        if self.current_time_ms is None or time_ms != self.current_time_ms:
+            self.current_time_ms = time_ms
+            self._parity      = self._slot_parity(time_ms, mode)
+            self.current_mode = mode
+        self.cycle_total += 1
+        if is_cq:
+            self.cycle_cq += 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  State / hamdat helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_state_set(value: str) -> set:
+    p = Path(value)
+    if p.is_file():
+        states = set()
+        for raw in p.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            states.add(line.upper())
+        return states
+    return {s.strip().upper() for s in value.split(",") if s.strip()}
+
+
+class HamdatLookup:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        self._cache: dict = {}
+
+    def state(self, callsign: str) -> str | None:
+        call = callsign.upper().strip()
+        if call in self._cache:
+            return self._cache[call]
+        row = self._conn.execute(
+            """SELECT e.state
+               FROM license_header h
+               JOIN entity e ON e.unique_system_identifier = h.unique_system_identifier
+                   AND (e.entity_type = 'L' OR e.entity_type = '')
+               WHERE h.call_sign = ? AND h.license_status = 'A'
+               ORDER BY h.id DESC LIMIT 1""",
+            (call,),
+        ).fetchone()
+        result = (row[0] or "").strip().upper() or None if row else None
+        self._cache[call] = result
+        return result
+
+    def close(self):
+        self._conn.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pattern matching helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_regex_patterns(file_paths: list) -> list:
+    patterns = []
+    for path_str in file_paths:
+        p = Path(path_str)
+        try:
+            for i, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    patterns.append(re.compile(line, re.IGNORECASE))
+                except re.error as exc:
+                    print(f"[match] {p.name}:{i}: invalid regex {line!r}: {exc}",
+                          file=sys.stderr)
+        except OSError as exc:
+            print(f"[match] Cannot read {p}: {exc}", file=sys.stderr)
+            sys.exit(1)
+    return patterns
+
+
+def _regex_matches(value: str, patterns: list) -> list:
+    return [p.pattern for p in patterns if p.search(value)]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Alert helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_alert_msg(callsign, entity_info: dict,
+                     needed_flags: list, match_flags: list) -> str:
+    segments = [callsign or "?"]
+    if entity_info:
+        segments.append(f"{entity_info['entity']} CQ{entity_info['cq_zone']}")
+    flag_parts = []
+    if needed_flags:
+        flag_parts.append("NEEDED: " + ", ".join(needed_flags))
+    if match_flags:
+        flag_parts.append("MATCH: " + ", ".join(match_flags))
+    if flag_parts:
+        segments.append("  ".join(flag_parts))
+    return " | ".join(segments)
+
+
+def _send_alerts(msg: str, args: argparse.Namespace) -> None:
+    if args.alert_command:
+        try:
+            subprocess.Popen([args.alert_command, msg])
+        except Exception as exc:
+            print(f"[alert-command] {exc}", file=sys.stderr)
+    if args.alert_ntfy:
+        try:
+            req = urllib.request.Request(
+                f"https://ntfy.sh/{args.alert_ntfy}",
+                data=msg.encode("utf-8"),
+                method="POST",
+            )
+            req.add_header("Title", "jtcon")
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as exc:
+            print(f"[alert-ntfy] {exc}", file=sys.stderr)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  WSJT-X reply helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _encode_utf8(s: str) -> bytes:
+    if not s:
+        return struct.pack(">I", 0xFFFFFFFF)
+    b = s.encode("utf-8")
+    return struct.pack(">I", len(b)) + b
+
+
+def _send_reply(tx_sock, wsjt_addr: tuple, decoded: dict) -> None:
+    buf = bytearray()
+    buf += struct.pack(">III", MAGIC, 2, MSG_REPLY)
+    buf += _encode_utf8(decoded["id"])
+    buf += struct.pack(">I",  decoded["time_ms"])
+    buf += struct.pack(">i",  decoded["snr"])
+    buf += struct.pack(">d",  decoded["dt"])
+    buf += struct.pack(">I",  decoded["df"])
+    buf += _encode_utf8(decoded["mode"])
+    buf += _encode_utf8(decoded["message"])
+    buf += struct.pack(">B",  1 if decoded.get("low_conf") else 0)
+    buf += struct.pack(">B",  0)
+    try:
+        tx_sock.sendto(bytes(buf), wsjt_addr)
+    except OSError as exc:
+        print(f"[call] Reply send failed: {exc}", file=sys.stderr)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  cty.dat download
+# ══════════════════════════════════════════════════════════════════════════════
+
+def download_cty(path: Path) -> None:
+    req = urllib.request.Request(
+        CTY_DAT_URL, headers={"User-Agent": "jtcon/2.0"}
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        path.write_bytes(resp.read())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ADIF parser + worked-log tracker
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ADIF_FIELD_RE = re.compile(
+    r"<([A-Za-z_][A-Za-z0-9_]*)(?::[^:>]*)?:(\d+)(?::[A-Za-z])?>",
+    re.IGNORECASE,
+)
+_ADIF_EOH_RE = re.compile(r"<EOH>", re.IGNORECASE)
+_ADIF_EOR_RE = re.compile(r"<EOR>", re.IGNORECASE)
+
+
+def parse_adif(path: Path) -> list:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    eoh  = _ADIF_EOH_RE.search(text)
+    body = text[eoh.end():] if eoh else text
+    qsos: list = []
+    pos = 0
+    current: dict = {}
+    while pos < len(body):
+        m   = _ADIF_FIELD_RE.search(body, pos)
+        eor = _ADIF_EOR_RE.search(body, pos)
+        if eor and (not m or eor.start() < m.start()):
+            if current:
+                qsos.append(current)
+                current = {}
+            pos = eor.end()
+            continue
+        if not m:
+            break
+        field  = m.group(1).lower()
+        flen   = int(m.group(2))
+        vstart = m.end()
+        current[field] = body[vstart : vstart + flen].strip()
+        pos = vstart + flen
+    if current:
+        qsos.append(current)
+    return qsos
+
+
+class AdifLog:
+    def __init__(self, path: Path, cty: CtyDat, hamdat=None):
+        self.path    = path
+        self.cty     = cty
+        self._hamdat = hamdat
+        self.worked_calls:   set = set()
+        self.worked_grids:   set = set()
+        self.worked_states:  set = set()
+        self.worked_dxcc:    set = set()
+        self.worked_cqz:     set = set()
+        self.worked_country: set = set()
+        self.total_qsos = 0
+        self._load()
+
+    def _load(self) -> None:
+        qsos = parse_adif(self.path)
+        self.total_qsos = len(qsos)
+        for q in qsos:
+            call    = q.get("call", "").strip().upper()
+            cqz_raw = (q.get("cqz") or q.get("cq_zone") or "").strip()
+            country = (q.get("country") or q.get("entity") or "").strip().upper()
+            grid    = q.get("gridsquare", "").strip().upper()[:4]
+            try:
+                self.worked_cqz.add(int(cqz_raw))
+            except ValueError:
+                pass
+            if country:
+                self.worked_country.add(country)
+            if grid:
+                self.worked_grids.add(grid)
+            if call:
+                self.worked_calls.add(call)
+                info = self.cty.lookup(call)
+                if info:
+                    self.worked_dxcc.add(info["primary_prefix"].upper())
+                    if not cqz_raw:
+                        self.worked_cqz.add(info["cqz"])
+                    if not country:
+                        self.worked_country.add(info["country"].upper())
+        if self._hamdat:
+            for call in self.worked_calls:
+                state = self._hamdat.state(call)
+                if state:
+                    self.worked_states.add(state)
+
+    def needed_flags(self, entity_info: dict, args: argparse.Namespace) -> list:
+        flags = []
+        prefix  = (entity_info.get("primary_prefix") or "").upper()
+        cqz     = entity_info.get("cq_zone")
+        country = (entity_info.get("entity") or "").upper()
+        if args.need_entity and prefix and prefix not in self.worked_dxcc:
+            flags.append(f"NEW-DXCC({prefix})")
+        if args.need_cqz and isinstance(cqz, int) and cqz not in self.worked_cqz:
+            flags.append(f"NEW-CQZ({cqz})")
+        if args.need_country and country and country not in self.worked_country:
+            flags.append(f"NEW-CTRY({entity_info.get('entity', '?')})")
+        return flags
+
+    def worked_flags(self, entity_info: dict, args: argparse.Namespace) -> list:
+        flags = []
+        prefix  = (entity_info.get("primary_prefix") or "").upper()
+        cqz     = entity_info.get("cq_zone")
+        country = (entity_info.get("entity") or "").upper()
+        if args.need_entity and prefix and prefix in self.worked_dxcc:
+            flags.append("dxcc")
+        if args.need_cqz and isinstance(cqz, int) and cqz in self.worked_cqz:
+            flags.append("cqz")
+        if args.need_country and country and country in self.worked_country:
+            flags.append("country")
+        return flags
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CQ message parser
+# ══════════════════════════════════════════════════════════════════════════════
+
+_GRID_RE = re.compile(r"\b([A-R]{2}\d{2}(?:[A-X]{2})?)\b", re.IGNORECASE)
+
+_CQ_RE = re.compile(
+    r"^CQ\s+"
+    r"(?:(?P<modifier>[A-Z]{1,13})\s+)?"
+    r"(?P<callsign>(?=[A-Z0-9/]*\d)[A-Z0-9/]{3,})"
+    r"(?:\s+(?P<grid>[A-R]{2}\d{2}(?:[A-X]{2})?))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_cq_message(msg: str) -> tuple:
+    msg = msg.strip()
+    if not msg.upper().startswith("CQ"):
+        return None, None, None
+    m = _CQ_RE.match(msg)
+    if not m:
+        return None, None, None
+    modifier = (m.group("modifier") or "").upper()
+    callsign = (m.group("callsign") or "").upper()
+    grid     = (m.group("grid")     or "").upper() or None
+    return callsign or None, grid, modifier or None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Qt binary stream reader
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Reader:
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos  = 0
+
+    def _read(self, n: int) -> bytes:
+        if self.pos + n > len(self.data):
+            raise ValueError("Packet underflow")
+        chunk = self.data[self.pos : self.pos + n]
+        self.pos += n
+        return chunk
+
+    def u8(self)    -> int:   return struct.unpack(">B", self._read(1))[0]
+    def u32(self)   -> int:   return struct.unpack(">I", self._read(4))[0]
+    def u64(self)   -> int:   return struct.unpack(">Q", self._read(8))[0]
+    def i32(self)   -> int:   return struct.unpack(">i", self._read(4))[0]
+    def f64(self)   -> float: return struct.unpack(">d", self._read(8))[0]
+    def bool_(self) -> bool:  return self.u8() != 0
+
+    def utf8(self) -> str:
+        n = self.u32()
+        if n == 0xFFFFFFFF:
+            return ""
+        return self._read(n).decode("utf-8", errors="replace")
+
+
+def parse_decode_msg(r: Reader) -> dict:
+    d = {
+        "id":       r.utf8(),
+        "new":      r.bool_(),
+        "time_ms":  r.u32(),
+        "snr":      r.i32(),
+        "dt":       r.f64(),
+        "df":       r.u32(),
+        "mode":     r.utf8(),
+        "message":  r.utf8(),
+        "low_conf": r.bool_(),
+    }
+    try:
+        d["off_air"] = r.bool_()
+    except ValueError:
+        d["off_air"] = False
+    return d
+
+
+def parse_status_msg(r: Reader) -> dict:
+    """Parse a WSJT-X Status message (type 1)."""
+    d: dict = {}
+    try:
+        d["id"]           = r.utf8()
+        d["dial_freq"]    = r.u64()
+        d["mode"]         = r.utf8()
+        d["dx_call"]      = r.utf8()
+        d["report"]       = r.utf8()
+        d["tx_mode"]      = r.utf8()
+        d["tx_enabled"]   = r.bool_()
+        d["transmitting"] = r.bool_()
+        d["decoding"]     = r.bool_()
+        d["rx_df"]        = r.u32()
+        d["tx_df"]        = r.u32()
+        d["de_call"]      = r.utf8()
+        d["de_grid"]      = r.utf8()
+        d["dx_grid"]      = r.utf8()
+    except (ValueError, struct.error):
+        pass
+    return d
+
+
+def try_parse_status(data: bytes) -> dict | None:
+    """Return parsed Status dict if *data* is a WSJT-X Status message, else None."""
+    if len(data) < 12:
+        return None
+    r = Reader(data)
+    try:
+        if r.u32() != MAGIC:
+            return None
+        r.u32()  # schema — ignored
+        if r.u32() != MSG_STATUS:
+            return None
+        return parse_status_msg(r)
+    except (ValueError, struct.error):
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Packet handler — returns list of display lines (no printing)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def handle_packet(
+    data:          bytes,
+    args:          argparse.Namespace,
+    cty:           CtyDat,
+    adif_log,
+    json_fh,
+    call_patterns: list,
+    msg_patterns:  list,
+    state_set:     set,
+    hamdat,
+    cycle_tracker,
+    alerted:       set,
+    prompted:      set,
+    tx_sock,
+    wsjt_addr:     tuple,
+) -> list:
+    """
+    Decode one UDP datagram and return a list of formatted display strings.
+    Never prints directly; caller appends lines to the TUI output pane.
+    """
+    lines = []
+
+    if len(data) < 12:
+        return lines
+
+    r = Reader(data)
+    try:
+        if r.u32() != MAGIC:
+            return lines
+        schema = r.u32()
+        if r.u32() != MSG_DECODE:
+            return lines
+        decoded = parse_decode_msg(r)
+    except (ValueError, struct.error):
+        return lines
+
+    if args.debug:
+        lines.append(
+            f"[debug] schema={schema}  len={len(data)}\n"
+            f"[debug] hex: {data.hex()}\n"
+            f"[debug] id={decoded['id']!r}  new={decoded['new']}  "
+            f"time_ms={decoded['time_ms']}  snr={decoded['snr']}\n"
+            f"[debug] dt={decoded['dt']:.3f}  df={decoded['df']}  "
+            f"mode={decoded['mode']!r}  message={decoded['message']!r}\n"
+            f"[debug] low_conf={decoded['low_conf']}  off_air={decoded['off_air']}"
+        )
+
+    msg_text = decoded.get("message", "").strip()
+    is_cq    = msg_text.upper().startswith("CQ")
+    mode     = _MODE_NAMES.get(decoded["mode"], decoded["mode"]) or "?"
+
+    if cycle_tracker is not None:
+        cycle_tracker.record(decoded["time_ms"], is_cq, decoded["new"], mode)
+
+    if not is_cq and not args.raw:
+        return lines
+
+    # ── Parse CQ ─────────────────────────────────────────────────────────────
+    callsign = grid = modifier = None
+    entity_info: dict = {}
+
+    if is_cq:
+        callsign, grid, modifier = parse_cq_message(msg_text)
+        if not grid:
+            gm = _GRID_RE.search(msg_text)
+            if gm:
+                grid = gm.group(1).upper()
+        if callsign:
+            raw = cty.lookup(callsign)
+            if raw:
+                entity_info = {
+                    "primary_prefix": raw.get("primary_prefix", "?"),
+                    "entity":         raw.get("country",        "?"),
+                    "cq_zone":        raw.get("cqz",            "?"),
+                    "itu_zone":       raw.get("ituz",           "?"),
+                    "continent":      raw.get("continent",      "?"),
+                }
+
+    # ── NEEDED check ─────────────────────────────────────────────────────────
+    needed_flags: list = []
+    if adif_log and is_cq and entity_info:
+        needed_flags = adif_log.needed_flags(entity_info, args)
+    is_needed = bool(needed_flags)
+
+    # ── Pattern-match checks ─────────────────────────────────────────────────
+    match_flags: list = []
+    if call_patterns and callsign:
+        match_flags.extend(f"CALL:{m}" for m in _regex_matches(callsign, call_patterns))
+    if msg_patterns and msg_text:
+        match_flags.extend(f"MSG:{m}" for m in _regex_matches(msg_text, msg_patterns))
+    station_state: str | None = None
+    if hamdat and callsign:
+        station_state = hamdat.state(callsign)
+        if state_set and station_state and station_state in state_set:
+            match_flags.append(f"STATE:{station_state}")
+    is_match = bool(match_flags)
+
+    # ── External alerts ───────────────────────────────────────────────────────
+    if (is_needed or is_match) and (args.alert_command or args.alert_ntfy):
+        alert_key = (callsign, frozenset(needed_flags + match_flags))
+        if alert_key not in alerted:
+            alerted.add(alert_key)
+            _send_alerts(
+                _build_alert_msg(callsign, entity_info, needed_flags, match_flags),
+                args,
+            )
+
+    # ── Timestamps ────────────────────────────────────────────────────────────
+    time_ms = decoded["time_ms"]
+    hh = (time_ms // 3_600_000) % 24
+    mm = (time_ms %  3_600_000) // 60_000
+    ss = (time_ms %     60_000) //  1_000
+    period_utc = f"{hh:02d}{mm:02d}{ss:02d}z"
+    wall_utc   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    snr = decoded["snr"]
+    dt  = decoded["dt"]
+    df  = decoded["df"]
+
+    # ── Build the output line (fixed-width columns, no ANSI) ──────────────────
+    cols: list = []
+
+    if args.show_time:
+        cols.append(f"[{datetime.now().strftime('%H:%M:%S')}]")
+
+    cols.append(period_utc)
+    cols.append(f"{snr:+4d}")
+    cols.append(f"{dt:+6.1f}s")
+    cols.append(f"{df:5d}")
+    cols.append(f"{mode:<4}")
+    cols.append(f"{msg_text:<{_W_MSG}}")
+
+    call_col = callsign if (is_cq and callsign) else ""
+    cols.append(f"{call_col:<{_W_CALL}}")
+
+    grid_col = grid if grid else ""
+    cols.append(f"{grid_col:<{_W_GRID}}")
+
+    if hamdat and is_cq:
+        cols.append(f"{station_state or '':<2}")
+
+    if entity_info:
+        em1 = em2 = em3 = ""
+        if adif_log and is_cq:
+            wf = set(adif_log.worked_flags(entity_info, args))
+            if args.need_entity:
+                em1 = "+" if "dxcc"    in wf else "-"
+            if args.need_cqz:
+                em2 = "+" if "cqz"     in wf else "-"
+            if args.need_country:
+                em3 = "+" if "country" in wf else "-"
+        entity_str = (
+            f"| {entity_info['entity']:<30}"
+            f"  {em1}CQ{entity_info['cq_zone']:<3}"
+            f" {em2}ITU{entity_info['itu_zone']:<3}"
+            f" {em3}{entity_info['continent']:<2}"
+        )
+        cols.append(entity_str)
+
+    line = "  ".join(cols)
+
+    # NEEDED / MATCH prefix markers
+    if is_needed or is_match:
+        line = "*** " + line
+    lines.append(line)
+
+    if adif_log and is_cq and needed_flags:
+        lines.append(f"    NEEDED: {', '.join(needed_flags)}")
+    if match_flags:
+        lines.append(f"    MATCH:  {', '.join(match_flags)}")
+
+    # ── Interactive call prompt (--call, not used in TUI yet) ─────────────────
+    # Deferred: --call requires blocking stdin which conflicts with the TUI.
+
+    # ── JSON record ───────────────────────────────────────────────────────────
+    if json_fh and is_cq:
+        record = {
+            "wall_utc":       wall_utc,
+            "period_utc":     period_utc,
+            "snr_db":         snr,
+            "dt_s":           round(dt, 2),
+            "df_hz":          df,
+            "mode":           mode,
+            "message":        msg_text,
+            "callsign":       callsign,
+            "modifier":       modifier or None,
+            "gridsquare":     grid or None,
+            "primary_prefix": entity_info.get("primary_prefix"),
+            "entity":         entity_info.get("entity"),
+            "cq_zone":        entity_info.get("cq_zone"),
+            "itu_zone":       entity_info.get("itu_zone"),
+            "continent":      entity_info.get("continent"),
+            "needed":         needed_flags if adif_log else None,
+        }
+        json_fh.write(json.dumps(record) + "\n")
+        json_fh.flush()
+
+    return lines
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Column header line
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _header_line(args: argparse.Namespace, has_adif: bool = False) -> str:
+    parts = []
+    if args.show_time:
+        parts.append(f"{'[time]':<10}")
+    parts.append(f"{'HHMMSSZ':<7}")
+    parts.append(f"{'dB':>4}")
+    parts.append(f"{'dt(s)':>7}")
+    parts.append(f"{'Hz':>5}")
+    parts.append(f"{'mode':<4}")
+    parts.append(f"{'message':<{_W_MSG}}")
+    parts.append(f"{'callsign':<{_W_CALL}}")
+    parts.append(f"{'grid':<{_W_GRID}}")
+    if args.match_state:
+        parts.append(f"{'ST':<2}")
+    w = 1 if has_adif and args.need_entity  else 0
+    x = 1 if has_adif and args.need_cqz     else 0
+    y = 1 if has_adif and args.need_country  else 0
+    parts.append(f"| {'entity':<30}  {'':{w}}CQz   {'':{x}}ITUz   {'':{y}}ct")
+    header = "  ".join(parts)
+    sep    = "─" * min(len(header), 160)
+    return header + "\n" + sep
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Cycle bargraph helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _bargraph(cycle_tracker: CycleTracker | None) -> str:
+    """Return a bargraph string showing position within the current TX cycle."""
+    now = datetime.now(timezone.utc)
+    ms = (
+        now.hour   * 3_600_000
+        + now.minute *    60_000
+        + now.second *     1_000
+        + now.microsecond // 1_000
+    )
+    mode = cycle_tracker.current_mode if cycle_tracker else "FT8"
+    cycle_ms = 7500 if mode == "FT4" else 15000
+    fraction = (ms % cycle_ms) / cycle_ms
+    filled   = int(fraction * _BAR_WIDTH)
+    return "█" * filled + "░" * (_BAR_WIDTH - filled)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TUI Application
+# ══════════════════════════════════════════════════════════════════════════════
+
+class JtconTUI:
+    """prompt_toolkit full-screen TUI for jtcon."""
+
+    def __init__(
+        self,
+        args,
+        cty,
+        adif_log,
+        json_fh,
+        call_patterns,
+        msg_patterns,
+        state_set,
+        hamdat,
+        cycle_tracker,
+        alerted,
+        prompted,
+        sock,
+        tx_sock,
+    ):
+        self.args          = args
+        self.cty           = cty
+        self.adif_log      = adif_log
+        self.json_fh       = json_fh
+        self.call_patterns = call_patterns
+        self.msg_patterns  = msg_patterns
+        self.state_set     = state_set
+        self.hamdat        = hamdat
+        self.cycle_tracker = cycle_tracker
+        self.alerted       = alerted
+        self.prompted      = prompted
+        self.sock          = sock
+        self.tx_sock       = tx_sock
+
+        self._running      = True
+        self._output_lock  = threading.Lock()
+        self._output_text  = ""
+        self._transmitting = False   # updated from WSJT-X Status messages
+
+        self._adif_path  = Path(args.adif) if args.adif else None
+        self._adif_mtime = self._adif_path.stat().st_mtime if self._adif_path else None
+
+        # ── Widgets ──────────────────────────────────────────────────────────
+        self.output_area = TextArea(
+            text=_header_line(args, has_adif=adif_log is not None) + "\n",
+            read_only=True,
+            scrollbar=True,
+            wrap_lines=False,
+            focusable=True,
+            style="class:output",
+        )
+        self.cmd_area = TextArea(
+            height=1,
+            multiline=False,
+            wrap_lines=False,
+            prompt="CMD> ",
+            accept_handler=self._handle_command,
+            style="class:cmd",
+        )
+        self._output_text = self.output_area.text
+
+        self._app = self._build_app()
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+
+    def _build_app(self) -> Application:
+        separator = Window(height=1, char="─", style="class:separator")
+        status_window = Window(
+            content=FormattedTextControl(self._get_status_text),
+            height=1,
+            style="class:status",
+        )
+
+        layout = Layout(
+            HSplit([
+                self.output_area,
+                separator,
+                self.cmd_area,
+                status_window,
+            ]),
+            focused_element=self.cmd_area,
+        )
+
+        kb = KeyBindings()
+
+        @kb.add("c-c")
+        @kb.add("c-q")
+        def _quit(event):
+            self._running = False
+            event.app.exit()
+
+        @kb.add("tab")
+        def _toggle_focus(event):
+            app = event.app
+            if app.layout.has_focus(self.cmd_area):
+                app.layout.focus(self.output_area)
+            else:
+                app.layout.focus(self.cmd_area)
+
+        style = Style.from_dict({
+            "output":     "",
+            "cmd":        "",
+            "separator":  "fg:ansibrightblack",
+            "status":     "reverse",
+            "status.tx":  "bg:ansired fg:ansiwhite bold noreverse",
+            "status.rx":  "fg:ansibrightgreen noreverse",
+        })
+
+        return Application(
+            layout=layout,
+            key_bindings=kb,
+            style=style,
+            full_screen=True,
+            refresh_interval=0.25,   # redraws status bar ~4×/s for smooth bargraph
+        )
+
+    # ── Status line ───────────────────────────────────────────────────────────
+
+    def _get_status_text(self):
+        bar = _bargraph(self.cycle_tracker)
+        ct  = self.cycle_tracker
+
+        if ct and ct.current_time_ms is not None:
+            parity = ct._parity
+            mode   = ct.current_mode
+            ev, od = ct._sums["even"], ct._sums["odd"]
+            all_n   = ev[2] + od[2]
+            avg_dec = (ev[0] + od[0]) / all_n if all_n else 0.0
+            avg_cq  = (ev[1] + od[1]) / all_n if all_n else 0.0
+            ev_d = ev[0] / ev[2] if ev[2] else 0.0
+            od_d = od[0] / od[2] if od[2] else 0.0
+            ev_c = ev[1] / ev[2] if ev[2] else 0.0
+            od_c = od[1] / od[2] if od[2] else 0.0
+            stats = (
+                f"  {mode}"
+                f"  dec={ct.cycle_total} cq={ct.cycle_cq}"
+                f"  avg dec={avg_dec:.1f} cq={avg_cq:.1f}"
+                f"  even dec={ev_d:.1f} cq={ev_c:.1f}"
+                f"  odd dec={od_d:.1f} cq={od_c:.1f}"
+            )
+        else:
+            parity = "even"
+            stats  = "  (waiting for decodes…)"
+
+        # Return a list of (style, text) tuples so the TX badge can be coloured.
+        if self._transmitting:
+            trx = ("class:status.tx", " TX ")
+        else:
+            trx = ("class:status.rx", " RX ")
+
+        return [
+            trx,
+            ("class:status", f" [{bar}] {parity}{stats} "),
+        ]
+
+    # ── Command handler ───────────────────────────────────────────────────────
+
+    def _handle_command(self, buffer) -> None:
+        cmd = buffer.text.strip().lower()
+        if cmd in ("quit", "exit", "q"):
+            self._running = False
+            self._app.exit()
+        elif cmd == "clear":
+            header = _header_line(self.args, has_adif=self.adif_log is not None) + "\n"
+            with self._output_lock:
+                self._output_text = header
+            self.output_area.text = header
+        elif cmd:
+            self._append_line(f"[cmd] Unknown command: {cmd!r}  (try: quit, clear)")
+
+    # ── Output append (thread-safe) ───────────────────────────────────────────
+
+    def _append_line(self, text: str) -> None:
+        with self._output_lock:
+            self._output_text += text + "\n"
+            new_text = self._output_text
+        # TextArea.text setter calls set_document with cursor at end → auto-scroll
+        self.output_area.text = new_text
+        self._app.invalidate()
+
+    # ── UDP receive loop (runs in background thread) ──────────────────────────
+
+    def _udp_loop(self) -> None:
+        while self._running:
+            try:
+                ready, _, _ = select.select([self.sock], [], [], 0.2)
+                if not ready:
+                    continue
+                data, wsjt_addr = self.sock.recvfrom(65535)
+            except OSError:
+                break
+
+            # Hot-reload ADIF on file change
+            if self._adif_path:
+                try:
+                    mtime = self._adif_path.stat().st_mtime
+                    if mtime != self._adif_mtime:
+                        self._adif_mtime = mtime
+                        self.adif_log = AdifLog(
+                            self._adif_path, self.cty, self.hamdat
+                        )
+                        self._append_line("[adif] File changed — reloaded.")
+                except OSError:
+                    pass
+
+            # Intercept Status messages to track TX/RX state.
+            status = try_parse_status(data)
+            if status is not None:
+                self._transmitting = status.get("transmitting", False)
+                self._app.invalidate()
+                continue
+
+            try:
+                out_lines = handle_packet(
+                    data, self.args, self.cty, self.adif_log, self.json_fh,
+                    self.call_patterns, self.msg_patterns, self.state_set,
+                    self.hamdat, self.cycle_tracker, self.alerted, self.prompted,
+                    self.tx_sock, wsjt_addr,
+                )
+            except Exception as exc:
+                out_lines = [f"[error] packet handler: {exc}"]
+
+            for line in out_lines:
+                self._append_line(line)
+
+    # ── Entry point ───────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        t = threading.Thread(target=self._udp_loop, daemon=True)
+        t.start()
+        try:
+            self._app.run()
+        finally:
+            self._running = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Monitor WSJT-X CQ calls via UDP with a prompt_toolkit TUI.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=2237)
+    parser.add_argument("--show-time", action="store_true")
+    parser.add_argument("--raw", action="store_true")
+    parser.add_argument("--save", metavar="FILE")
+    parser.add_argument("--cty", metavar="PATH", default=str(CTY_DAT_DEFAULT))
+    parser.add_argument("--adif", metavar="FILE")
+    parser.add_argument("--no-need-entity",  dest="need_entity",  action="store_false", default=True)
+    parser.add_argument("--no-need-cqz",     dest="need_cqz",     action="store_false", default=True)
+    parser.add_argument("--no-need-country", dest="need_country", action="store_false", default=True)
+    parser.add_argument("--match-calls",   metavar="FILE", nargs="+")
+    parser.add_argument("--match-message", metavar="FILE", nargs="+")
+    parser.add_argument("--pota",  action="store_true")
+    parser.add_argument("--sota",  action="store_true")
+    parser.add_argument("--iota",  action="store_true")
+    parser.add_argument("--match-state", metavar="STATES")
+    parser.add_argument("--hamdat", metavar="DB", default=str(HAMDAT_DB_DEFAULT))
+    parser.add_argument("--alert-command", metavar="SCRIPT")
+    parser.add_argument("--alert-ntfy",    metavar="TOPIC")
+    parser.add_argument("--stats", action="store_true",
+                        help="Enable cycle stats (always visible in TUI status bar)")
+    parser.add_argument("--debug", action="store_true")
+
+    # --color is accepted but ignored in TUI mode (prompt_toolkit handles presentation)
+    parser.add_argument("--color", action="store_true", help=argparse.SUPPRESS)
+
+    args = parser.parse_args()
+    args.color = False   # TUI mode: no ANSI escape codes in buffer text
+
+    # Always track cycle stats in TUI (status bar needs them)
+    args.stats = True
+
+    # ── cty.dat ───────────────────────────────────────────────────────────────
+    cty_path = Path(args.cty)
+    if not cty_path.exists():
+        print(f"[cty.dat] Downloading from {CTY_DAT_URL} …", file=sys.stderr)
+        try:
+            download_cty(cty_path)
+            print(f"[cty.dat] Saved to {cty_path}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[cty.dat] Download failed: {exc}", file=sys.stderr)
+
+    cty = CtyDat()
+    if cty_path.exists():
+        try:
+            cty.load(cty_path)
+        except Exception as exc:
+            print(f"[cty.dat] Load error: {exc}", file=sys.stderr)
+
+    # ── hamdat ────────────────────────────────────────────────────────────────
+    state_set: set = set()
+    hamdat = None
+    if args.match_state:
+        try:
+            state_set = load_state_set(args.match_state)
+        except OSError as exc:
+            print(f"[match-state] {exc}", file=sys.stderr)
+            sys.exit(1)
+        db_path = Path(args.hamdat)
+        if not db_path.exists():
+            print(f"[match-state] hamdat database not found: {db_path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            hamdat = HamdatLookup(db_path)
+        except Exception as exc:
+            print(f"[match-state] Failed to open hamdat DB: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    # ── ADIF log ──────────────────────────────────────────────────────────────
+    adif_log = None
+    if args.adif:
+        adif_path = Path(args.adif)
+        if not adif_path.exists():
+            print(f"[adif] File not found: {adif_path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            adif_log = AdifLog(adif_path, cty, hamdat)
+        except Exception as exc:
+            print(f"[adif] Failed to load: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    # ── Pattern files ─────────────────────────────────────────────────────────
+    call_patterns: list = []
+    msg_patterns:  list = []
+    if args.match_calls:
+        call_patterns = load_regex_patterns(args.match_calls)
+    if args.match_message:
+        msg_patterns = load_regex_patterns(args.match_message)
+    for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
+        if flag:
+            msg_patterns.append(re.compile(rf"\b{keyword}\b", re.IGNORECASE))
+
+    # ── JSON output ───────────────────────────────────────────────────────────
+    json_fh = None
+    if args.save:
+        try:
+            json_fh = open(args.save, "a", encoding="utf-8")
+        except OSError as exc:
+            print(f"[save] Cannot open {args.save}: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    # ── UDP sockets ───────────────────────────────────────────────────────────
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except AttributeError:
+        pass
+    sock.bind((args.host, args.port))
+
+    tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+
+    cycle_tracker = CycleTracker()
+    alerted:  set = set()
+    prompted: set = set()
+
+    # ── Launch TUI ────────────────────────────────────────────────────────────
+    tui = JtconTUI(
+        args, cty, adif_log, json_fh,
+        call_patterns, msg_patterns, state_set, hamdat,
+        cycle_tracker, alerted, prompted,
+        sock, tx_sock,
+    )
+    try:
+        tui.run()
+    finally:
+        sock.close()
+        tx_sock.close()
+        if json_fh:
+            json_fh.close()
+        if hamdat:
+            hamdat.close()
+
+
+if __name__ == "__main__":
+    main()
