@@ -351,7 +351,8 @@ class HamdatLookup:
 #  Pattern matching helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_regex_patterns(file_paths: list) -> list:
+def load_regex_patterns(file_paths: list, log=None) -> list:
+    _log = log or (lambda m: print(m, file=sys.stderr))
     patterns = []
     for path_str in file_paths:
         p = Path(path_str)
@@ -363,10 +364,9 @@ def load_regex_patterns(file_paths: list) -> list:
                 try:
                     patterns.append(re.compile(line, re.IGNORECASE))
                 except re.error as exc:
-                    print(f"[match] {p.name}:{i}: invalid regex {line!r}: {exc}",
-                          file=sys.stderr)
+                    _log(f"[match] {p.name}:{i}: invalid regex {line!r}: {exc}")
         except OSError as exc:
-            print(f"[match] Cannot read {p}: {exc}", file=sys.stderr)
+            _log(f"[match] Cannot read {p}: {exc}")
             sys.exit(1)
     return patterns
 
@@ -394,12 +394,13 @@ def _build_alert_msg(callsign, entity_info: dict,
     return " | ".join(segments)
 
 
-def _send_alerts(msg: str, args: argparse.Namespace) -> None:
+def _send_alerts(msg: str, args: argparse.Namespace, log=None) -> None:
+    _log = log or (lambda m: print(m, file=sys.stderr))
     if args.alert_command:
         try:
             subprocess.Popen([args.alert_command, msg])
         except Exception as exc:
-            print(f"[alert-command] {exc}", file=sys.stderr)
+            _log(f"[alert-command] {exc}")
     if args.alert_ntfy:
         try:
             req = urllib.request.Request(
@@ -410,7 +411,7 @@ def _send_alerts(msg: str, args: argparse.Namespace) -> None:
             req.add_header("Title", "jtcon")
             urllib.request.urlopen(req, timeout=10)
         except Exception as exc:
-            print(f"[alert-ntfy] {exc}", file=sys.stderr)
+            _log(f"[alert-ntfy] {exc}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -424,7 +425,8 @@ def _encode_utf8(s: str) -> bytes:
     return struct.pack(">I", len(b)) + b
 
 
-def _send_reply(tx_sock, wsjt_addr: tuple, decoded: dict) -> None:
+def _send_reply(tx_sock, wsjt_addr: tuple, decoded: dict, log=None) -> None:
+    _log = log or (lambda m: print(m, file=sys.stderr))
     buf = bytearray()
     buf += struct.pack(">III", MAGIC, 2, MSG_REPLY)
     buf += _encode_utf8(decoded["id"])
@@ -439,7 +441,7 @@ def _send_reply(tx_sock, wsjt_addr: tuple, decoded: dict) -> None:
     try:
         tx_sock.sendto(bytes(buf), wsjt_addr)
     except OSError as exc:
-        print(f"[call] Reply send failed: {exc}", file=sys.stderr)
+        _log(f"[call] Reply send failed: {exc}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -495,11 +497,12 @@ def parse_adif(path: Path) -> list:
 
 
 class AdifLog:
-    def __init__(self, paths: list[Path], cty: CtyDat, hamdat=None):
+    def __init__(self, paths: list[Path], cty: CtyDat, hamdat=None, log=None):
         # Accept a single Path for convenience, normalise to list.
         self.paths   = [paths] if isinstance(paths, Path) else list(paths)
         self.cty     = cty
         self._hamdat = hamdat
+        self._log    = log or (lambda m: print(m, file=sys.stderr))
         self.worked_calls:   set = set()
         self.worked_grids:   set = set()
         self.worked_states:  set = set()
@@ -522,7 +525,7 @@ class AdifLog:
             try:
                 qsos = parse_adif(path)
             except Exception as exc:
-                print(f"[adif] Cannot read {path.name}: {exc}", file=sys.stderr)
+                self._log(f"[adif] Cannot read {path.name}: {exc}")
                 continue
             self.total_qsos += len(qsos)
             for q in qsos:
@@ -717,6 +720,7 @@ def handle_packet(
     tx_sock,
     wsjt_addr:     tuple,
     out_meta:      dict | None = None,
+    log=None,
 ) -> list:
     """
     Decode one UDP datagram and return a list of formatted display strings.
@@ -813,6 +817,7 @@ def handle_packet(
             _send_alerts(
                 _build_alert_msg(callsign, entity_info, needed_flags, match_flags),
                 args,
+                log=log,
             )
 
     # ── Timestamps ────────────────────────────────────────────────────────────
@@ -1182,7 +1187,7 @@ class JtconTUI:
             return
         decoded, wsjt_addr = entry
         try:
-            _send_reply(self.tx_sock, wsjt_addr, decoded)
+            _send_reply(self.tx_sock, wsjt_addr, decoded, log=self._append_line)
             self._append_line(
                 f"[cmd] ► Reply sent to {callsign}"
                 f"  msg={decoded.get('message', '?')!r}"
@@ -1230,7 +1235,8 @@ class JtconTUI:
                     )
                     if changed:
                         self.adif_log = AdifLog(
-                            self.adif_log.paths, self.cty, self.hamdat
+                            self.adif_log.paths, self.cty, self.hamdat,
+                            log=self._append_line,
                         )
                         self._adif_mtimes = {
                             p: p.stat().st_mtime for p in self.adif_log.paths
@@ -1256,6 +1262,7 @@ class JtconTUI:
                     self.call_patterns, self.msg_patterns, self.state_set,
                     self.hamdat, self.cycle_tracker, self.alerted, self.prompted,
                     self.tx_sock, wsjt_addr, meta,
+                    log=self._append_line,
                 )
             except Exception as exc:
                 out_lines = [f"[error] packet handler: {exc}"]
@@ -1351,7 +1358,7 @@ class JtconTUI:
 
         if adif_paths:
             try:
-                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat)
+                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat, log=log)
                 for p in adif_paths:
                     log(f"[adif] Loaded: {p.name}")
                 al = self.adif_log
@@ -1371,11 +1378,11 @@ class JtconTUI:
 
         # ── Pattern files ─────────────────────────────────────────────────────
         if args.match_calls:
-            self.call_patterns = load_regex_patterns(args.match_calls)
+            self.call_patterns = load_regex_patterns(args.match_calls, log=log)
             log(f"[match-calls] {len(self.call_patterns)} pattern(s)"
                 f" from {', '.join(args.match_calls)}")
         if args.match_message:
-            self.msg_patterns = load_regex_patterns(args.match_message)
+            self.msg_patterns = load_regex_patterns(args.match_message, log=log)
             log(f"[match-message] {len(self.msg_patterns)} pattern(s)"
                 f" from {', '.join(args.match_message)}")
         for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
