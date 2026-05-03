@@ -1363,21 +1363,31 @@ def main() -> None:
     # ── hamdat ────────────────────────────────────────────────────────────────
     state_set: set = set()
     hamdat = None
+
     if args.match_state:
         try:
             state_set = load_state_set(args.match_state)
         except OSError as exc:
             print(f"[match-state] {exc}", file=sys.stderr)
             sys.exit(1)
-        db_path = Path(args.hamdat)
-        if not db_path.exists():
-            print(f"[match-state] hamdat database not found: {db_path}", file=sys.stderr)
-            sys.exit(1)
+
+    # Open the hamdat DB whenever it is available — not just with --match-state.
+    # This enables the ST column and ADIF state tracking even without a state filter.
+    db_path = Path(args.hamdat).expanduser()
+    if db_path.exists():
         try:
             hamdat = HamdatLookup(db_path)
+            label = "Auto-detected" if args.hamdat == str(HAMDAT_DB_DEFAULT) else "Using"
+            print(f"[hamdat] {label}: {db_path}", file=sys.stderr)
         except Exception as exc:
-            print(f"[match-state] Failed to open hamdat DB: {exc}", file=sys.stderr)
-            sys.exit(1)
+            if args.match_state:
+                print(f"[hamdat] Failed to open {db_path}: {exc}", file=sys.stderr)
+                sys.exit(1)
+            print(f"[hamdat] Warning: found but could not open {db_path}: {exc}",
+                  file=sys.stderr)
+    elif args.match_state:
+        print(f"[match-state] hamdat database not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
 
     # ── ADIF log ──────────────────────────────────────────────────────────────
     adif_paths: list[Path] = []
