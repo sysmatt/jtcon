@@ -363,6 +363,7 @@ class HamdatLookup:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_regex_patterns(file_paths: list, log=None) -> list:
+    """Return a list of (compiled_pattern, source_filename) tuples."""
     _log = log or (lambda m: print(m, file=sys.stderr))
     patterns = []
     for path_str in file_paths:
@@ -373,7 +374,7 @@ def load_regex_patterns(file_paths: list, log=None) -> list:
                 if not line or line.startswith("#"):
                     continue
                 try:
-                    patterns.append(re.compile(line, re.IGNORECASE))
+                    patterns.append((re.compile(line, re.IGNORECASE), p.name))
                 except re.error as exc:
                     _log(f"[match] {p.name}:{i}: invalid regex {line!r}: {exc}")
         except OSError as exc:
@@ -383,7 +384,12 @@ def load_regex_patterns(file_paths: list, log=None) -> list:
 
 
 def _regex_matches(value: str, patterns: list) -> list:
-    return [p.pattern for p in patterns if p.search(value)]
+    """Return label strings for each (pattern, source) tuple that matches value."""
+    results = []
+    for pat, src in patterns:
+        if pat.search(value):
+            results.append(f"{pat.pattern} [{src}]" if src else pat.pattern)
+    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1567,7 +1573,7 @@ class JtconTUI:
                 f" from {', '.join(args.match_message)}")
         for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
             if flag:
-                self.msg_patterns.append(re.compile(rf"\b{keyword}\b", re.IGNORECASE))
+                self.msg_patterns.append((re.compile(rf"\b{keyword}\b", re.IGNORECASE), None))
                 log(f"[match-message] {keyword} pattern active")
 
         # ── JSON output ───────────────────────────────────────────────────────
