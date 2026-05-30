@@ -27,6 +27,10 @@ Commands (type in CMD> line, press Enter)
 -----------------------------------------
   quit / exit / q    Exit the program
   clear              Clear the decode output
+  list (or l/li/lis) Show all NEEDED/MATCH entries from the rolling buffer
+  00-99              Reply to the CQ at that rolling-buffer index
+  <CALLSIGN>         Search rolling buffer and reply to the most recent CQ
+                     from that callsign
 
 Dependencies
 ------------
@@ -59,10 +63,16 @@ Options
   --no-need-entity      Disable DXCC-entity NEEDED check
   --no-need-cqz         Disable CQ-zone NEEDED check
   --no-need-country     Disable country-name NEEDED check
+  --qsl-only            Require LoTW confirmation for NEEDED checks; ❓ icon
+                        marks worked-but-unconfirmed entities
+  --worked-lag-days N   Suppress NEEDED/MATCH for a callsign worked within N days
+                        (default 0 = suppress today; -1 = disable suppression)
   --match-calls FILE    File(s) of callsign regex patterns
   --match-message FILE  File(s) of decoded-message regex patterns
   --alert-command SCRIPT  Script to exec on NEEDED/MATCH events
   --alert-ntfy TOPIC    POST NEEDED/MATCH alerts to ntfy.sh topic
+  --adif-change-script SCRIPT  Script to exec when ADIF log file(s) are reloaded
+  --proxy PORT[,...]    Forward received packets to additional UDP ports on localhost
   --pota                Flag CQ POTA calls as MATCH
   --sota                Flag CQ SOTA calls as MATCH
   --iota                Flag CQ IOTA calls as MATCH
@@ -83,7 +93,7 @@ import subprocess
 import sys
 import threading
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from prompt_toolkit import Application
@@ -142,6 +152,7 @@ _MODE_NAMES = {
 _W_MSG  = 24
 _W_CALL = 12
 _W_GRID = 6
+_W_DAYS = 5    # days-since-last-worked column width
 
 # ANSI colour codes used in the decode output pane.
 _RST  = "\033[0m"
@@ -497,18 +508,26 @@ def parse_adif(path: Path) -> list:
 
 
 class AdifLog:
-    def __init__(self, paths: list[Path], cty: CtyDat, hamdat=None, log=None):
-        # Accept a single Path for convenience, normalise to list.
-        self.paths   = [paths] if isinstance(paths, Path) else list(paths)
-        self.cty     = cty
-        self._hamdat = hamdat
-        self._log    = log or (lambda m: print(m, file=sys.stderr))
-        self.worked_calls:   set = set()
-        self.worked_grids:   set = set()
-        self.worked_states:  set = set()
-        self.worked_dxcc:    set = set()
-        self.worked_cqz:     set = set()
-        self.worked_country: set = set()
+    def __init__(self, paths: list[Path], cty: CtyDat, hamdat=None,
+                 qsl_only: bool = False, log=None):
+        self.paths     = [paths] if isinstance(paths, Path) else list(paths)
+        self.cty       = cty
+        self._hamdat   = hamdat
+        self._qsl_only = qsl_only
+        self._log      = log or (lambda m: print(m, file=sys.stderr))
+
+        self.worked_calls:        set  = set()
+        self.worked_grids:        set  = set()
+        self.worked_states:       set  = set()
+        self.worked_dxcc:         set  = set()   # QSL-filtered when qsl_only
+        self.worked_cqz:          set  = set()   # QSL-filtered when qsl_only
+        self.worked_country:      set  = set()   # QSL-filtered when qsl_only
+        self.worked_dxcc_all:     set  = set()   # all QSOs regardless of QSL
+        self.worked_cqz_all:      set  = set()
+        self.worked_country_all:  set  = set()
+        self.qrz_confirmed_calls: set  = set()   # app_qrzlog_status=C
+        self.lotw_qsl_rcvd_calls: set  = set()   # lotw_qsl_rcvd=Y
+        self.last_worked:         dict = {}       # call -> most recent date worked
         self.total_qsos = 0
         self._load()
 
@@ -519,6 +538,12 @@ class AdifLog:
         self.worked_dxcc.clear()
         self.worked_cqz.clear()
         self.worked_country.clear()
+        self.worked_dxcc_all.clear()
+        self.worked_cqz_all.clear()
+        self.worked_country_all.clear()
+        self.qrz_confirmed_calls.clear()
+        self.lotw_qsl_rcvd_calls.clear()
+        self.last_worked.clear()
         self.total_qsos = 0
 
         for path in self.paths:
@@ -533,22 +558,53 @@ class AdifLog:
                 cqz_raw = (q.get("cqz") or q.get("cq_zone") or "").strip()
                 country = (q.get("country") or q.get("entity") or "").strip().upper()
                 grid    = q.get("gridsquare", "").strip().upper()[:4]
+
+                qrz_status = q.get("app_qrzlog_status", "").strip().upper()
+                lotw_rcvd  = q.get("lotw_qsl_rcvd",    "").strip().upper()
+                if call and qrz_status == "C":
+                    self.qrz_confirmed_calls.add(call)
+                if call and lotw_rcvd == "Y":
+                    self.lotw_qsl_rcvd_calls.add(call)
+
+                qso_date_str = q.get("qso_date", "").strip()
+                if call and len(qso_date_str) == 8:
+                    try:
+                        qso_date = datetime.strptime(qso_date_str, "%Y%m%d").date()
+                        existing = self.last_worked.get(call)
+                        if existing is None or qso_date > existing:
+                            self.last_worked[call] = qso_date
+                    except ValueError:
+                        pass
+
+                counts_as_worked = (not self._qsl_only) or (lotw_rcvd == "Y")
+
                 try:
-                    self.worked_cqz.add(int(cqz_raw))
+                    cqz_int = int(cqz_raw)
+                    self.worked_cqz_all.add(cqz_int)
+                    if counts_as_worked:
+                        self.worked_cqz.add(cqz_int)
                 except ValueError:
                     pass
                 if country:
-                    self.worked_country.add(country)
+                    self.worked_country_all.add(country)
+                    if counts_as_worked:
+                        self.worked_country.add(country)
                 if grid:
                     self.worked_grids.add(grid)
                 if call:
                     self.worked_calls.add(call)
                     info = self.cty.lookup(call)
                     if info:
-                        self.worked_dxcc.add(info["primary_prefix"].upper())
+                        self.worked_dxcc_all.add(info["primary_prefix"].upper())
+                        if counts_as_worked:
+                            self.worked_dxcc.add(info["primary_prefix"].upper())
                         if not cqz_raw:
-                            self.worked_cqz.add(info["cqz"])
-                        if not country:
+                            self.worked_cqz_all.add(info["cqz"])
+                            if counts_as_worked:
+                                self.worked_cqz.add(info["cqz"])
+                        # Always use cty.dat country name for consistency with decode-time lookups
+                        self.worked_country_all.add(info["country"].upper())
+                        if counts_as_worked:
                             self.worked_country.add(info["country"].upper())
 
         if self._hamdat:
@@ -580,6 +636,20 @@ class AdifLog:
         if args.need_cqz and isinstance(cqz, int) and cqz in self.worked_cqz:
             flags.append("cqz")
         if args.need_country and country and country in self.worked_country:
+            flags.append("country")
+        return flags
+
+    def worked_flags_all(self, entity_info: dict, args: argparse.Namespace) -> list:
+        """Return which categories were worked in any QSO (ignores qsl_only filter)."""
+        flags = []
+        prefix  = (entity_info.get("primary_prefix") or "").upper()
+        cqz     = entity_info.get("cq_zone")
+        country = (entity_info.get("entity") or "").upper()
+        if args.need_entity and prefix and prefix in self.worked_dxcc_all:
+            flags.append("dxcc")
+        if args.need_cqz and isinstance(cqz, int) and cqz in self.worked_cqz_all:
+            flags.append("cqz")
+        if args.need_country and country and country in self.worked_country_all:
             flags.append("country")
         return flags
 
@@ -809,6 +879,15 @@ def handle_packet(
             match_flags.append(f"STATE:{station_state}")
     is_match = bool(match_flags)
 
+    # ── Worked-lag-days suppression ───────────────────────────────────────────
+    if adif_log and callsign and args.worked_lag_days >= 0 and callsign in adif_log.last_worked:
+        elapsed = (datetime.now(timezone.utc).date() - adif_log.last_worked[callsign]).days
+        if elapsed <= args.worked_lag_days:
+            needed_flags = []
+            match_flags  = []
+    is_needed = bool(needed_flags)
+    is_match  = bool(match_flags)
+
     # ── External alerts ───────────────────────────────────────────────────────
     if (is_needed or is_match) and (args.alert_command or args.alert_ntfy):
         alert_key = (callsign, frozenset(needed_flags + match_flags))
@@ -861,6 +940,13 @@ def handle_packet(
     grid_worked = bool(adif_log and grid_col and grid_col[:4] in adif_log.worked_grids)
     cols.append(_col(grid_str, _GRN, color) if (grid_worked and grid_col) else grid_str)
 
+    if adif_log:
+        days_str = " " * _W_DAYS
+        if call_col and call_col in adif_log.last_worked:
+            delta    = (datetime.now(timezone.utc).date() - adif_log.last_worked[call_col]).days
+            days_str = f"{delta:>4d}d"
+        cols.append(days_str)
+
     if hamdat and is_cq:
         st_val    = station_state or ""
         st_str    = f"{st_val:<2}"
@@ -870,13 +956,14 @@ def handle_packet(
     if entity_info:
         em1 = em2 = em3 = ""
         if adif_log and is_cq:
-            wf = set(adif_log.worked_flags(entity_info, args))
+            wf     = set(adif_log.worked_flags(entity_info, args))
+            wf_all = set(adif_log.worked_flags_all(entity_info, args))
             if args.need_entity:
-                em1 = "✅" if "dxcc"    in wf else "❌"
+                em1 = "✅" if "dxcc"    in wf else ("❓" if "dxcc"    in wf_all else "❌")
             if args.need_cqz:
-                em2 = "✅" if "cqz"     in wf else "❌"
+                em2 = "✅" if "cqz"     in wf else ("❓" if "cqz"     in wf_all else "❌")
             if args.need_country:
-                em3 = "✅" if "country" in wf else "❌"
+                em3 = "✅" if "country" in wf else ("❓" if "country" in wf_all else "❌")
         entity_str = (
             f"| {entity_info['entity']:<30}"
             f"  {em1}CQ{entity_info['cq_zone']:<3}"
@@ -884,6 +971,10 @@ def handle_packet(
             f" {em3}{entity_info['continent']:<2}"
         )
         cols.append(_col(entity_str, _CYN, color))
+
+    if adif_log:
+        cols.append("⭐" if (call_col and call_col in adif_log.qrz_confirmed_calls) else "  ")
+        cols.append("🌎" if (call_col and call_col in adif_log.lotw_qsl_rcvd_calls) else "  ")
 
     line = "  ".join(cols)
     lines.append(line)
@@ -923,11 +1014,14 @@ def handle_packet(
         json_fh.flush()
 
     if out_meta is not None:
-        out_meta['decoded']   = decoded
-        out_meta['callsign']  = callsign
-        out_meta['is_needed'] = is_needed
-        out_meta['wsjt_addr'] = wsjt_addr
-        out_meta['bell']      = is_needed or is_match
+        out_meta['decoded']      = decoded
+        out_meta['callsign']     = callsign
+        out_meta['is_cq']        = is_cq
+        out_meta['needed_flags'] = needed_flags
+        out_meta['match_flags']  = match_flags
+        out_meta['is_needed']    = is_needed
+        out_meta['wsjt_addr']    = wsjt_addr
+        out_meta['bell']         = is_needed or is_match
 
     return lines
 
@@ -937,7 +1031,7 @@ def handle_packet(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _header_line(args: argparse.Namespace, has_adif: bool = False) -> str:
-    parts = []
+    parts = ["##"]
     if args.show_time:
         parts.append(f"{'[time]':<10}")
     parts.append(f"{'HHMMSSZ':<7}")
@@ -948,12 +1042,17 @@ def _header_line(args: argparse.Namespace, has_adif: bool = False) -> str:
     parts.append(f"{'message':<{_W_MSG}}")
     parts.append(f"{'callsign':<{_W_CALL}}")
     parts.append(f"{'grid':<{_W_GRID}}")
+    if has_adif:
+        parts.append(f"{'days':>{_W_DAYS}}")
     if args.match_state:
         parts.append(f"{'ST':<2}")
-    w = 1 if has_adif and args.need_entity  else 0
-    x = 1 if has_adif and args.need_cqz     else 0
-    y = 1 if has_adif and args.need_country  else 0
+    w = 2 if has_adif and args.need_entity  else 0
+    x = 2 if has_adif and args.need_cqz     else 0
+    y = 2 if has_adif and args.need_country  else 0
     parts.append(f"| {'entity':<30}  {'':{w}}CQz   {'':{x}}ITUz   {'':{y}}ct")
+    if has_adif:
+        parts.append("QRZ")
+        parts.append("LoW")
     header = "  ".join(parts)
     sep    = "─" * min(len(header), 160)
     return header + "\n" + sep
@@ -1029,9 +1128,11 @@ class JtconTUI:
         self._output_text  = ""
         self._transmitting = False
 
-        self._last_decode: dict      = {}
-        self._last_needed_call: str | None = None
-        self._adif_mtimes:     dict  = {}
+        self._adif_mtimes: dict  = {}
+        self._line_count:  int   = 0
+        self.proxy_dests:  list  = []
+        self._cq_buffer:   dict  = {}   # idx (0-99) -> entry dict
+        self._next_idx:    int   = 0    # next slot to write in the circular buffer
 
         # ── Widgets ──────────────────────────────────────────────────────────
         self.output_area = TextArea(
@@ -1153,6 +1254,9 @@ class JtconTUI:
         raw = buffer.text.strip()
         cmd = raw.lower()
 
+        if not raw:
+            return
+
         if cmd in ("quit", "exit", "q"):
             self._running = False
             self._app.exit()
@@ -1163,38 +1267,76 @@ class JtconTUI:
                 self._output_text = header
             self.output_area.text = header
 
-        elif cmd == "l":
-            if not self._last_needed_call:
-                self._append_line("[cmd] No NEEDED contact recorded this session.")
+        elif cmd and "list".startswith(cmd):
+            self._cmd_list()
+
+        elif re.match(r'^\d{1,2}$', raw):
+            idx = int(raw)
+            entry = self._cq_buffer.get(idx)
+            if entry:
+                self._reply_to_entry(entry)
             else:
-                self._append_line(f"[cmd] Replying to last NEEDED: {self._last_needed_call}")
-                self._reply_to_call(self._last_needed_call)
+                self._append_line(f"[cmd] No CQ at index {idx:02d}.")
 
         elif _CALLSIGN_RE.match(raw):
-            self._reply_to_call(raw.upper())
+            entry = self._find_callsign(raw.upper())
+            if entry:
+                self._reply_to_entry(entry)
+            else:
+                self._append_line(f"[cmd] {raw.upper()} not found in rolling buffer.")
 
-        elif raw:
+        else:
             self._append_line(
                 f"[cmd] Unknown: {raw!r}  "
-                "(commands: quit, clear, L, or enter a callsign to reply)"
+                "(commands: quit, clear, list; or enter index 00-99 / callsign to reply)"
             )
 
-    def _reply_to_call(self, callsign: str) -> None:
-        """Send a WSJT-X Reply message for the most recent decode of *callsign*."""
-        entry = self._last_decode.get(callsign)
-        if not entry:
-            self._append_line(f"[cmd] No recent decode on record for {callsign}.")
+    def _reply_to_entry(self, entry: dict) -> None:
+        """Send a WSJT-X Reply for a rolling-buffer entry."""
+        decoded   = entry.get('decoded')
+        wsjt_addr = entry.get('wsjt_addr')
+        callsign  = entry.get('callsign', '?')
+        idx       = entry.get('idx', -1)
+        if not decoded or not wsjt_addr:
+            self._append_line(f"[cmd] No decode data for {callsign}.")
             return
-        decoded, wsjt_addr = entry
         try:
             _send_reply(self.tx_sock, wsjt_addr, decoded, log=self._append_line)
             self._append_line(
-                f"[cmd] ► Reply sent to {callsign}"
+                f"[cmd] ► Reply sent to {callsign} [{idx:02d}]"
                 f"  msg={decoded.get('message', '?')!r}"
                 f"  → {wsjt_addr[0]}:{wsjt_addr[1]}"
             )
         except Exception as exc:
             self._append_line(f"[cmd] Reply to {callsign} failed: {exc}")
+
+    def _find_callsign(self, callsign: str) -> dict | None:
+        """Search the rolling buffer newest-first for *callsign*."""
+        for i in range(100):
+            idx   = (self._next_idx - 1 - i) % 100
+            entry = self._cq_buffer.get(idx)
+            if entry and entry.get('callsign', '').upper() == callsign:
+                return entry
+        return None
+
+    def _cmd_list(self) -> None:
+        """Print NEEDED/MATCH entries from the rolling buffer, oldest first."""
+        hits = []
+        for i in range(100):
+            idx   = (self._next_idx + i) % 100
+            entry = self._cq_buffer.get(idx)
+            if entry and (entry['needed_flags'] or entry['match_flags']):
+                hits.append(entry)
+        if not hits:
+            self._append_line("[list] No NEEDED/MATCH entries in rolling buffer.")
+            return
+        self._append_line(f"[list] {len(hits)} NEEDED/MATCH entries ——")
+        for entry in hits:
+            idx   = entry['idx']
+            lines = entry['lines']
+            self._append_line(f"{idx:02d}  {lines[0]}")
+            for line in lines[1:]:
+                self._append_line(line)
 
     # ── Output append (thread-safe) ───────────────────────────────────────────
 
@@ -1226,6 +1368,13 @@ class JtconTUI:
             except OSError:
                 break
 
+            # Forward packet to proxy destinations before any other processing.
+            for dest in self.proxy_dests:
+                try:
+                    self.tx_sock.sendto(data, dest)
+                except OSError:
+                    pass
+
             # Hot-reload ADIF when any watched file changes.
             if self.adif_log and self._adif_mtimes:
                 try:
@@ -1236,6 +1385,7 @@ class JtconTUI:
                     if changed:
                         self.adif_log = AdifLog(
                             self.adif_log.paths, self.cty, self.hamdat,
+                            qsl_only=getattr(self.args, 'qsl_only', False),
                             log=self._append_line,
                         )
                         self._adif_mtimes = {
@@ -1245,6 +1395,15 @@ class JtconTUI:
                             f"[adif] Reloaded {self.adif_log.total_qsos} QSOs"
                             f" from {len(self.adif_log.paths)} file(s)."
                         )
+                        adif_change_script = getattr(self.args, 'adif_change_script', None)
+                        if adif_change_script:
+                            try:
+                                subprocess.Popen(
+                                    [adif_change_script]
+                                    + [str(p) for p in self.adif_log.paths]
+                                )
+                            except Exception as exc:
+                                self._append_line(f"[adif-change-script] {exc}")
                 except OSError:
                     pass
 
@@ -1267,19 +1426,38 @@ class JtconTUI:
             except Exception as exc:
                 out_lines = [f"[error] packet handler: {exc}"]
 
-            # Track the most recent decode for each callsign so commands can reply.
-            call = meta.get('callsign')
-            if call and meta.get('decoded'):
-                self._last_decode[call] = (meta['decoded'], wsjt_addr)
-            if call and meta.get('is_needed'):
-                self._last_needed_call = call
-
             if meta.get('bell'):
                 sys.stderr.write('\a')
                 sys.stderr.flush()
 
-            for line in out_lines:
-                self._append_line(line)
+            if out_lines:
+                call = meta.get('callsign')
+                if call and meta.get('is_cq'):
+                    # Assign the next rolling index and store in buffer.
+                    idx = self._next_idx
+                    self._next_idx = (self._next_idx + 1) % 100
+                    self._cq_buffer[idx] = {
+                        'idx':          idx,
+                        'callsign':     call,
+                        'decoded':      meta.get('decoded'),
+                        'wsjt_addr':    wsjt_addr,
+                        'needed_flags': meta.get('needed_flags', []),
+                        'match_flags':  meta.get('match_flags', []),
+                        'lines':        list(out_lines),
+                    }
+                    out_lines = [f"{idx:02d}  {out_lines[0]}"] + out_lines[1:]
+                else:
+                    # Non-CQ (raw mode) or error/debug line — indent to keep columns aligned.
+                    out_lines = [f"    {out_lines[0]}"] + out_lines[1:]
+
+                for line in out_lines:
+                    self._append_line(line)
+
+                self._line_count += 1
+                if self._line_count % 15 == 0:
+                    self._append_line(
+                        _header_line(self.args, has_adif=self.adif_log is not None)
+                    )
 
     # ── Startup (runs in background thread before UDP loop) ──────────────────
 
@@ -1358,7 +1536,9 @@ class JtconTUI:
 
         if adif_paths:
             try:
-                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat, log=log)
+                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat,
+                                        qsl_only=getattr(args, 'qsl_only', False),
+                                        log=log)
                 for p in adif_paths:
                     log(f"[adif] Loaded: {p.name}")
                 al = self.adif_log
@@ -1399,6 +1579,18 @@ class JtconTUI:
                 log(f"[save] Cannot open {args.save}: {exc}")
                 self._running = False
                 return
+
+        # ── UDP proxy destinations ────────────────────────────────────────────
+        if getattr(args, 'proxy', None):
+            for part in args.proxy.split(","):
+                part = part.strip()
+                try:
+                    self.proxy_dests.append(("127.0.0.1", int(part)))
+                except ValueError:
+                    log(f"[proxy] Invalid port {part!r} — must be an integer.")
+            if self.proxy_dests:
+                targets = ", ".join(f"localhost:{p}" for _, p in self.proxy_dests)
+                log(f"[proxy] Forwarding all packets to: {targets}")
 
         # ── Column header then ready banner ───────────────────────────────────
         log(_header_line(args, has_adif=self.adif_log is not None))
@@ -1445,6 +1637,13 @@ def main() -> None:
     parser.add_argument("--no-need-entity",  dest="need_entity",  action="store_false", default=True)
     parser.add_argument("--no-need-cqz",     dest="need_cqz",     action="store_false", default=True)
     parser.add_argument("--no-need-country", dest="need_country", action="store_false", default=True)
+    parser.add_argument("--qsl-only", action="store_true", dest="qsl_only",
+                        help="Require LoTW confirmation (lotw_qsl_rcvd=Y) for NEEDED checks; "
+                             "unconfirmed QSOs are treated as still needed")
+    parser.add_argument("--worked-lag-days", metavar="DAYS", type=int, default=0,
+                        dest="worked_lag_days",
+                        help="Suppress NEEDED/MATCH alerts for a callsign worked within N days "
+                             "(default 0 = suppress today; -1 = disable suppression entirely)")
     parser.add_argument("--match-calls",   metavar="FILE", nargs="+")
     parser.add_argument("--match-message", metavar="FILE", nargs="+")
     parser.add_argument("--pota",  action="store_true")
@@ -1454,6 +1653,12 @@ def main() -> None:
     parser.add_argument("--hamdat", metavar="DB", default=str(HAMDAT_DB_DEFAULT))
     parser.add_argument("--alert-command", metavar="SCRIPT")
     parser.add_argument("--alert-ntfy",    metavar="TOPIC")
+    parser.add_argument("--adif-change-script", metavar="SCRIPT",
+                        help="Script to exec each time the ADIF log file(s) are reloaded; "
+                             "reloaded file path(s) are passed as arguments")
+    parser.add_argument("--proxy", metavar="PORT[,PORT...]",
+                        help="Forward every received WSJT-X packet to these additional UDP ports "
+                             "on localhost (e.g. --proxy 2238 or --proxy 2238,2239)")
     parser.add_argument("--stats", action="store_true",
                         help="Enable cycle stats (always visible in TUI status bar)")
     parser.add_argument("--debug", action="store_true")

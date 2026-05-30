@@ -1,1 +1,7 @@
+# jtcon runtime dependencies
+#
+# Python >= 3.10 required (uses union type hints: X | Y)
+#
+# sqlite3 is bundled with all standard CPython builds and requires no pip install.
+
 prompt-toolkit>=3.0
