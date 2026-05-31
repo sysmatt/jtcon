@@ -415,7 +415,12 @@ def _send_alerts(msg: str, args: argparse.Namespace, log=None) -> None:
     _log = log or (lambda m: print(m, file=sys.stderr))
     if args.alert_command:
         try:
-            subprocess.Popen([args.alert_command, msg])
+            subprocess.Popen(
+                [args.alert_command, msg],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except Exception as exc:
             _log(f"[alert-command] {exc}")
     if args.alert_ntfy:
@@ -1407,10 +1412,23 @@ class JtconTUI:
                         adif_change_script = getattr(self.args, 'adif_change_script', None)
                         if adif_change_script:
                             try:
-                                subprocess.Popen(
+                                proc = subprocess.Popen(
                                     [adif_change_script]
-                                    + [str(p) for p in self.adif_log.paths]
+                                    + [str(p) for p in self.adif_log.paths],
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT,
+                                    text=True,
                                 )
+                                def _relay_output(p=proc):
+                                    for line in p.stdout:
+                                        self._append_line(
+                                            f"[adif-change-script] {line.rstrip()}"
+                                        )
+                                    p.wait()
+                                threading.Thread(
+                                    target=_relay_output, daemon=True
+                                ).start()
                             except Exception as exc:
                                 self._append_line(f"[adif-change-script] {exc}")
                 except OSError:
