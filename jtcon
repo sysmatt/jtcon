@@ -894,16 +894,19 @@ def handle_packet(
     is_needed = bool(needed_flags)
     is_match  = bool(match_flags)
 
-    # ── External alerts ───────────────────────────────────────────────────────
-    if (is_needed or is_match) and (args.alert_command or args.alert_ntfy):
+    # ── External alerts + bell (first occurrence only) ───────────────────────
+    is_new_alert = False
+    if is_needed or is_match:
         alert_key = (callsign, frozenset(needed_flags + match_flags))
         if alert_key not in alerted:
             alerted.add(alert_key)
-            _send_alerts(
-                _build_alert_msg(callsign, entity_info, needed_flags, match_flags),
-                args,
-                log=log,
-            )
+            is_new_alert = True
+            if args.alert_command or args.alert_ntfy:
+                _send_alerts(
+                    _build_alert_msg(callsign, entity_info, needed_flags, match_flags),
+                    args,
+                    log=log,
+                )
 
     # ── Timestamps ────────────────────────────────────────────────────────────
     time_ms = decoded["time_ms"]
@@ -1027,7 +1030,7 @@ def handle_packet(
         out_meta['match_flags']  = match_flags
         out_meta['is_needed']    = is_needed
         out_meta['wsjt_addr']    = wsjt_addr
-        out_meta['bell']         = is_needed or is_match
+        out_meta['bell']         = is_new_alert
 
     return lines
 
