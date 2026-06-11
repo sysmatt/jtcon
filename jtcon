@@ -565,9 +565,11 @@ class AdifLog:
         self.worked_dxcc_all:     set  = set()   # all QSOs regardless of QSL
         self.worked_cqz_all:      set  = set()
         self.worked_country_all:  set  = set()
-        self.qrz_confirmed_calls: set  = set()   # app_qrzlog_status=C
-        self.lotw_qsl_rcvd_calls: set  = set()   # lotw_qsl_rcvd=Y
-        self.last_worked:         dict = {}       # call -> most recent date worked
+        self.qrz_confirmed_calls:    set  = set()   # app_qrzlog_status=C
+        self.lotw_qsl_rcvd_calls:    set  = set()   # lotw_qsl_rcvd=Y
+        self.qrz_confirmed_by_band:  dict = {}       # band -> {call} QRZ-confirmed
+        self.lotw_rcvd_by_band:      dict = {}       # band -> {call} LoTW-confirmed
+        self.last_worked:            dict = {}       # call -> most recent date worked
         # WAS / 5BWAS — always LOTW-only regardless of --qsl-only
         self.worked_states_lotw:       set  = set()   # states with lotw_qsl_rcvd=Y
         self.worked_states_all:        set  = set()   # states from any QSO
@@ -588,6 +590,8 @@ class AdifLog:
         self.worked_country_all.clear()
         self.qrz_confirmed_calls.clear()
         self.lotw_qsl_rcvd_calls.clear()
+        self.qrz_confirmed_by_band.clear()
+        self.lotw_rcvd_by_band.clear()
         self.last_worked.clear()
         self.worked_states_lotw.clear()
         self.worked_states_all.clear()
@@ -610,14 +614,18 @@ class AdifLog:
 
                 qrz_status = q.get("app_qrzlog_status", "").strip().upper()
                 lotw_rcvd  = q.get("lotw_qsl_rcvd",    "").strip().upper()
+                was_band   = q.get("band", "").strip().lower()
                 if call and qrz_status == "C":
                     self.qrz_confirmed_calls.add(call)
+                    if was_band:
+                        self.qrz_confirmed_by_band.setdefault(was_band, set()).add(call)
                 if call and lotw_rcvd == "Y":
                     self.lotw_qsl_rcvd_calls.add(call)
+                    if was_band:
+                        self.lotw_rcvd_by_band.setdefault(was_band, set()).add(call)
 
                 # WAS / 5BWAS tracking — always LOTW-only for _lotw sets
                 was_state = q.get("state", "").strip().upper()
-                was_band  = q.get("band",  "").strip().lower()
                 if was_state and was_state in _WAS_STATES:
                     self.worked_states_all.add(was_state)
                     if was_band in _5BWAS_BANDS:
@@ -1071,8 +1079,15 @@ def handle_packet(
             cols.append(" " * _W_WAS)
 
     if adif_log:
-        cols.append("⭐" if (call_col and call_col in adif_log.qrz_confirmed_calls) else "  ")
-        cols.append("🌎" if (call_col and call_col in adif_log.lotw_qsl_rcvd_calls) else "  ")
+        if args.need_5bwas:
+            _cb = _freq_to_band(dial_freq) or ""
+            _bq = adif_log.qrz_confirmed_by_band.get(_cb, set())
+            _bl = adif_log.lotw_rcvd_by_band.get(_cb, set())
+            cols.append("⭐" if (call_col and call_col in _bq) else "  ")
+            cols.append("🌎" if (call_col and call_col in _bl) else "  ")
+        else:
+            cols.append("⭐" if (call_col and call_col in adif_log.qrz_confirmed_calls) else "  ")
+            cols.append("🌎" if (call_col and call_col in adif_log.lotw_qsl_rcvd_calls) else "  ")
 
     line = "  ".join(cols)
     lines.append(line)
