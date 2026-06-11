@@ -38,6 +38,7 @@ Optionally compares against an ADIF logbook to flag contacts not yet worked.
 | `days` | Days since last QSO with this callsign *(with --adif)* |
 | `ST` | FCC-licensed US state *(with --match-state)* |
 | `\| entity CQz ITUz ct` | DXCC entity, CQ zone, ITU zone, continent (cyan) |
+| `WAS` / `5BW` | WAS/5BWAS status icon + state *(with --was or --5bwas)* |
 | `QRZ` | ⭐ if callsign has QRZ confirmation (`app_qrzlog_status=C`) |
 | `LoW` | 🌎 if callsign has LoTW confirmation (`lotw_qsl_rcvd=Y`) |
 
@@ -53,6 +54,9 @@ status icon:
 | ✅ | Already worked and confirmed (or any QSO when `--qsl-only` is not set) |
 | ❓ | Worked but not yet LoTW-confirmed *(only visible with `--qsl-only`)* |
 | ❌ | Not yet worked |
+
+The same three icons are used in the `WAS`/`5BW` column, but confirmation always
+means **LoTW-confirmed** regardless of `--qsl-only` (ARRL award requirement).
 
 NEEDED and MATCH alerts appear as indented lines below the relevant decode:
 ```
@@ -82,7 +86,8 @@ NEEDED and MATCH alerts appear as indented lines below the relevant decode:
 
 Optional:
 - An ADIF log file (`--adif`) for NEEDED detection and worked-contact coloring
-- [hamdat](https://github.com/ad1c/hamdat) SQLite database for US state lookups (`--match-state`)
+- [hamdat](https://github.com/ad1c/hamdat) SQLite database for US state lookups
+  (`--match-state`, `--was`, `--5bwas`)
 
 ## Installation
 
@@ -129,6 +134,12 @@ chmod +x jtcon
 
 # Run a script whenever the ADIF log is reloaded
 ./jtcon --adif ~/wsjtx_log.adi --adif-change-script ~/bin/on_log_change.sh
+
+# Flag US states not yet LoTW-confirmed (ARRL WAS award tracking)
+./jtcon --adif ~/wsjtx_log.adi --was
+
+# Flag states not yet LoTW-confirmed on the current band (ARRL 5-Band WAS)
+./jtcon --adif ~/wsjtx_log.adi --5bwas
 ```
 
 ## ADIF Auto-Discovery
@@ -207,6 +218,10 @@ Pattern matching / alerts:
 --iota                  Flag CQ IOTA calls as MATCH
 --match-state STATES    Comma-separated US state abbreviations (e.g. TX,CA) or a file
 --hamdat DB             Path to hamdat SQLite database (default: ~/.hamdat/hamdat.db)
+--was                   Flag US states not yet LoTW-confirmed as NEEDED (ARRL WAS award);
+                        requires --hamdat; mutually exclusive with --5bwas
+--5bwas                 Flag US states not yet LoTW-confirmed on the current band as NEEDED
+                        (ARRL 5-Band WAS award); requires --hamdat; mutually exclusive with --was
 --alert-command SCRIPT  Script to exec on NEEDED/MATCH events; alert message is arg 1
 --alert-ntfy TOPIC      POST NEEDED/MATCH alerts to ntfy.sh topic TOPIC
 

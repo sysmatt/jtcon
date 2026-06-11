@@ -78,6 +78,9 @@ Options
   --iota                Flag CQ IOTA calls as MATCH
   --match-state STATES  Comma-separated US state abbreviations or file
   --hamdat DB           Path to hamdat SQLite database
+  --was                 Flag US states not yet LoTW-confirmed as NEEDED (WAS award)
+  --5bwas               Flag US states not yet LoTW-confirmed on the current band
+                        as NEEDED (5-Band WAS award); mutually exclusive with --was
   --stats               Enable cycle stats (always shown in status bar)
   --debug               Dump raw hex + parsed fields to the decode pane
 """
@@ -153,6 +156,32 @@ _W_MSG  = 24
 _W_CALL = 12
 _W_GRID = 6
 _W_DAYS = 5    # days-since-last-worked column width
+_W_WAS  = 4   # WAS / 5BWAS column: emoji(2) + state(2)
+
+# All 50 US states recognised for WAS/5BWAS tracking.
+_WAS_STATES: frozenset = frozenset({
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+})
+
+# The five classic HF bands required for the 5-Band WAS award.
+_5BWAS_BANDS: frozenset = frozenset({"80m", "40m", "20m", "15m", "10m"})
+
+
+def _freq_to_band(hz: int) -> str | None:
+    """Convert a dial frequency in Hz to an ADIF band string, or None."""
+    if   1_800_000 <= hz <  2_000_000: return "160m"
+    elif 3_500_000 <= hz <  4_000_000: return "80m"
+    elif 7_000_000 <= hz <  7_300_000: return "40m"
+    elif 14_000_000 <= hz < 14_350_000: return "20m"
+    elif 18_068_000 <= hz < 18_168_000: return "17m"
+    elif 21_000_000 <= hz < 21_450_000: return "15m"
+    elif 24_890_000 <= hz < 24_990_000: return "12m"
+    elif 28_000_000 <= hz < 29_700_000: return "10m"
+    return None
 
 # ANSI colour codes used in the decode output pane.
 _RST  = "\033[0m"
@@ -539,6 +568,11 @@ class AdifLog:
         self.qrz_confirmed_calls: set  = set()   # app_qrzlog_status=C
         self.lotw_qsl_rcvd_calls: set  = set()   # lotw_qsl_rcvd=Y
         self.last_worked:         dict = {}       # call -> most recent date worked
+        # WAS / 5BWAS — always LOTW-only regardless of --qsl-only
+        self.worked_states_lotw:       set  = set()   # states with lotw_qsl_rcvd=Y
+        self.worked_states_all:        set  = set()   # states from any QSO
+        self.worked_states_bands_lotw: dict = {}       # state -> {band} LoTW-confirmed
+        self.worked_states_bands_all:  dict = {}       # state -> {band} any QSO
         self.total_qsos = 0
         self._load()
 
@@ -555,6 +589,10 @@ class AdifLog:
         self.qrz_confirmed_calls.clear()
         self.lotw_qsl_rcvd_calls.clear()
         self.last_worked.clear()
+        self.worked_states_lotw.clear()
+        self.worked_states_all.clear()
+        self.worked_states_bands_lotw.clear()
+        self.worked_states_bands_all.clear()
         self.total_qsos = 0
 
         for path in self.paths:
@@ -576,6 +614,18 @@ class AdifLog:
                     self.qrz_confirmed_calls.add(call)
                 if call and lotw_rcvd == "Y":
                     self.lotw_qsl_rcvd_calls.add(call)
+
+                # WAS / 5BWAS tracking — always LOTW-only for _lotw sets
+                was_state = q.get("state", "").strip().upper()
+                was_band  = q.get("band",  "").strip().lower()
+                if was_state and was_state in _WAS_STATES:
+                    self.worked_states_all.add(was_state)
+                    if was_band in _5BWAS_BANDS:
+                        self.worked_states_bands_all.setdefault(was_state, set()).add(was_band)
+                    if lotw_rcvd == "Y":
+                        self.worked_states_lotw.add(was_state)
+                        if was_band in _5BWAS_BANDS:
+                            self.worked_states_bands_lotw.setdefault(was_state, set()).add(was_band)
 
                 qso_date_str = q.get("qso_date", "").strip()
                 if call and len(qso_date_str) == 8:
@@ -801,6 +851,7 @@ def handle_packet(
     tx_sock,
     wsjt_addr:     tuple,
     out_meta:      dict | None = None,
+    dial_freq:     int = 0,
     log=None,
 ) -> list:
     """
@@ -889,6 +940,19 @@ def handle_packet(
         if state_set and station_state and station_state in state_set:
             match_flags.append(f"STATE:{station_state}")
     is_match = bool(match_flags)
+
+    # ── WAS / 5BWAS NEEDED check ─────────────────────────────────────────────
+    if adif_log and is_cq and station_state and station_state in _WAS_STATES:
+        if args.need_was:
+            if station_state not in adif_log.worked_states_lotw:
+                needed_flags.append(f"NEW-WAS({station_state})")
+        elif args.need_5bwas:
+            current_band = _freq_to_band(dial_freq)
+            if current_band in _5BWAS_BANDS:
+                confirmed = adif_log.worked_states_bands_lotw.get(station_state, set())
+                if current_band not in confirmed:
+                    needed_flags.append(f"NEW-5BWAS({station_state}/{current_band})")
+    is_needed = bool(needed_flags)
 
     # ── Worked-lag-days suppression ───────────────────────────────────────────
     if adif_log and callsign and args.worked_lag_days >= 0 and callsign in adif_log.last_worked:
@@ -986,6 +1050,26 @@ def handle_packet(
         )
         cols.append(_col(entity_str, _CYN, color))
 
+    if adif_log and (args.need_was or args.need_5bwas):
+        was_em = ""
+        if is_cq and station_state and station_state in _WAS_STATES:
+            if args.need_was:
+                if   station_state in adif_log.worked_states_lotw: was_em = "✅"
+                elif station_state in adif_log.worked_states_all:  was_em = "❓"
+                else:                                               was_em = "❌"
+            else:  # need_5bwas
+                current_band = _freq_to_band(dial_freq)
+                if current_band in _5BWAS_BANDS:
+                    confirmed = adif_log.worked_states_bands_lotw.get(station_state, set())
+                    worked    = adif_log.worked_states_bands_all.get(station_state, set())
+                    if   current_band in confirmed: was_em = "✅"
+                    elif current_band in worked:    was_em = "❓"
+                    else:                           was_em = "❌"
+        if was_em:
+            cols.append(f"{was_em}{station_state:<2}")
+        else:
+            cols.append(" " * _W_WAS)
+
     if adif_log:
         cols.append("⭐" if (call_col and call_col in adif_log.qrz_confirmed_calls) else "  ")
         cols.append("🌎" if (call_col and call_col in adif_log.lotw_qsl_rcvd_calls) else "  ")
@@ -1064,6 +1148,9 @@ def _header_line(args: argparse.Namespace, has_adif: bool = False) -> str:
     x = 2 if has_adif and args.need_cqz     else 0
     y = 2 if has_adif and args.need_country  else 0
     parts.append(f"| {'entity':<30}  {'':{w}}CQz   {'':{x}}ITUz   {'':{y}}ct")
+    if has_adif and (args.need_was or args.need_5bwas):
+        label = "WAS " if args.need_was else "5BW "
+        parts.append(f"{label:<{_W_WAS}}")
     if has_adif:
         parts.append("QRZ")
         parts.append("LoW")
@@ -1141,6 +1228,7 @@ class JtconTUI:
         self._output_lock  = threading.Lock()
         self._output_text  = ""
         self._transmitting = False
+        self._dial_freq    = 0   # Hz; updated from WSJT-X Status messages
 
         self._adif_mtimes: dict  = {}
         self._line_count:  int   = 0
@@ -1434,10 +1522,11 @@ class JtconTUI:
                 except OSError:
                     pass
 
-            # Intercept Status messages to track TX/RX state.
+            # Intercept Status messages to track TX/RX state and current band.
             status = try_parse_status(data)
             if status is not None:
                 self._transmitting = status.get("transmitting", False)
+                self._dial_freq    = status.get("dial_freq", 0)
                 self._app.invalidate()
                 continue
 
@@ -1448,6 +1537,7 @@ class JtconTUI:
                     self.call_patterns, self.msg_patterns, self.state_set,
                     self.hamdat, self.cycle_tracker, self.alerted, self.prompted,
                     self.tx_sock, wsjt_addr, meta,
+                    dial_freq=self._dial_freq,
                     log=self._append_line,
                 )
             except Exception as exc:
@@ -1686,6 +1776,14 @@ def main() -> None:
     parser.add_argument("--proxy", metavar="PORT[,PORT...]",
                         help="Forward every received WSJT-X packet to these additional UDP ports "
                              "on localhost (e.g. --proxy 2238 or --proxy 2238,2239)")
+    was_grp = parser.add_mutually_exclusive_group()
+    was_grp.add_argument("--was", dest="need_was", action="store_true", default=False,
+                         help="Flag US states not yet LoTW-confirmed as NEEDED (ARRL WAS award); "
+                              "requires --hamdat for callsign→state lookup")
+    was_grp.add_argument("--5bwas", dest="need_5bwas", action="store_true", default=False,
+                         help="Flag US states not yet LoTW-confirmed on the current band as NEEDED "
+                              "(ARRL 5-Band WAS award); requires --hamdat")
+
     parser.add_argument("--stats", action="store_true",
                         help="Enable cycle stats (always visible in TUI status bar)")
     parser.add_argument("--debug", action="store_true")
