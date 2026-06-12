@@ -9,16 +9,16 @@ Optionally compares against an ADIF logbook to flag contacts not yet worked.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│  HHMMSSZ   dB   dt(s)    Hz  mode  message           callsign  grid   days  │... │
+│  HHMMSSZ   dB   dt(s)    Hz  mode  message           callsign  grid   days   │...│
 │  ──────────────────────────────────────────────────────────────────────────────  │
-│  123045z  +05   +0.1s  1234  FT8   CQ W1ABC FN42     W1ABC     FN42     3d  │...│  ← scrollable
-│  123100z  -12   -0.3s  2100  FT8   CQ DX VK3XY QF22  VK3XY    QF22        │...│     decode pane
-│  ...                                                                            │     (Tab to focus
-│                                                                                 │      and scroll)
+│  123045z  +05   +0.1s  1234  FT8   CQ W1ABC FN42     W1ABC     FN42     3d   │...│  ← scrollable
+│  123100z  -12   -0.3s  2100  FT8   CQ DX VK3XY QF22  VK3XY    QF22           │...│     decode pane
+│  ...                                                                             │     (Tab to focus
+│                                                                                  │      and scroll)
 ├──────────────────────────────────────────────────────────────────────────────────┤
 │  CMD>                                                                            │  ← command input
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  RX  [████████░░░░░░] even  FT8  dec=42 cq=18  avg dec=…                        │  ← status line
+│  RX  [████████░░░░░░] even  FT8  dec=42 cq=18  avg dec=…                         │  ← status line
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
