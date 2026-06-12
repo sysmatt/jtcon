@@ -33,7 +33,7 @@ Optionally compares against an ADIF logbook to flag contacts not yet worked.
 | `Hz` | Audio frequency |
 | `mode` | FT8, FT4, etc. |
 | `message` | Raw decoded message |
-| `callsign` | CQ callsign (bold; **green** if already in log) |
+| `callsign` | CQ callsign — **green** if worked on this band+mode, **yellow** if worked on a different band or mode, bold white if never worked *(with --adif)* |
 | `grid` | Grid square (green if already worked) |
 | `days` | Days since last QSO with this callsign *(with --adif)* |
 | `ST` | FCC-licensed US state *(with --match-state)* |
@@ -122,6 +122,11 @@ who is therefore a valid contact target.  jtcon looks up that callsign for entit
 CQ zone, country, and US state, then applies the same NEEDED/WAS/5BWAS/pattern
 checks as it would for a CQ.
 
+Decodes involving your own callsign are automatically excluded — both your own
+transmissions (FROM_CALL = your call) and messages directed at you (TO_CALL = your
+call, meaning you are already engaged with that station).  Your callsign is learned
+from WSJT-X Status packets and shown as `de=CALL` in the status line.
+
 **Display rules**:
 
 | Mode | CQ decodes | Non-CQ decodes |
@@ -168,6 +173,7 @@ Usage examples:
 | `cq=N` | CQ calls in the current cycle |
 | `avg dec=N.N cq=N.N` | Running averages across all cycles |
 | `even/odd dec=N.N cq=N.N` | Per-parity running averages |
+| `de=CALL` | Your callsign as reported by WSJT-X (appears once the first Status packet is received) |
 
 ## Requirements
 

@@ -191,7 +191,8 @@ _RST  = "\033[0m"
 _DIM  = "\033[2m"
 _BOLD = "\033[1m"
 _GRN  = "\033[32m"    # green      — worked grid/entity
-_BGRN = "\033[1;32m"  # bold green — worked callsign
+_BGRN = "\033[1;32m"  # bold green  — worked callsign (same band + mode)
+_BYEL_CALL = "\033[1;33m"  # bold yellow — worked callsign (different band or mode)
 _CYN  = "\033[36m"    # cyan       — entity block
 _BRED = "\033[1;31m"  # bold red    — NEEDED alert (CQ)
 _BYEL = "\033[1;33m"  # bold yellow — MATCH alert
@@ -573,6 +574,8 @@ class AdifLog:
         self.lotw_qsl_rcvd_calls:    set  = set()   # lotw_qsl_rcvd=Y
         self.qrz_confirmed_by_band:  dict = {}       # band -> {call} QRZ-confirmed
         self.lotw_rcvd_by_band:      dict = {}       # band -> {call} LoTW-confirmed
+        self.worked_calls_by_band:   dict = {}       # band -> {call} any QSO
+        self.worked_calls_by_mode:   dict = {}       # mode -> {call} any QSO
         self.last_worked:            dict = {}       # call -> most recent date worked
         # WAS / 5BWAS — always LOTW-only regardless of --qsl-only
         self.worked_states_lotw:       set  = set()   # states with lotw_qsl_rcvd=Y
@@ -596,6 +599,8 @@ class AdifLog:
         self.lotw_qsl_rcvd_calls.clear()
         self.qrz_confirmed_by_band.clear()
         self.lotw_rcvd_by_band.clear()
+        self.worked_calls_by_band.clear()
+        self.worked_calls_by_mode.clear()
         self.last_worked.clear()
         self.worked_states_lotw.clear()
         self.worked_states_all.clear()
@@ -619,6 +624,7 @@ class AdifLog:
                 qrz_status = q.get("app_qrzlog_status", "").strip().upper()
                 lotw_rcvd  = q.get("lotw_qsl_rcvd",    "").strip().upper()
                 was_band   = q.get("band", "").strip().lower()
+                qso_mode   = q.get("mode", "").strip().upper()
                 if call and qrz_status == "C":
                     self.qrz_confirmed_calls.add(call)
                     if was_band:
@@ -666,6 +672,10 @@ class AdifLog:
                     self.worked_grids.add(grid)
                 if call:
                     self.worked_calls.add(call)
+                    if was_band:
+                        self.worked_calls_by_band.setdefault(was_band, set()).add(call)
+                    if qso_mode:
+                        self.worked_calls_by_mode.setdefault(qso_mode, set()).add(call)
                     info = self.cty.lookup(call)
                     if info:
                         self.worked_dxcc_all.add(info["primary_prefix"].upper())
@@ -937,9 +947,11 @@ def handle_packet(
     elif args.all_decodes:
         # Directed message: "<TO_CALL> <FROM_CALL> <report/exchange>"
         # FROM_CALL (token 1) is the transmitting station — we can hear them.
-        # Skip decodes where FROM_CALL is our own callsign (our own transmissions).
+        # Skip decodes where FROM_CALL is our own callsign (our own transmissions),
+        # or where TO_CALL is our own callsign (someone calling us — already engaged).
         tokens = msg_text.split()
-        if len(tokens) >= 2 and tokens[1].upper() != de_call.upper():
+        dc = de_call.upper()
+        if len(tokens) >= 2 and tokens[1].upper() != dc and tokens[0].upper() != dc:
             callsign = tokens[1]
             raw = cty.lookup(callsign)
             if raw:
@@ -1040,9 +1052,16 @@ def handle_packet(
 
     call_col    = callsign if callsign else ""
     call_str    = f"{call_col:<{_W_CALL}}"
-    call_worked = bool(adif_log and call_col and call_col in adif_log.worked_calls)
-    if call_col:
-        call_color = _BGRN if call_worked else _BOLD
+    if call_col and adif_log:
+        current_band = _freq_to_band(dial_freq) or ""
+        band_match = call_col in adif_log.worked_calls_by_band.get(current_band, set())
+        mode_match = call_col in adif_log.worked_calls_by_mode.get(mode.strip(), set())
+        if band_match and mode_match:
+            call_color = _BGRN       # worked on this band and mode
+        elif call_col in adif_log.worked_calls:
+            call_color = _BYEL_CALL  # worked, but different band or mode
+        else:
+            call_color = _BOLD
         cols.append(_col(call_str, call_color, color))
     else:
         cols.append(call_str)
