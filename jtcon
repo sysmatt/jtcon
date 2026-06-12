@@ -28,8 +28,8 @@ Commands (type in CMD> line, press Enter)
   quit / exit / q    Exit the program
   clear              Clear the decode output
   list (or l/li/lis) Show all NEEDED/MATCH entries from the rolling buffer
-  00-99              Reply to the CQ at that rolling-buffer index
-  <CALLSIGN>         Search rolling buffer and reply to the most recent CQ
+  00-99              Reply to the contact at that rolling-buffer index
+  <CALLSIGN>         Search rolling buffer and reply to the most recent entry
                      from that callsign
 
 Dependencies

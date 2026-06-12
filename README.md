@@ -43,8 +43,9 @@ Optionally compares against an ADIF logbook to flag contacts not yet worked.
 | `LoW` | 🌎 if callsign has LoTW confirmation (`lotw_qsl_rcvd=Y`) |
 
 The `##` index cycles 00–99 and wraps.  Each CQ call is assigned a fixed index at
-arrival time; the index does not change as new calls arrive.  Non-CQ lines (shown only
-with `--raw`) are indented with spaces and not assigned an index.
+arrival time; the index does not change as new calls arrive.  Non-CQ decodes that
+produce a NEEDED or MATCH hit (with `--all`) are also indexed and replyable.
+Non-CQ lines with no hit are indented with spaces and not assigned an index.
 
 When `--adif` is active, each of the entity/zone/country fields is prefixed by a
 status icon:
@@ -112,7 +113,8 @@ For CQ-triggered alerts the lines are **red** (NEEDED) and **yellow** (MATCH):
 By default jtcon only applies NEEDED/MATCH logic to CQ calls.  Some operators rarely
 call CQ and only appear in directed exchanges (e.g. `W1ABC W1XYZ -12`).  The `--all`
 flag extends the full matching pipeline to every decoded message so those stations
-are not missed.
+are not missed.  Be careful with this mode, Try to call when the operator is ending
+their current QSO.  Timing is everything. 
 
 **How it works**: In a directed FT8 message the second token is the transmitting
 station (the FROM_CALL) — the station whose signal you are actually receiving and
@@ -268,12 +270,13 @@ Type in the `CMD>` line and press Enter:
 | `quit` / `exit` / `q` | Exit the program |
 | `clear` | Clear the decode pane |
 | `list` (or `l`, `li`, `lis`) | Show all NEEDED/MATCH entries from the rolling buffer |
-| `7` / `42` / `00` *(any 1–2 digit number)* | Reply to the CQ at that rolling-buffer index |
-| `W1ABC` *(any callsign)* | Search the rolling buffer and reply to the most recent CQ from that callsign |
+| `7` / `42` / `00` *(any 1–2 digit number)* | Reply to the contact at that rolling-buffer index |
+| `W1ABC` *(any callsign)* | Search the rolling buffer and reply to the most recent entry from that callsign |
 
-**Rolling buffer** — the last 100 CQ calls are kept in memory.  Each is assigned a
-two-digit index (`##` column) that is stable once assigned.  `list` lets you review
-all flagged contacts at once; then call by index or callsign.
+**Rolling buffer** — the last 100 entries are kept in memory.  Each CQ call is assigned
+a two-digit index (`##` column) that is stable once assigned.  With `--all`, non-CQ
+decodes that produce a NEEDED or MATCH hit are also indexed and stored.  `list` lets
+you review all flagged contacts at once; then call by index or callsign.
 
 Replies use the WSJT-X UDP Reply message (type 4), equivalent to double-clicking a
 decode in the WSJT-X UI.  WSJT-X must have **Settings → Reporting → Accept UDP requests**
