@@ -864,6 +864,7 @@ def handle_packet(
     wsjt_addr:     tuple,
     out_meta:      dict | None = None,
     dial_freq:     int = 0,
+    de_call:       str = "",
     log=None,
 ) -> list:
     """
@@ -936,8 +937,9 @@ def handle_packet(
     elif args.all_decodes:
         # Directed message: "<TO_CALL> <FROM_CALL> <report/exchange>"
         # FROM_CALL (token 1) is the transmitting station — we can hear them.
+        # Skip decodes where FROM_CALL is our own callsign (our own transmissions).
         tokens = msg_text.split()
-        if len(tokens) >= 2:
+        if len(tokens) >= 2 and tokens[1].upper() != de_call.upper():
             callsign = tokens[1]
             raw = cty.lookup(callsign)
             if raw:
@@ -1270,6 +1272,7 @@ class JtconTUI:
         self._output_text  = ""
         self._transmitting = False
         self._dial_freq    = 0   # Hz; updated from WSJT-X Status messages
+        self._de_call      = ""  # operator callsign; updated from WSJT-X Status messages
 
         self._adif_mtimes: dict  = {}
         self._line_count:  int   = 0
@@ -1386,9 +1389,10 @@ class JtconTUI:
         else:
             trx = ("class:status.rx", " RX ")
 
+        de = f"  de={self._de_call}" if self._de_call else ""
         return [
             trx,
-            ("class:status", f" [{bar}] {parity}{stats} "),
+            ("class:status", f" [{bar}] {parity}{stats}{de} "),
         ]
 
     # ── Command handler ───────────────────────────────────────────────────────
@@ -1568,6 +1572,9 @@ class JtconTUI:
             if status is not None:
                 self._transmitting = status.get("transmitting", False)
                 self._dial_freq    = status.get("dial_freq", 0)
+                de = status.get("de_call", "").strip()
+                if de:
+                    self._de_call = de
                 self._app.invalidate()
                 continue
 
@@ -1579,6 +1586,7 @@ class JtconTUI:
                     self.hamdat, self.cycle_tracker, self.alerted, self.prompted,
                     self.tx_sock, wsjt_addr, meta,
                     dial_freq=self._dial_freq,
+                    de_call=self._de_call,
                     log=self._append_line,
                 )
             except Exception as exc:
