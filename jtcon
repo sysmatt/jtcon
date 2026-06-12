@@ -81,6 +81,9 @@ Options
   --was                 Flag US states not yet LoTW-confirmed as NEEDED (WAS award)
   --5bwas               Flag US states not yet LoTW-confirmed on the current band
                         as NEEDED (5-Band WAS award); mutually exclusive with --was
+  --all                 Apply NEEDED/MATCH logic to ALL decoded messages, not just CQ;
+                        non-CQ hits are shown in magenta and added to the reply buffer.
+                        Combine with --raw to also show non-CQ messages with no hits.
   --stats               Enable cycle stats (always shown in status bar)
   --debug               Dump raw hex + parsed fields to the decode pane
 """
@@ -190,8 +193,9 @@ _BOLD = "\033[1m"
 _GRN  = "\033[32m"    # green      — worked grid/entity
 _BGRN = "\033[1;32m"  # bold green — worked callsign
 _CYN  = "\033[36m"    # cyan       — entity block
-_BRED = "\033[1;31m"  # bold red   — NEEDED alert
+_BRED = "\033[1;31m"  # bold red    — NEEDED alert (CQ)
 _BYEL = "\033[1;33m"  # bold yellow — MATCH alert
+_BMAG = "\033[1;35m"  # bold magenta — NEEDED/MATCH alert (non-CQ, --all)
 
 
 def _col(text: str, code: str, on: bool) -> str:
@@ -906,10 +910,10 @@ def handle_packet(
     if cycle_tracker is not None:
         cycle_tracker.record(decoded["time_ms"], is_cq, decoded["new"], mode)
 
-    if not is_cq and not args.raw:
+    if not is_cq and not args.raw and not args.all_decodes:
         return lines
 
-    # ── Parse CQ ─────────────────────────────────────────────────────────────
+    # ── Parse callsign + entity ───────────────────────────────────────────────
     callsign = grid = modifier = None
     entity_info: dict = {}
 
@@ -929,10 +933,25 @@ def handle_packet(
                     "itu_zone":       raw.get("ituz",           "?"),
                     "continent":      raw.get("continent",      "?"),
                 }
+    elif args.all_decodes:
+        # Directed message: "<TO_CALL> <FROM_CALL> <report/exchange>"
+        # FROM_CALL (token 1) is the transmitting station — we can hear them.
+        tokens = msg_text.split()
+        if len(tokens) >= 2:
+            callsign = tokens[1]
+            raw = cty.lookup(callsign)
+            if raw:
+                entity_info = {
+                    "primary_prefix": raw.get("primary_prefix", "?"),
+                    "entity":         raw.get("country",        "?"),
+                    "cq_zone":        raw.get("cqz",            "?"),
+                    "itu_zone":       raw.get("ituz",           "?"),
+                    "continent":      raw.get("continent",      "?"),
+                }
 
     # ── NEEDED check ─────────────────────────────────────────────────────────
     needed_flags: list = []
-    if adif_log and is_cq and entity_info:
+    if adif_log and (is_cq or args.all_decodes) and entity_info:
         needed_flags = adif_log.needed_flags(entity_info, args)
     is_needed = bool(needed_flags)
 
@@ -950,7 +969,7 @@ def handle_packet(
     is_match = bool(match_flags)
 
     # ── WAS / 5BWAS NEEDED check ─────────────────────────────────────────────
-    if adif_log and is_cq and station_state and station_state in _WAS_STATES:
+    if adif_log and (is_cq or args.all_decodes) and station_state and station_state in _WAS_STATES:
         if args.need_was:
             if station_state not in adif_log.worked_states_lotw:
                 needed_flags.append(f"NEW-WAS({station_state})")
@@ -970,6 +989,10 @@ def handle_packet(
             match_flags  = []
     is_needed = bool(needed_flags)
     is_match  = bool(match_flags)
+
+    # Non-CQ: only proceed to display if --raw or there is an actual hit.
+    if not is_cq and not args.raw and not (needed_flags or match_flags):
+        return lines
 
     # ── External alerts + bell (first occurrence only) ───────────────────────
     is_new_alert = False
@@ -1010,9 +1033,10 @@ def handle_packet(
     cols.append(_col(f"{df:5d}",       _DIM, color))
     cols.append(_col(f"{mode:<4}",     _DIM, color))
 
-    cols.append(f"{msg_text:<{_W_MSG}}")
+    msg_col = f"{msg_text:<{_W_MSG}}"
+    cols.append(_col(msg_col, _BMAG, color) if (not is_cq and (is_needed or is_match)) else msg_col)
 
-    call_col    = callsign if (is_cq and callsign) else ""
+    call_col    = callsign if callsign else ""
     call_str    = f"{call_col:<{_W_CALL}}"
     call_worked = bool(adif_log and call_col and call_col in adif_log.worked_calls)
     if call_col:
@@ -1033,7 +1057,7 @@ def handle_packet(
             days_str = f"{delta:>4d}d"
         cols.append(days_str)
 
-    if hamdat and is_cq:
+    if hamdat and (is_cq or args.all_decodes):
         st_val    = station_state or ""
         st_str    = f"{st_val:<2}"
         st_worked = bool(adif_log and st_val and st_val in adif_log.worked_states)
@@ -1041,7 +1065,7 @@ def handle_packet(
 
     if entity_info:
         em1 = em2 = em3 = ""
-        if adif_log and is_cq:
+        if adif_log and (is_cq or args.all_decodes):
             wf     = set(adif_log.worked_flags(entity_info, args))
             wf_all = set(adif_log.worked_flags_all(entity_info, args))
             if args.need_entity:
@@ -1060,7 +1084,7 @@ def handle_packet(
 
     if adif_log and (args.need_was or args.need_5bwas):
         was_em = ""
-        if is_cq and station_state and station_state in _WAS_STATES:
+        if (is_cq or args.all_decodes) and station_state and station_state in _WAS_STATES:
             if args.need_was:
                 if   station_state in adif_log.worked_states_lotw: was_em = "✅"
                 elif station_state in adif_log.worked_states_all:  was_em = "❓"
@@ -1093,10 +1117,12 @@ def handle_packet(
     lines.append(line)
 
     alert_parts: list = []
-    if adif_log and is_cq and needed_flags:
-        alert_parts.append(_col(f"*** NEEDED: {', '.join(needed_flags)} ***", _BRED, color))
+    if adif_log and needed_flags:
+        alert_color = _BRED if is_cq else _BMAG
+        alert_parts.append(_col(f"*** NEEDED: {', '.join(needed_flags)} ***", alert_color, color))
     if match_flags:
-        alert_parts.append(_col(f"*** MATCH: {', '.join(match_flags)} ***", _BYEL, color))
+        match_color = _BYEL if is_cq else _BMAG
+        alert_parts.append(_col(f"*** MATCH: {', '.join(match_flags)} ***", match_color, color))
     if alert_parts:
         lines.append("  " + "  ".join(alert_parts))
 
@@ -1564,7 +1590,9 @@ class JtconTUI:
 
             if out_lines:
                 call = meta.get('callsign')
-                if call and meta.get('is_cq'):
+                is_cq   = meta.get('is_cq')
+                is_hit  = meta.get('needed_flags') or meta.get('match_flags')
+                if call and (is_cq or is_hit):
                     # Assign the next rolling index and store in buffer.
                     idx = self._next_idx
                     self._next_idx = (self._next_idx + 1) % 100
@@ -1579,7 +1607,7 @@ class JtconTUI:
                     }
                     out_lines = [f"{idx:02d}  {out_lines[0]}"] + out_lines[1:]
                 else:
-                    # Non-CQ (raw mode) or error/debug line — indent to keep columns aligned.
+                    # Non-CQ with no hit (raw mode) — indent to keep columns aligned.
                     out_lines = [f"    {out_lines[0]}"] + out_lines[1:]
 
                 for line in out_lines:
@@ -1727,7 +1755,7 @@ class JtconTUI:
         # ── Column header then ready banner ───────────────────────────────────
         log(_header_line(args, has_adif=self.adif_log is not None))
         log(f"[ready] Listening on {args.host}:{args.port}"
-            f"  ({'all decodes' if args.raw else 'CQ calls only'})")
+            f"  ({'all decodes' if args.raw else 'CQ + matched' if args.all_decodes else 'CQ calls only'})")
 
         # ── Hand off to UDP receive loop ──────────────────────────────────────
         self._udp_loop()
@@ -1761,6 +1789,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=2237)
     parser.add_argument("--show-time", action="store_true")
     parser.add_argument("--raw", action="store_true")
+    parser.add_argument("--all", action="store_true", dest="all_decodes")
     parser.add_argument("--save", metavar="FILE")
     parser.add_argument("--cty", metavar="PATH", default=str(CTY_DAT_DEFAULT))
     parser.add_argument("--adif", metavar="FILE", nargs="+",

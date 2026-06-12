@@ -55,13 +55,103 @@ status icon:
 | ❓ | Worked but not yet LoTW-confirmed *(only visible with `--qsl-only`)* |
 | ❌ | Not yet worked |
 
-The same three icons are used in the `WAS`/`5BW` column, but confirmation always
-means **LoTW-confirmed** regardless of `--qsl-only` (ARRL award requirement).
+### WAS / 5BW column icons
 
-NEEDED and MATCH alerts appear as indented lines below the relevant decode:
+The `WAS`/`5BW` column uses the same three icons, but the confirmation rules are
+different — and fixed.  The ARRL only accepts LoTW QSLs for the WAS and 5-Band WAS
+awards, so the column **always** behaves as if `--qsl-only` is active, regardless of
+whether you passed that flag.
+
+**`--was` mode** — per state:
+
+| Icon | Meaning |
+|---|---|
+| ✅ | State is LoTW-confirmed (`lotw_qsl_rcvd=Y` in your log) |
+| ❓ | State is worked (QSO exists) but not yet LoTW-confirmed |
+| ❌ | State has never been worked |
+
+**`--5bwas` mode** — per state × current band:
+
+| Icon | Meaning |
+|---|---|
+| ✅ | State is LoTW-confirmed on the current band |
+| ❓ | State is worked on the current band but not yet LoTW-confirmed |
+| ❌ | State has never been worked on the current band |
+
+The `❓` icon is particularly useful here: it means you have a QSO in the log that
+could satisfy the award if the other station uploads to LoTW — so it may be worth
+working them again or chasing the confirmation rather than treating the contact as
+a brand-new needed state.
+
+### NEEDED alerts with pending (unconfirmed) QSOs
+
+The `NEEDED` alert fires whenever a state/band combo is not yet LoTW-confirmed,
+**even if you already have an unconfirmed QSO for that state in your log**.  The
+NEEDED check only looks at LoTW-confirmed contacts — it does not matter which
+callsign you previously worked or whether a confirmation is pending.
+
+Example: you worked W1ABC in MA last week, but it's still showing `❓` (unconfirmed).
+Today W1XYZ calls CQ from MA.  jtcon will still fire the NEEDED alert:
+
+```
+  *** NEEDED: NEW-WAS(MA) ***
+```
+
+This is intentional — until LoTW confirms the contact, MA is not in the bag and the
+new decode is a legitimate opportunity to secure it.
+
+NEEDED and MATCH alerts appear as indented lines below the relevant decode.
+For CQ-triggered alerts the lines are **red** (NEEDED) and **yellow** (MATCH):
 ```
   *** NEEDED: NEW-DXCC(VK)  NEW-CQZ(29) ***
   *** MATCH: CALL:VK.* [watchlist.txt] ***
+```
+
+### Matching against all decodes (`--all`)
+
+By default jtcon only applies NEEDED/MATCH logic to CQ calls.  Some operators rarely
+call CQ and only appear in directed exchanges (e.g. `W1ABC W1XYZ -12`).  The `--all`
+flag extends the full matching pipeline to every decoded message so those stations
+are not missed.
+
+**How it works**: In a directed FT8 message the second token is the transmitting
+station (the FROM_CALL) — the station whose signal you are actually receiving and
+who is therefore a valid contact target.  jtcon looks up that callsign for entity,
+CQ zone, country, and US state, then applies the same NEEDED/WAS/5BWAS/pattern
+checks as it would for a CQ.
+
+**Display rules**:
+
+| Mode | CQ decodes | Non-CQ decodes |
+|---|---|---|
+| default | always shown | suppressed |
+| `--raw` | always shown | always shown, no NEEDED/MATCH |
+| `--all` | always shown | shown only on a NEEDED or MATCH hit (magenta) |
+| `--all --raw` | always shown | always shown; hits highlighted magenta |
+
+Non-CQ hits are highlighted **magenta** — both the decoded message text and the
+`*** NEEDED ***` / `*** MATCH ***` alert line — so they are instantly distinguishable
+from CQ-sourced alerts.  They are also assigned a rolling buffer index and can be
+called from the `CMD>` prompt exactly like a CQ entry.
+
+Example — a needed DXCC entity heard in a directed exchange:
+
+```
+07  123045z  +05   +0.1s  1234  FT8   W1ABC VK3XY R-12           VK3XY   ...
+      *** NEEDED: NEW-DXCC(VK) ***                                (magenta)
+```
+
+Usage examples:
+
+```bash
+# Alert on NEEDED contacts heard in any decode, not just CQ
+./jtcon --adif ~/wsjtx_log.adi --all
+
+# Same, but also show all non-CQ traffic (verbose)
+./jtcon --adif ~/wsjtx_log.adi --all --raw
+
+# Catch non-CQ WAS contacts on 20 m
+./jtcon --adif ~/wsjtx_log.adi --5bwas --all
 ```
 
 ### Status line
@@ -140,6 +230,9 @@ chmod +x jtcon
 
 # Flag states not yet LoTW-confirmed on the current band (ARRL 5-Band WAS)
 ./jtcon --adif ~/wsjtx_log.adi --5bwas
+
+# Alert on NEEDED/MATCH contacts heard in any decode, not just CQ
+./jtcon --adif ~/wsjtx_log.adi --all
 ```
 
 ## ADIF Auto-Discovery
@@ -193,6 +286,9 @@ checked.
 --port PORT             UDP port matching WSJT-X Settings → Reporting (default: 2237)
 --show-time             Prepend local wall-clock HH:MM:SS to each line
 --raw                   Show ALL decoded messages, not just CQ
+--all                   Apply NEEDED/MATCH logic to all decodes, not just CQ; non-CQ
+                        hits shown in magenta and added to reply buffer (see --raw to
+                        also show non-matching non-CQ traffic)
 --save FILE             Append each CQ record as JSON to FILE
 --cty PATH              Path to cty.dat (default: ~/.jtcon_cty.dat)
 --no-color              Disable ANSI colorization of the decode output
