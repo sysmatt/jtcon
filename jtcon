@@ -84,6 +84,8 @@ Options
   --all                 Apply NEEDED/MATCH logic to ALL decoded messages, not just CQ;
                         non-CQ hits are shown in magenta and added to the reply buffer.
                         Combine with --raw to also show non-CQ messages with no hits.
+                        Requires WSJT-X Settings → Reporting → "CQ only" to be UNCHECKED
+                        so that WSJT-X retains non-CQ decodes for UDP reply.
   --stats               Enable cycle stats (always shown in status bar)
   --debug               Dump raw hex + parsed fields to the decode pane
 """

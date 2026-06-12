@@ -346,6 +346,10 @@ In WSJT-X: **Settings → Reporting → UDP Server**
 - Enable UDP server
 - Set port to match `--port` (default 2237)
 - Check **"Accept UDP requests"** to enable the CMD> reply feature
+- **Uncheck "CQ only"** if using `--all` — when this box is checked WSJT-X only
+  retains CQ decodes in its internal call list, so attempting to reply to a
+  non-CQ decode via the UDP Reply message will fail silently (WSJT-X broadcasts
+  the decode over UDP but has nothing to double-click internally)
 
 ## Known Limitations
 
