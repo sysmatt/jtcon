@@ -637,7 +637,11 @@ class AdifLog:
                         self.lotw_rcvd_by_band.setdefault(was_band, set()).add(call)
 
                 # WAS / 5BWAS tracking — always LOTW-only for _lotw sets
+                # WSJT-X does not populate the state field in its ADIF; fall back
+                # to hamdat so per-band LoTW data is captured for those logs.
                 was_state = q.get("state", "").strip().upper()
+                if not was_state and self._hamdat and call:
+                    was_state = self._hamdat.state(call) or ""
                 if was_state and was_state in _WAS_STATES:
                     self.worked_states_all.add(was_state)
                     if was_band in _5BWAS_BANDS:
