@@ -300,14 +300,16 @@ Activity window).  When all slots are full, the least recently heard station is
 evicted.  With `--all`, non-CQ decodes that produce a NEEDED or MATCH hit are also
 stored; a station's newest decode replaces its earlier one, CQ or not.
 
-`list` shows each flagged station once, oldest first, with the time since it was
-last heard and how many times it has been decoded:
+`list` shows each flagged station once, oldest first.  The decode row stays aligned
+with the column header; the time since the station was last heard and how many times
+it has been decoded are appended to its NEEDED/MATCH line:
 
 ```
-[list] 3 NEEDED/MATCH entries (last heard at bottom) ——
-12   4m10s ×6   123015z  -08   +0.2s  1810  FT8   CQ VK3XY QF22 ...
-07     45s ×14  123345z  +03   +0.1s   940  FT8   CQ ZL2AB RF70 ...
-31      0s ×2   123430z  -15   -0.4s  2210  FT8   CQ DX JA1XYZ PM95 ...
+[list] 2 NEEDED/MATCH entries (last heard at bottom) ——
+12  123015z  -08   +0.2s  1810  FT8   CQ VK3XY QF22    VK3XY   QF22   | Australia ...
+  *** NEEDED: NEW-DXCC(VK), NEW-CQZ(30) ***  (last heard 4m10s ago, ×6)
+07  123345z  +03   +0.1s   940  FT8   CQ ZL2AB RF70    ZL2AB   RF70   | New Zealand ...
+  *** NEEDED: NEW-DXCC(ZL) ***  *** MATCH: CALL:ZL.* [watchlist.txt] ***  (last heard 45s ago, ×14)
 ```
 
 Replying to a station last heard more than 2 minutes ago prints a warning.  The

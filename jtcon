@@ -1711,9 +1711,18 @@ class JtconTUI:
         self._append_line(f"[list] {len(hits)} NEEDED/MATCH entries (last heard at bottom) ——")
         for entry in hits:
             lines = entry['lines']
-            seen  = f"{_fmt_age(now - entry['last_seen']):>6} ×{entry['count']:<3}"
-            self._append_line(f"{entry['idx']:02d}  {seen} {lines[0]}")
-            for line in lines[1:]:
+            # Keep the decode row aligned with the column header; the heard
+            # stats go on the NEEDED/MATCH line below it.
+            seen = _col(
+                f"(last heard {_fmt_age(now - entry['last_seen'])} ago, ×{entry['count']})",
+                _DIM, self.args.color,
+            )
+            self._append_line(f"{entry['idx']:02d}  {lines[0]}")
+            if len(lines) > 1:
+                self._append_line(f"{lines[1]}  {seen}")
+            else:
+                self._append_line(f"  {seen}")
+            for line in lines[2:]:
                 self._append_line(line)
 
     # ── Output append (thread-safe) ───────────────────────────────────────────
