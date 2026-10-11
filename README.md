@@ -152,13 +152,13 @@ Usage examples:
 
 ```bash
 # Alert on NEEDED contacts heard in any decode, not just CQ
-./jtcon --adif ~/wsjtx_log.adi --all
+jtcon --adif ~/wsjtx_log.adi --all
 
 # Same, but also show all non-CQ traffic (verbose)
-./jtcon --adif ~/wsjtx_log.adi --all --raw
+jtcon --adif ~/wsjtx_log.adi --all --raw
 
 # Catch non-CQ WAS contacts on 20 m
-./jtcon --adif ~/wsjtx_log.adi --5bwas --all
+jtcon --adif ~/wsjtx_log.adi --5bwas --all
 ```
 
 ### Status line
@@ -178,7 +178,7 @@ Usage examples:
 ## Requirements
 
 - Python 3.10+
-- `prompt-toolkit` >= 3.0 — `pip install prompt-toolkit` or your OS package manager
+- `prompt-toolkit` >= 3.0 — installed automatically by pipx
 - `cty.dat` — downloaded automatically from country-files.com on first run and cached at
   `~/.jtcon_cty.dat`; re-downloaded at startup when the cached copy is more than 30 days
   old (the old copy is kept if the download fails)
@@ -190,58 +190,77 @@ Optional:
 
 ## Installation
 
+Install with [pipx](https://pipx.pypa.io/), which puts the `jtcon` command on your
+PATH in its own isolated environment:
+
 ```bash
-git clone <repo>
+pipx install git+https://github.com/sysmatt/jtcon
+jtcon --version
+```
+
+Upgrade to the latest version on GitHub, or remove it:
+
+```bash
+pipx upgrade jtcon
+pipx uninstall jtcon
+```
+
+### Running from a git checkout
+
+```bash
+git clone https://github.com/sysmatt/jtcon.git
 cd jtcon
-pip install -r requirements.txt
-chmod +x jtcon
+pip install -r requirements.txt   # just prompt-toolkit
 ./jtcon
 ```
+
+To work on the code with the `jtcon` command following your edits, install the
+checkout in editable mode: `pipx install -e .`
 
 ## Usage
 
 ```bash
 # Basic live monitor
-./jtcon
+jtcon
 
 # With ADIF log — NEEDED flag + coloring for new entities/zones/countries
-./jtcon --adif ~/Documents/wsjtx_log.adi
+jtcon --adif ~/Documents/wsjtx_log.adi
 
 # ADIF mode with LoTW-only confirmation (❓ for worked-but-unconfirmed)
-./jtcon --adif ~/wsjtx_log.adi --qsl-only
+jtcon --adif ~/wsjtx_log.adi --qsl-only
 
 # Suppress NEEDED alerts for any callsign worked in the last 7 days
-./jtcon --adif ~/wsjtx_log.adi --worked-lag-days 7
+jtcon --adif ~/wsjtx_log.adi --worked-lag-days 7
 
 # Save every CQ record to a JSON-lines file
-./jtcon --save cq.jsonl
+jtcon --save cq.jsonl
 
 # Show all decodes (not just CQ) with wall-clock timestamps
-./jtcon --raw --show-time
+jtcon --raw --show-time
 
 # Flag POTA and SOTA activations
-./jtcon --pota --sota
+jtcon --pota --sota
 
 # Match specific callsigns from a watchlist file
-./jtcon --match-calls watchlist.txt
+jtcon --match-calls watchlist.txt
 
 # Only alert on new DXCC entities, suppress zone/country checks
-./jtcon --adif ~/wsjtx_log.adi --no-need-cqz --no-need-country
+jtcon --adif ~/wsjtx_log.adi --no-need-cqz --no-need-country
 
 # Forward packets to GridTracker on port 2238
-./jtcon --proxy 2238
+jtcon --proxy 2238
 
 # Run a script whenever the ADIF log is reloaded
-./jtcon --adif ~/wsjtx_log.adi --adif-change-script ~/bin/on_log_change.sh
+jtcon --adif ~/wsjtx_log.adi --adif-change-script ~/bin/on_log_change.sh
 
 # Flag US states not yet LoTW-confirmed (ARRL WAS award tracking)
-./jtcon --adif ~/wsjtx_log.adi --was
+jtcon --adif ~/wsjtx_log.adi --was
 
 # Flag states not yet LoTW-confirmed on the current band (ARRL 5-Band WAS)
-./jtcon --adif ~/wsjtx_log.adi --5bwas
+jtcon --adif ~/wsjtx_log.adi --5bwas
 
 # Alert on NEEDED/MATCH contacts heard in any decode, not just CQ
-./jtcon --adif ~/wsjtx_log.adi --all
+jtcon --adif ~/wsjtx_log.adi --all
 ```
 
 ## ADIF Auto-Discovery

@@ -1,0 +1,2263 @@
+#!/usr/bin/env python3
+"""
+jtcon
+=====
+Listen for WSJT-X UDP broadcasts, display CQ calls in a scrollable TUI pane
+enriched with entity / CQ-zone / country / grid info from cty.dat, optionally
+save as newline-delimited JSON, and optionally load an ADIF logbook so that
+contacts whose entity, CQ zone, or country have NOT been worked before are
+flagged as NEEDED.
+
+TUI layout
+----------
+  ┌─────────────────────────────────────┐
+  │  scrollable decode output           │  ← top pane, Tab to focus & scroll
+  ├─────────────────────────────────────┤
+  │  CMD>                               │  ← single-line command input
+  ├─────────────────────────────────────┤
+  │  [████████░░] even  dec=…  cq=…     │  ← status line (cycle bar + stats)
+  └─────────────────────────────────────┘
+
+Key bindings
+------------
+  ↑ / ↓             Scroll the output pane one line (focus stays at CMD>)
+  PgUp / PgDn       Scroll the output pane one page
+  Esc / Ctrl-End    Return to the newest output
+  Tab               Toggle focus between output pane and command input
+  Ctrl-C / Ctrl-Q   Quit
+
+Commands (type in CMD> line, press Enter)
+-----------------------------------------
+  quit / exit / q    Exit the program
+  clear              Clear the decode output
+  list (or l/li/lis) Show all NEEDED/MATCH entries from the rolling buffer,
+                     sorted by last heard (most recent at the bottom)
+  00-99              Reply to the contact at that rolling-buffer index
+  <CALLSIGN>         Reply to that callsign's rolling-buffer entry
+
+Rolling buffer
+--------------
+  One slot per callsign.  A station keeps its index while it is heard; each
+  repeat decode refreshes the entry so replies use the newest decode.  When
+  all 100 slots are full the least recently heard station is evicted.  The
+  buffer is cleared when the dial frequency changes.
+
+Dependencies
+------------
+  prompt_toolkit  (python3-prompt-toolkit)
+  Everything else is Python standard library.
+
+First run
+---------
+  cty.dat (AD1C Big CTY prefix database) is downloaded automatically from
+  country-files.com and cached at ~/.jtcon_cty.dat; it is refreshed when the
+  cached copy is more than 30 days old.
+
+Install
+-------
+  pipx install git+https://github.com/sysmatt/jtcon
+
+Usage
+-----
+  jtcon
+  jtcon --adif ~/Documents/wsjtx_log.adi
+  jtcon --adif ~/wsjtx_log.adi --save cq.jsonl
+  jtcon --raw --show-time
+  jtcon --match-calls watchlist.txt
+  jtcon --pota --sota
+
+Options
+-------
+  --host HOST           UDP bind address           (default: 0.0.0.0)
+  --port PORT           UDP port                   (default: 2237)
+  --show-time           Prepend local wall-clock HH:MM:SS to every line
+  --raw                 Show ALL decoded messages, not just CQ
+  --save FILE           Append each CQ record as a JSON line to FILE
+  --cty PATH            Path to cty.dat            (default: ~/.jtcon_cty.dat)
+  --adif FILE           ADIF log file for NEEDED detection
+  --no-need-entity      Disable DXCC-entity NEEDED check
+  --no-need-cqz         Disable CQ-zone NEEDED check
+  --no-need-country     Disable country-name NEEDED check
+  --qsl-only            Require LoTW confirmation for NEEDED checks; ❓ icon
+                        marks worked-but-unconfirmed entities
+  --worked-lag-days N   Suppress NEEDED/MATCH for a callsign worked within N days
+                        (default 0 = suppress today; -1 = disable suppression)
+  --match-calls FILE    File(s) of callsign regex patterns
+  --match-message FILE  File(s) of decoded-message regex patterns
+  --alert-command SCRIPT  Script to exec on NEEDED/MATCH events
+  --alert-ntfy TOPIC    POST NEEDED/MATCH alerts to ntfy.sh topic
+  --adif-change-script SCRIPT  Script to exec when ADIF log file(s) are reloaded
+  --proxy PORT[,...]    Forward received packets to additional UDP ports on localhost
+  --pota                Flag CQ POTA calls as MATCH
+  --sota                Flag CQ SOTA calls as MATCH
+  --iota                Flag CQ IOTA calls as MATCH
+  --match-state STATES  Comma-separated US state abbreviations or file
+  --hamdat DB           Path to hamdat SQLite database
+  --was                 Flag US states not yet LoTW-confirmed as NEEDED (WAS award)
+  --5bwas               Flag US states not yet LoTW-confirmed on the current band
+                        as NEEDED (5-Band WAS award); mutually exclusive with --was
+  --all                 Apply NEEDED/MATCH logic to ALL decoded messages, not just CQ;
+                        non-CQ hits are shown in magenta and added to the reply buffer.
+                        Combine with --raw to also show non-CQ messages with no hits.
+                        Requires WSJT-X Settings → Reporting → "CQ only" to be UNCHECKED
+                        so that WSJT-X retains non-CQ decodes for UDP reply.
+  --debug               Dump raw hex + parsed fields to the decode pane
+  --mouse               Mouse wheel scrolls the decode pane; Shift+drag selects text
+"""
+
+import argparse
+import json
+import re
+import select
+import socket
+import sqlite3
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+from prompt_toolkit import Application
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import has_focus
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.mouse_events import MouseEventType
+from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import TextArea
+
+
+__version__ = "2.0.0"
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+MAGIC      = 0xADBCCBDA
+MSG_STATUS = 1
+MSG_DECODE = 2
+MSG_REPLY  = 4
+
+CTY_DAT_URL     = "https://www.country-files.com/cty/cty.dat"
+CTY_DAT_DEFAULT = Path.home() / ".jtcon_cty.dat"
+CTY_MAX_AGE_DAYS = 30   # re-download cty.dat when the cached copy is older
+HAMDAT_DB_DEFAULT = Path.home() / ".hamdat" / "hamdat.db"
+
+# Candidate locations searched in order when no --adif flag is given.
+WSJT_LOG_SEARCH_PATHS: list[Path] = [
+    # Linux — XDG standard (WSJT-X 2.x)
+    Path.home() / ".local" / "share" / "WSJT-X" / "wsjtx_log.adi",
+    # Linux — XDG experimental / nightly builds
+    Path.home() / ".local" / "share" / "WSJT-X Exp" / "wsjtx_log.adi",
+    # macOS
+    Path.home() / "Library" / "Application Support" / "WSJT-X" / "wsjtx_log.adi",
+    # Windows default AppData\Roaming path
+    Path.home() / "AppData" / "Roaming" / "WSJT-X" / "wsjtx_log.adi",
+    # Older Linux installs / portable installs
+    Path.home() / "WSJT-X" / "wsjtx_log.adi",
+]
+
+
+def _find_wsjt_logs() -> list[Path]:
+    """Return all WSJT_LOG_SEARCH_PATHS entries that currently exist on disk."""
+    found = []
+    for p in WSJT_LOG_SEARCH_PATHS:
+        try:
+            if p.exists():
+                found.append(p)
+        except OSError:
+            pass
+    return found
+
+# WSJT-X Decode "mode" field is a single character per mode.
+_MODE_NAMES = {
+    "~": "FT8",
+    "+": "FT4",
+    "`": "FST4",
+    ":": "Q65",
+    "#": "JT65",
+    "@": "JT9",
+    "&": "MSK144",
+    "$": "JT4",
+}
+
+_W_MSG  = 24
+_W_CALL = 12
+_W_GRID = 6
+_W_DAYS = 5    # days-since-last-worked column width
+_W_WAS  = 4   # WAS / 5BWAS column: emoji(2) + state(2)
+
+# All 50 US states recognised for WAS/5BWAS tracking.
+_WAS_STATES: frozenset = frozenset({
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+})
+
+# The five classic HF bands required for the 5-Band WAS award.
+_5BWAS_BANDS: frozenset = frozenset({"80m", "40m", "20m", "15m", "10m"})
+
+
+# (low Hz, high Hz, ADIF band) — ADIF 3.1 band edges.
+_BANDS: tuple = (
+    (  1_800_000,   2_000_000, "160m"),
+    (  3_500_000,   4_000_000, "80m"),
+    (  5_060_000,   5_450_000, "60m"),
+    (  7_000_000,   7_300_000, "40m"),
+    ( 10_100_000,  10_150_000, "30m"),
+    ( 14_000_000,  14_350_000, "20m"),
+    ( 18_068_000,  18_168_000, "17m"),
+    ( 21_000_000,  21_450_000, "15m"),
+    ( 24_890_000,  24_990_000, "12m"),
+    ( 28_000_000,  29_700_000, "10m"),
+    ( 50_000_000,  54_000_000, "6m"),
+    ( 70_000_000,  71_000_000, "4m"),
+    (144_000_000, 148_000_000, "2m"),
+    (420_000_000, 450_000_000, "70cm"),
+)
+
+
+def _freq_to_band(hz: int) -> str | None:
+    """Convert a dial frequency in Hz to an ADIF band string, or None."""
+    for lo, hi, band in _BANDS:
+        if lo <= hz < hi:
+            return band
+    return None
+
+# ANSI colour codes used in the decode output pane.
+_RST  = "\033[0m"
+_DIM  = "\033[2m"
+_BOLD = "\033[1m"
+_GRN  = "\033[32m"    # green      — worked grid/entity
+_BGRN = "\033[1;32m"  # bold green  — worked callsign (same band + mode)
+_CYN  = "\033[36m"    # cyan       — entity block
+_BRED = "\033[1;31m"  # bold red    — NEEDED alert (CQ)
+_BYEL = "\033[1;33m"  # bold yellow — MATCH alert / callsign worked on another band or mode
+_BMAG = "\033[1;35m"  # bold magenta — NEEDED/MATCH alert (non-CQ, --all)
+
+
+def _col(text: str, code: str, on: bool) -> str:
+    return f"{code}{text}{_RST}" if on else text
+
+
+# Matches any string that looks like an amateur callsign: ≥3 chars, at least one digit,
+# alphanumeric plus optional slash (for portable/country prefixes).
+_CALLSIGN_RE = re.compile(r'^(?=[A-Z0-9/]*\d)[A-Z0-9/]{3,}$', re.IGNORECASE)
+
+_BAR_WIDTH = 14   # characters wide for the cycle bargraph
+
+# Stricter than _CALLSIGN_RE: prefix + digit + suffix ending in a letter, with
+# optional /PREFIX and /SUFFIX.  Rejects RR73, grids, reports and free text.
+_STRICT_CALL_RE = re.compile(
+    r'^(?:[A-Z0-9]{1,4}/)?[A-Z0-9]{1,3}\d[A-Z0-9]{0,3}[A-Z](?:/[A-Z0-9]{1,4})?$'
+)
+
+_ALERT_REPEAT_S = 3600  # re-alert a station after it has gone unheard this long
+_BUF_SIZE      = 100   # rolling buffer slots (two-digit index 00-99)
+_MAX_OUTPUT_LINES = 5000   # output pane is trimmed when it grows past this…
+_TRIM_OUTPUT_TO   = 4000   # …down to this many lines
+_WHEEL_LINES      = 3      # lines per mouse-wheel notch (--mouse)
+_STALE_REPLY_S = 120   # warn when replying to an entry last heard longer ago than this
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  cty.dat parser
+# ══════════════════════════════════════════════════════════════════════════════
+
+_OVERRIDE_RE = re.compile(r"[\(\[\{<~][^\)\]\}>~]*[\)\]\}>~]")
+
+
+def _strip_overrides(token: str) -> tuple:
+    overrides = {}
+    m = re.search(r"\((\d+)\)", token)
+    if m:
+        overrides["cqz"] = int(m.group(1))
+    m = re.search(r"\[(\d+)\]", token)
+    if m:
+        overrides["ituz"] = int(m.group(1))
+    m = re.search(r"\{([A-Z]+)\}", token)
+    if m:
+        overrides["continent"] = m.group(1)
+    clean = _OVERRIDE_RE.sub("", token).strip()
+    return clean, overrides
+
+
+_PORTABLE_SUFFIXES = frozenset({"P", "M", "MM", "AM", "QRP", "QRPP", "A", "B"})
+
+
+class CtyDat:
+    def __init__(self):
+        self._exact:    dict = {}
+        self._prefixes: list = []
+
+    def load(self, path: Path) -> None:
+        self._parse(path.read_text(encoding="utf-8", errors="replace"))
+
+    def _parse(self, text: str) -> None:
+        for record in re.split(r"\n(?=[A-Z*])", text):
+            lines = record.strip().splitlines()
+            if not lines:
+                continue
+            parts = [p.strip() for p in lines[0].split(":")]
+            if len(parts) < 8:
+                continue
+            try:
+                base = {
+                    "country":        parts[0].lstrip("*"),
+                    "cqz":            int(parts[1]),
+                    "ituz":           int(parts[2]),
+                    "continent":      parts[3],
+                    "latitude":       float(parts[4]),
+                    "longitude":      -float(parts[5]),
+                    "primary_prefix": parts[7].rstrip(";").strip(),
+                }
+            except (ValueError, IndexError):
+                continue
+            body = " ".join(lines[1:]).split(";")[0]
+            for raw in body.split(","):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                exact = raw.startswith("=")
+                clean, overrides = _strip_overrides(raw.lstrip("="))
+                if not clean:
+                    continue
+                entry = {**base, **overrides}
+                if exact:
+                    self._exact[clean.upper()] = entry
+                else:
+                    self._prefixes.append((clean.upper(), entry))
+        self._prefixes.sort(key=lambda x: len(x[0]), reverse=True)
+
+    def lookup(self, callsign: str) -> dict | None:
+        call = callsign.upper().strip()
+        if call in self._exact:
+            return dict(self._exact[call])
+        # Drop operating-condition suffixes (/P, /QRP) and call-area digits (/7).
+        parts = [p for p in call.split("/")
+                 if p and p not in _PORTABLE_SUFFIXES and not p.isdigit()]
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return self._prefix_match(parts[0])
+        # Compound call such as KH6/W1ABC or W1ABC/VP2E: the shorter part is
+        # the location prefix and decides the entity.
+        a, b = parts[0], parts[-1]
+        prefix, home = (a, b) if len(a) <= len(b) else (b, a)
+        return self._prefix_match(prefix) or self._prefix_match(home)
+
+    def _prefix_match(self, call: str) -> dict | None:
+        for prefix, entry in self._prefixes:
+            if call.startswith(prefix):
+                return dict(entry)
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Cycle tracker
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CycleTracker:
+    """Counts decodes per WSJT-X cycle and maintains running averages."""
+
+    _SLOT_MS = {"FT4": 7500}   # default 15000 ms for FT8
+
+    def __init__(self):
+        self.current_time_ms: int | None = None
+        self._parity: str = "even"
+        self.cycle_total: int = 0
+        self.cycle_cq:    int = 0
+        self.current_mode: str = "FT8"
+        self._sums: dict = {"even": [0, 0, 0], "odd": [0, 0, 0]}
+
+    @staticmethod
+    def _slot_parity(time_ms: int, mode: str) -> str:
+        slot_ms = CycleTracker._SLOT_MS.get(mode, 15000)
+        return "even" if (time_ms // slot_ms) % 2 == 0 else "odd"
+
+    def _close_cycle(self) -> None:
+        s = self._sums[self._parity]
+        s[0] += self.cycle_total
+        s[1] += self.cycle_cq
+        s[2] += 1
+
+    def record(self, time_ms: int, is_cq: bool, is_new: bool, mode: str) -> None:
+        if not is_new:
+            return
+        if self.current_time_ms is not None and time_ms != self.current_time_ms:
+            self._close_cycle()
+            self.cycle_total = 0
+            self.cycle_cq    = 0
+        if self.current_time_ms is None or time_ms != self.current_time_ms:
+            self.current_time_ms = time_ms
+            self._parity      = self._slot_parity(time_ms, mode)
+            self.current_mode = mode
+        self.cycle_total += 1
+        if is_cq:
+            self.cycle_cq += 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  State / hamdat helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_state_set(value: str) -> set:
+    p = Path(value)
+    if p.is_file():
+        states = set()
+        for raw in p.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            states.add(line.upper())
+        return states
+    return {s.strip().upper() for s in value.split(",") if s.strip()}
+
+
+class HamdatLookup:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        self._cache: dict = {}
+
+    def state(self, callsign: str) -> str | None:
+        call = callsign.upper().strip()
+        if call in self._cache:
+            return self._cache[call]
+        row = self._conn.execute(
+            """SELECT e.state
+               FROM license_header h
+               JOIN entity e ON e.unique_system_identifier = h.unique_system_identifier
+                   AND (e.entity_type = 'L' OR e.entity_type = '')
+               WHERE h.call_sign = ? AND h.license_status = 'A'
+               ORDER BY h.id DESC LIMIT 1""",
+            (call,),
+        ).fetchone()
+        result = (row[0] or "").strip().upper() or None if row else None
+        self._cache[call] = result
+        return result
+
+    def close(self):
+        self._conn.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pattern matching helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_regex_patterns(file_paths: list, log=None) -> list:
+    """
+    Return a list of (compiled_pattern, source_filename) tuples.
+    Raises OSError if a file can't be read; invalid regexes are logged and skipped.
+    """
+    _log = log or (lambda m: print(m, file=sys.stderr))
+    patterns = []
+    for path_str in file_paths:
+        p = Path(path_str)
+        for i, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                patterns.append((re.compile(line, re.IGNORECASE), p.name))
+            except re.error as exc:
+                _log(f"[match] {p.name}:{i}: invalid regex {line!r}: {exc}")
+    return patterns
+
+
+def _regex_matches(value: str, patterns: list) -> list:
+    """Return label strings for each (pattern, source) tuple that matches value."""
+    results = []
+    for pat, src in patterns:
+        if pat.search(value):
+            results.append(f"{pat.pattern} [{src}]" if src else pat.pattern)
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Alert helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_alert_msg(callsign, entity_info: dict,
+                     needed_flags: list, match_flags: list) -> str:
+    segments = [callsign or "?"]
+    if entity_info:
+        segments.append(f"{entity_info['entity']} CQ{entity_info['cq_zone']}")
+    flag_parts = []
+    if needed_flags:
+        flag_parts.append("NEEDED: " + ", ".join(needed_flags))
+    if match_flags:
+        flag_parts.append("MATCH: " + ", ".join(match_flags))
+    if flag_parts:
+        segments.append("  ".join(flag_parts))
+    return " | ".join(segments)
+
+
+def _send_alerts(msg: str, args: argparse.Namespace, log=None) -> None:
+    _log = log or (lambda m: print(m, file=sys.stderr))
+    if args.alert_command:
+        try:
+            subprocess.Popen(
+                [args.alert_command, msg],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            _log(f"[alert-command] {exc}")
+    if args.alert_ntfy:
+        # Network I/O runs in its own thread so a slow server can't stall decoding.
+        def _post():
+            try:
+                req = urllib.request.Request(
+                    f"https://ntfy.sh/{args.alert_ntfy}",
+                    data=msg.encode("utf-8"),
+                    method="POST",
+                )
+                req.add_header("Title", "jtcon")
+                urllib.request.urlopen(req, timeout=10).close()
+            except Exception as exc:
+                _log(f"[alert-ntfy] {exc}")
+        threading.Thread(target=_post, daemon=True).start()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  WSJT-X reply helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _encode_utf8(s: str) -> bytes:
+    if not s:
+        return struct.pack(">I", 0xFFFFFFFF)
+    b = s.encode("utf-8")
+    return struct.pack(">I", len(b)) + b
+
+
+def _send_reply(tx_sock, wsjt_addr: tuple, decoded: dict, log=None) -> None:
+    _log = log or (lambda m: print(m, file=sys.stderr))
+    buf = bytearray()
+    buf += struct.pack(">III", MAGIC, 2, MSG_REPLY)
+    buf += _encode_utf8(decoded["id"])
+    buf += struct.pack(">I",  decoded["time_ms"])
+    buf += struct.pack(">i",  decoded["snr"])
+    buf += struct.pack(">d",  decoded["dt"])
+    buf += struct.pack(">I",  decoded["df"])
+    buf += _encode_utf8(decoded["mode"])
+    buf += _encode_utf8(decoded["message"])
+    buf += struct.pack(">B",  1 if decoded.get("low_conf") else 0)
+    buf += struct.pack(">B",  0)
+    try:
+        tx_sock.sendto(bytes(buf), wsjt_addr)
+    except OSError as exc:
+        _log(f"[call] Reply send failed: {exc}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  cty.dat download
+# ══════════════════════════════════════════════════════════════════════════════
+
+def download_cty(path: Path) -> None:
+    req = urllib.request.Request(
+        CTY_DAT_URL, headers={"User-Agent": f"jtcon/{__version__}"}
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = resp.read()
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ADIF parser + worked-log tracker
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ADIF_FIELD_RE = re.compile(
+    r"<([A-Za-z_][A-Za-z0-9_]*)(?::[^:>]*)?:(\d+)(?::[A-Za-z])?>",
+    re.IGNORECASE,
+)
+_ADIF_EOH_RE = re.compile(r"<EOH>", re.IGNORECASE)
+_ADIF_EOR_RE = re.compile(r"<EOR>", re.IGNORECASE)
+
+
+def parse_adif(path: Path) -> list:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    eoh  = _ADIF_EOH_RE.search(text)
+    body = text[eoh.end():] if eoh else text
+    qsos: list = []
+    pos = 0
+    current: dict = {}
+    while pos < len(body):
+        m   = _ADIF_FIELD_RE.search(body, pos)
+        eor = _ADIF_EOR_RE.search(body, pos)
+        if eor and (not m or eor.start() < m.start()):
+            if current:
+                qsos.append(current)
+                current = {}
+            pos = eor.end()
+            continue
+        if not m:
+            break
+        field  = m.group(1).lower()
+        flen   = int(m.group(2))
+        vstart = m.end()
+        current[field] = body[vstart : vstart + flen].strip()
+        pos = vstart + flen
+    if current:
+        qsos.append(current)
+    return qsos
+
+
+class AdifLog:
+    def __init__(self, paths: list[Path], cty: CtyDat, hamdat=None,
+                 qsl_only: bool = False, log=None):
+        self.paths     = [paths] if isinstance(paths, Path) else list(paths)
+        self.cty       = cty
+        self._hamdat   = hamdat
+        self._qsl_only = qsl_only
+        self._log      = log or (lambda m: print(m, file=sys.stderr))
+
+        self.worked_calls:        set  = set()
+        self.worked_grids:        set  = set()
+        self.worked_dxcc:         set  = set()   # QSL-filtered when qsl_only
+        self.worked_cqz:          set  = set()   # QSL-filtered when qsl_only
+        self.worked_country:      set  = set()   # QSL-filtered when qsl_only
+        self.worked_dxcc_all:     set  = set()   # all QSOs regardless of QSL
+        self.worked_cqz_all:      set  = set()
+        self.worked_country_all:  set  = set()
+        self.qrz_confirmed_calls:    set  = set()   # app_qrzlog_status=C
+        self.lotw_qsl_rcvd_calls:    set  = set()   # lotw_qsl_rcvd=Y
+        self.qrz_confirmed_by_band:  dict = {}       # band -> {call} QRZ-confirmed
+        self.lotw_rcvd_by_band:      dict = {}       # band -> {call} LoTW-confirmed
+        self.worked_calls_by_band:   dict = {}       # band -> {call} any QSO
+        self.worked_calls_by_mode:   dict = {}       # mode -> {call} any QSO
+        self.last_worked:            dict = {}       # call -> most recent date worked
+        # WAS / 5BWAS — always LOTW-only regardless of --qsl-only
+        self.worked_states_lotw:       set  = set()   # states with lotw_qsl_rcvd=Y
+        self.worked_states_all:        set  = set()   # states from any QSO
+        self.worked_states_bands_lotw: dict = {}       # state -> {band} LoTW-confirmed
+        self.worked_states_bands_all:  dict = {}       # state -> {band} any QSO
+        self.total_qsos = 0
+        self._load()
+
+    def _load(self) -> None:
+        """Populate the worked sets.  Called once; a reload builds a new AdifLog."""
+        for path in self.paths:
+            try:
+                qsos = parse_adif(path)
+            except Exception as exc:
+                self._log(f"[adif] Cannot read {path.name}: {exc}")
+                continue
+            self.total_qsos += len(qsos)
+            for q in qsos:
+                call    = q.get("call", "").strip().upper()
+                cqz_raw = (q.get("cqz") or q.get("cq_zone") or "").strip()
+                country = (q.get("country") or q.get("entity") or "").strip().upper()
+                grid    = q.get("gridsquare", "").strip().upper()[:4]
+
+                qrz_status = q.get("app_qrzlog_status", "").strip().upper()
+                lotw_rcvd  = q.get("lotw_qsl_rcvd",    "").strip().upper()
+                was_band   = q.get("band", "").strip().lower()
+                # FT4, FST4, Q65 etc. are logged as MODE=MFSK with a SUBMODE.
+                qso_mode   = (q.get("submode") or q.get("mode") or "").strip().upper()
+                if call and qrz_status == "C":
+                    self.qrz_confirmed_calls.add(call)
+                    if was_band:
+                        self.qrz_confirmed_by_band.setdefault(was_band, set()).add(call)
+                if call and lotw_rcvd == "Y":
+                    self.lotw_qsl_rcvd_calls.add(call)
+                    if was_band:
+                        self.lotw_rcvd_by_band.setdefault(was_band, set()).add(call)
+
+                # WAS / 5BWAS tracking — always LOTW-only for _lotw sets
+                # WSJT-X does not populate the state field in its ADIF; fall back
+                # to hamdat so per-band LoTW data is captured for those logs.
+                was_state = q.get("state", "").strip().upper()
+                if not was_state and self._hamdat and call:
+                    was_state = self._hamdat.state(call) or ""
+                if was_state and was_state in _WAS_STATES:
+                    self.worked_states_all.add(was_state)
+                    if was_band in _5BWAS_BANDS:
+                        self.worked_states_bands_all.setdefault(was_state, set()).add(was_band)
+                    if lotw_rcvd == "Y":
+                        self.worked_states_lotw.add(was_state)
+                        if was_band in _5BWAS_BANDS:
+                            self.worked_states_bands_lotw.setdefault(was_state, set()).add(was_band)
+
+                qso_date_str = q.get("qso_date", "").strip()
+                if call and len(qso_date_str) == 8:
+                    try:
+                        qso_date = datetime.strptime(qso_date_str, "%Y%m%d").date()
+                        existing = self.last_worked.get(call)
+                        if existing is None or qso_date > existing:
+                            self.last_worked[call] = qso_date
+                    except ValueError:
+                        pass
+
+                counts_as_worked = (not self._qsl_only) or (lotw_rcvd == "Y")
+
+                try:
+                    cqz_int = int(cqz_raw)
+                    self.worked_cqz_all.add(cqz_int)
+                    if counts_as_worked:
+                        self.worked_cqz.add(cqz_int)
+                except ValueError:
+                    pass
+                if country:
+                    self.worked_country_all.add(country)
+                    if counts_as_worked:
+                        self.worked_country.add(country)
+                if grid:
+                    self.worked_grids.add(grid)
+                if call:
+                    self.worked_calls.add(call)
+                    if was_band:
+                        self.worked_calls_by_band.setdefault(was_band, set()).add(call)
+                    if qso_mode:
+                        self.worked_calls_by_mode.setdefault(qso_mode, set()).add(call)
+                    info = self.cty.lookup(call)
+                    if info:
+                        self.worked_dxcc_all.add(info["primary_prefix"].upper())
+                        if counts_as_worked:
+                            self.worked_dxcc.add(info["primary_prefix"].upper())
+                        if not cqz_raw:
+                            self.worked_cqz_all.add(info["cqz"])
+                            if counts_as_worked:
+                                self.worked_cqz.add(info["cqz"])
+                        # Always use cty.dat country name for consistency with decode-time lookups
+                        self.worked_country_all.add(info["country"].upper())
+                        if counts_as_worked:
+                            self.worked_country.add(info["country"].upper())
+
+    def needed_flags(self, entity_info: dict, args: argparse.Namespace) -> list:
+        flags = []
+        prefix  = (entity_info.get("primary_prefix") or "").upper()
+        cqz     = entity_info.get("cq_zone")
+        country = (entity_info.get("entity") or "").upper()
+        if args.need_entity and prefix and prefix not in self.worked_dxcc:
+            flags.append(f"NEW-DXCC({prefix})")
+        if args.need_cqz and isinstance(cqz, int) and cqz not in self.worked_cqz:
+            flags.append(f"NEW-CQZ({cqz})")
+        if args.need_country and country and country not in self.worked_country:
+            flags.append(f"NEW-CTRY({entity_info.get('entity', '?')})")
+        return flags
+
+    def worked_flags(self, entity_info: dict, args: argparse.Namespace) -> list:
+        flags = []
+        prefix  = (entity_info.get("primary_prefix") or "").upper()
+        cqz     = entity_info.get("cq_zone")
+        country = (entity_info.get("entity") or "").upper()
+        if args.need_entity and prefix and prefix in self.worked_dxcc:
+            flags.append("dxcc")
+        if args.need_cqz and isinstance(cqz, int) and cqz in self.worked_cqz:
+            flags.append("cqz")
+        if args.need_country and country and country in self.worked_country:
+            flags.append("country")
+        return flags
+
+    def worked_flags_all(self, entity_info: dict, args: argparse.Namespace) -> list:
+        """Return which categories were worked in any QSO (ignores qsl_only filter)."""
+        flags = []
+        prefix  = (entity_info.get("primary_prefix") or "").upper()
+        cqz     = entity_info.get("cq_zone")
+        country = (entity_info.get("entity") or "").upper()
+        if args.need_entity and prefix and prefix in self.worked_dxcc_all:
+            flags.append("dxcc")
+        if args.need_cqz and isinstance(cqz, int) and cqz in self.worked_cqz_all:
+            flags.append("cqz")
+        if args.need_country and country and country in self.worked_country_all:
+            flags.append("country")
+        return flags
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CQ message parser
+# ══════════════════════════════════════════════════════════════════════════════
+
+_GRID_RE = re.compile(r"\b([A-R]{2}\d{2}(?:[A-X]{2})?)\b", re.IGNORECASE)
+
+_CQ_RE = re.compile(
+    r"^CQ\s+"
+    r"(?:(?P<modifier>[A-Z]{1,13})\s+)?"
+    r"(?P<callsign>(?=[A-Z0-9/]*\d)[A-Z0-9/]{3,})"
+    r"(?:\s+(?P<grid>[A-R]{2}\d{2}(?:[A-X]{2})?))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_cq_message(msg: str) -> tuple:
+    msg = msg.strip()
+    if not msg.upper().startswith("CQ"):
+        return None, None, None
+    m = _CQ_RE.match(msg)
+    if not m:
+        return None, None, None
+    modifier = (m.group("modifier") or "").upper()
+    callsign = (m.group("callsign") or "").upper()
+    grid     = (m.group("grid")     or "").upper() or None
+    return callsign or None, grid, modifier or None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Qt binary stream reader
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Reader:
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos  = 0
+
+    def _read(self, n: int) -> bytes:
+        if self.pos + n > len(self.data):
+            raise ValueError("Packet underflow")
+        chunk = self.data[self.pos : self.pos + n]
+        self.pos += n
+        return chunk
+
+    def u8(self)    -> int:   return struct.unpack(">B", self._read(1))[0]
+    def u32(self)   -> int:   return struct.unpack(">I", self._read(4))[0]
+    def u64(self)   -> int:   return struct.unpack(">Q", self._read(8))[0]
+    def i32(self)   -> int:   return struct.unpack(">i", self._read(4))[0]
+    def f64(self)   -> float: return struct.unpack(">d", self._read(8))[0]
+    def bool_(self) -> bool:  return self.u8() != 0
+
+    def utf8(self) -> str:
+        n = self.u32()
+        if n == 0xFFFFFFFF:
+            return ""
+        return self._read(n).decode("utf-8", errors="replace")
+
+
+def parse_decode_msg(r: Reader) -> dict:
+    d = {
+        "id":       r.utf8(),
+        "new":      r.bool_(),
+        "time_ms":  r.u32(),
+        "snr":      r.i32(),
+        "dt":       r.f64(),
+        "df":       r.u32(),
+        "mode":     r.utf8(),
+        "message":  r.utf8(),
+        "low_conf": r.bool_(),
+    }
+    try:
+        d["off_air"] = r.bool_()
+    except ValueError:
+        d["off_air"] = False
+    return d
+
+
+def parse_status_msg(r: Reader) -> dict:
+    """Parse a WSJT-X Status message (type 1)."""
+    d: dict = {}
+    try:
+        d["id"]           = r.utf8()
+        d["dial_freq"]    = r.u64()
+        d["mode"]         = r.utf8()
+        d["dx_call"]      = r.utf8()
+        d["report"]       = r.utf8()
+        d["tx_mode"]      = r.utf8()
+        d["tx_enabled"]   = r.bool_()
+        d["transmitting"] = r.bool_()
+        d["decoding"]     = r.bool_()
+        d["rx_df"]        = r.u32()
+        d["tx_df"]        = r.u32()
+        d["de_call"]      = r.utf8()
+        d["de_grid"]      = r.utf8()
+        d["dx_grid"]      = r.utf8()
+    except (ValueError, struct.error):
+        pass
+    return d
+
+
+def try_parse_status(data: bytes) -> dict | None:
+    """Return parsed Status dict if *data* is a WSJT-X Status message, else None."""
+    if len(data) < 12:
+        return None
+    r = Reader(data)
+    try:
+        if r.u32() != MAGIC:
+            return None
+        r.u32()  # schema — ignored
+        if r.u32() != MSG_STATUS:
+            return None
+        return parse_status_msg(r)
+    except (ValueError, struct.error):
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Packet handler — returns list of display lines (no printing)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class DecodeContext:
+    """Everything handle_packet needs besides the packet itself."""
+    args:          argparse.Namespace
+    cty:           CtyDat
+    adif_log:      AdifLog | None
+    json_fh:       object
+    call_patterns: list
+    msg_patterns:  list
+    state_set:     set
+    hamdat:        HamdatLookup | None
+    cycle_tracker: CycleTracker | None
+    alerted:       dict          # alert key -> monotonic time last heard
+    dial_freq:     int = 0       # Hz, from WSJT-X Status messages
+    de_call:       str = ""      # operator callsign, from WSJT-X Status messages
+    log:           object = None
+
+    @property
+    def band(self) -> str | None:
+        return _freq_to_band(self.dial_freq)
+
+
+@dataclass
+class DecodeResult:
+    """One decoded message after station lookup and NEEDED/MATCH checks."""
+    decoded:       dict
+    mode:          str
+    msg_text:      str
+    is_cq:         bool
+    period_utc:    str
+    callsign:      str | None = None
+    grid:          str | None = None
+    modifier:      str | None = None
+    entity_info:   dict = field(default_factory=dict)
+    station_state: str | None = None
+    needed_flags:  list = field(default_factory=list)
+    match_flags:   list = field(default_factory=list)
+
+
+def _parse_decode_packet(data: bytes) -> tuple | None:
+    """Return (schema, decoded dict) for a WSJT-X Decode message, else None."""
+    if len(data) < 12:
+        return None
+    r = Reader(data)
+    try:
+        if r.u32() != MAGIC:
+            return None
+        schema = r.u32()
+        if r.u32() != MSG_DECODE:
+            return None
+        return schema, parse_decode_msg(r)
+    except (ValueError, struct.error):
+        return None
+
+
+def _entity_info(cty: CtyDat, callsign: str | None) -> dict:
+    raw = cty.lookup(callsign) if callsign else None
+    if not raw:
+        return {}
+    return {
+        "primary_prefix": raw.get("primary_prefix", "?"),
+        "entity":         raw.get("country",        "?"),
+        "cq_zone":        raw.get("cqz",            "?"),
+        "itu_zone":       raw.get("ituz",           "?"),
+        "continent":      raw.get("continent",      "?"),
+    }
+
+
+def _directed_sender(msg_text: str, de_call: str) -> str | None:
+    """
+    Return the transmitting station of a directed message, or None.
+
+    Directed message: "<TO_CALL> <FROM_CALL> <report/exchange>".  FROM_CALL is
+    the station we can hear.  Messages involving our own callsign are skipped:
+    our own transmissions, and stations calling us (already engaged).
+    """
+    tokens = msg_text.split()
+    if tokens and tokens[0].upper() == "TU;":     # contest "TU; <TO> <FROM> ..."
+        tokens = tokens[1:]
+    if len(tokens) < 2:
+        return None
+    to_call, from_call = (t.strip("<>").upper() for t in tokens[:2])
+    dc = de_call.upper()
+    if dc and dc in (to_call, from_call):
+        return None
+    # Rejects free text, reports, RR73 and unresolved hashes ("<...>").
+    if not _STRICT_CALL_RE.match(from_call):
+        return None
+    return from_call
+
+
+def _classify(ctx: DecodeContext, r: DecodeResult) -> None:
+    """Fill r.station_state, r.needed_flags and r.match_flags."""
+    args, adif_log = ctx.args, ctx.adif_log
+    checkable = r.is_cq or args.all_decodes
+
+    needed: list = []
+    if adif_log and checkable and r.entity_info:
+        needed = adif_log.needed_flags(r.entity_info, args)
+
+    match: list = []
+    if ctx.call_patterns and r.callsign:
+        match.extend(f"CALL:{m}" for m in _regex_matches(r.callsign, ctx.call_patterns))
+    if ctx.msg_patterns and r.msg_text:
+        match.extend(f"MSG:{m}" for m in _regex_matches(r.msg_text, ctx.msg_patterns))
+    if ctx.hamdat and r.callsign:
+        r.station_state = ctx.hamdat.state(r.callsign)
+        if ctx.state_set and r.station_state in ctx.state_set:
+            match.append(f"STATE:{r.station_state}")
+
+    # WAS / 5BWAS
+    st = r.station_state
+    if adif_log and checkable and st in _WAS_STATES:
+        if args.need_was:
+            if st not in adif_log.worked_states_lotw:
+                needed.append(f"NEW-WAS({st})")
+        elif args.need_5bwas:
+            band = ctx.band
+            if band in _5BWAS_BANDS:
+                if band not in adif_log.worked_states_bands_lotw.get(st, set()):
+                    needed.append(f"NEW-5BWAS({st}/{band})")
+
+    # Worked-lag-days suppression
+    if (adif_log and r.callsign and args.worked_lag_days >= 0
+            and r.callsign in adif_log.last_worked):
+        elapsed = (datetime.now(timezone.utc).date() - adif_log.last_worked[r.callsign]).days
+        if elapsed <= args.worked_lag_days:
+            needed, match = [], []
+
+    r.needed_flags, r.match_flags = needed, match
+
+
+def _maybe_alert(ctx: DecodeContext, r: DecodeResult) -> bool:
+    """
+    Fire external alerts for a NEEDED/MATCH hit; return True if this is a new alert.
+
+    A station re-alerts only after it has gone unheard for _ALERT_REPEAT_S.
+    """
+    if not (r.needed_flags or r.match_flags):
+        return False
+    key  = (r.callsign, frozenset(r.needed_flags + r.match_flags))
+    now  = time.monotonic()
+    last = ctx.alerted.get(key)
+    ctx.alerted[key] = now
+    if last is not None and now - last < _ALERT_REPEAT_S:
+        return False
+    if len(ctx.alerted) > 5000:
+        for k in [k for k, t in ctx.alerted.items() if now - t >= _ALERT_REPEAT_S]:
+            del ctx.alerted[k]
+    if ctx.args.alert_command or ctx.args.alert_ntfy:
+        _send_alerts(
+            _build_alert_msg(r.callsign, r.entity_info, r.needed_flags, r.match_flags),
+            ctx.args,
+            log=ctx.log,
+        )
+    return True
+
+
+def _render(ctx: DecodeContext, r: DecodeResult) -> list:
+    """Return the fixed-width display line plus any NEEDED/MATCH alert line."""
+    args, adif_log, color = ctx.args, ctx.adif_log, ctx.args.color
+    decoded   = r.decoded
+    checkable = r.is_cq or args.all_decodes
+    is_hit    = bool(r.needed_flags or r.match_flags)
+    band      = ctx.band
+    cols: list = []
+
+    if args.show_time:
+        cols.append(_col(f"[{datetime.now().strftime('%H:%M:%S')}]", _DIM, color))
+
+    cols.append(_col(r.period_utc,              _DIM, color))
+    cols.append(_col(f"{decoded['snr']:+4d}",   _DIM, color))
+    cols.append(_col(f"{decoded['dt']:+6.1f}s", _DIM, color))
+    cols.append(_col(f"{decoded['df']:5d}",     _DIM, color))
+    cols.append(_col(f"{r.mode:<4}",            _DIM, color))
+
+    msg_col = f"{r.msg_text:<{_W_MSG}}"
+    cols.append(_col(msg_col, _BMAG, color) if (not r.is_cq and is_hit) else msg_col)
+
+    call     = r.callsign or ""
+    call_str = f"{call:<{_W_CALL}}"
+    if call and adif_log:
+        band_match = call in adif_log.worked_calls_by_band.get(band or "", set())
+        mode_match = call in adif_log.worked_calls_by_mode.get(r.mode, set())
+        if band_match and mode_match:
+            call_color = _BGRN       # worked on this band and mode
+        elif call in adif_log.worked_calls:
+            call_color = _BYEL       # worked, but different band or mode
+        else:
+            call_color = _BOLD
+        cols.append(_col(call_str, call_color, color))
+    else:
+        cols.append(call_str)
+
+    grid        = r.grid or ""
+    grid_str    = f"{grid:<{_W_GRID}}"
+    grid_worked = bool(adif_log and grid and grid[:4] in adif_log.worked_grids)
+    cols.append(_col(grid_str, _GRN, color) if grid_worked else grid_str)
+
+    if adif_log:
+        days_str = " " * _W_DAYS
+        if call in adif_log.last_worked:
+            delta    = (datetime.now(timezone.utc).date() - adif_log.last_worked[call]).days
+            days_str = f"{delta:>4d}d"
+        cols.append(days_str)
+
+    if ctx.hamdat:
+        st_val    = (r.station_state or "") if checkable else ""
+        st_str    = f"{st_val:<2}"
+        st_worked = bool(adif_log and st_val and st_val in adif_log.worked_states_all)
+        cols.append(_col(st_str, _GRN, color) if st_worked else st_str)
+
+    # Status icons are 2 cells wide; reserve the space even when blank so the
+    # columns after the entity block stay aligned with the header.
+    icon_on = [bool(adif_log) and on
+               for on in (args.need_entity, args.need_cqz, args.need_country)]
+    ei = r.entity_info
+    if ei:
+        icons = ["", "", ""]
+        if adif_log and checkable:
+            wf     = set(adif_log.worked_flags(ei, args))
+            wf_all = set(adif_log.worked_flags_all(ei, args))
+            for i, kind in enumerate(("dxcc", "cqz", "country")):
+                if icon_on[i]:
+                    icons[i] = "✅" if kind in wf else ("❓" if kind in wf_all else "❌")
+        entity_str = (
+            f"| {ei['entity']:<30}"
+            f"  {icons[0]}CQ{ei['cq_zone']:<3}"
+            f" {icons[1]}ITU{ei['itu_zone']:<3}"
+            f" {icons[2]}{ei['continent']:<2}"
+        )
+        cols.append(_col(entity_str, _CYN, color))
+    else:
+        pad = ["  " if on else "" for on in icon_on]
+        cols.append(f"| {'':<30}  {pad[0]}{'':5} {pad[1]}{'':6} {pad[2]}{'':2}")
+
+    st = r.station_state
+    if adif_log and (args.need_was or args.need_5bwas):
+        was_em = ""
+        if checkable and st in _WAS_STATES:
+            if args.need_was:
+                if   st in adif_log.worked_states_lotw: was_em = "✅"
+                elif st in adif_log.worked_states_all:  was_em = "❓"
+                else:                                   was_em = "❌"
+            elif band in _5BWAS_BANDS:
+                confirmed = adif_log.worked_states_bands_lotw.get(st, set())
+                worked    = adif_log.worked_states_bands_all.get(st, set())
+                if   band in confirmed: was_em = "✅"
+                elif band in worked:    was_em = "❓"
+                else:                   was_em = "❌"
+        cols.append(f"{was_em}{st:<2}" if was_em else " " * _W_WAS)
+
+    if adif_log:
+        if args.need_5bwas:
+            qrz  = adif_log.qrz_confirmed_by_band.get(band or "", set())
+            lotw = adif_log.lotw_rcvd_by_band.get(band or "", set())
+        else:
+            qrz  = adif_log.qrz_confirmed_calls
+            lotw = adif_log.lotw_qsl_rcvd_calls
+        cols.append("⭐" if call in qrz  else "  ")
+        cols.append("🌎" if call in lotw else "  ")
+
+    lines = ["  ".join(cols)]
+
+    alert_parts: list = []
+    if adif_log and r.needed_flags:
+        alert_color = _BRED if r.is_cq else _BMAG
+        alert_parts.append(_col(f"*** NEEDED: {', '.join(r.needed_flags)} ***", alert_color, color))
+    if r.match_flags:
+        match_color = _BYEL if r.is_cq else _BMAG
+        alert_parts.append(_col(f"*** MATCH: {', '.join(r.match_flags)} ***", match_color, color))
+    if alert_parts:
+        lines.append("  " + "  ".join(alert_parts))
+    return lines
+
+
+def _write_json(ctx: DecodeContext, r: DecodeResult) -> None:
+    decoded = r.decoded
+    ei      = r.entity_info
+    record = {
+        "wall_utc":       datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "period_utc":     r.period_utc,
+        "snr_db":         decoded["snr"],
+        "dt_s":           round(decoded["dt"], 2),
+        "df_hz":          decoded["df"],
+        "mode":           r.mode,
+        "message":        r.msg_text,
+        "callsign":       r.callsign,
+        "modifier":       r.modifier,
+        "gridsquare":     r.grid,
+        "primary_prefix": ei.get("primary_prefix"),
+        "entity":         ei.get("entity"),
+        "cq_zone":        ei.get("cq_zone"),
+        "itu_zone":       ei.get("itu_zone"),
+        "continent":      ei.get("continent"),
+        "needed":         r.needed_flags if ctx.adif_log else None,
+    }
+    ctx.json_fh.write(json.dumps(record) + "\n")
+    ctx.json_fh.flush()
+
+
+def handle_packet(
+    data:      bytes,
+    ctx:       DecodeContext,
+    wsjt_addr: tuple,
+    out_meta:  dict | None = None,
+) -> list:
+    """
+    Decode one UDP datagram and return a list of formatted display strings.
+    Never prints directly; caller appends lines to the TUI output pane.
+
+    If *out_meta* is provided it is populated with:
+      'decoded'      — raw parsed decode dict (for sending replies)
+      'callsign'     — resolved station callsign or None
+      'is_cq'        — True for CQ messages
+      'needed_flags' / 'match_flags' — NEEDED / MATCH hits
+      'is_needed'    — True when the contact is flagged NEEDED
+      'wsjt_addr'    — source address of the packet
+      'bell'         — True on the first alert for this station
+    """
+    parsed = _parse_decode_packet(data)
+    if parsed is None:
+        return []
+    schema, decoded = parsed
+    args  = ctx.args
+    lines = []
+
+    if args.debug:
+        lines.append(
+            f"[debug] schema={schema}  len={len(data)}\n"
+            f"[debug] hex: {data.hex()}\n"
+            f"[debug] id={decoded['id']!r}  new={decoded['new']}  "
+            f"time_ms={decoded['time_ms']}  snr={decoded['snr']}\n"
+            f"[debug] dt={decoded['dt']:.3f}  df={decoded['df']}  "
+            f"mode={decoded['mode']!r}  message={decoded['message']!r}\n"
+            f"[debug] low_conf={decoded['low_conf']}  off_air={decoded['off_air']}"
+        )
+
+    msg_text = decoded.get("message", "").strip()
+    is_cq    = msg_text.upper().startswith("CQ")
+    mode     = _MODE_NAMES.get(decoded["mode"], decoded["mode"]) or "?"
+
+    if ctx.cycle_tracker is not None:
+        ctx.cycle_tracker.record(decoded["time_ms"], is_cq, decoded["new"], mode)
+
+    if not is_cq and not args.raw and not args.all_decodes:
+        return lines
+
+    time_ms = decoded["time_ms"]
+    hh = (time_ms // 3_600_000) % 24
+    mm = (time_ms %  3_600_000) // 60_000
+    ss = (time_ms %     60_000) //  1_000
+    r = DecodeResult(decoded=decoded, mode=mode, msg_text=msg_text, is_cq=is_cq,
+                     period_utc=f"{hh:02d}{mm:02d}{ss:02d}z")
+
+    # ── Identify the station ──────────────────────────────────────────────────
+    if is_cq:
+        r.callsign, r.grid, r.modifier = parse_cq_message(msg_text)
+        if not r.grid:
+            gm = _GRID_RE.search(msg_text)
+            if gm:
+                r.grid = gm.group(1).upper()
+    elif args.all_decodes:
+        r.callsign = _directed_sender(msg_text, ctx.de_call)
+    r.entity_info = _entity_info(ctx.cty, r.callsign)
+
+    _classify(ctx, r)
+
+    # Non-CQ: only proceed to display if --raw or there is an actual hit.
+    if not is_cq and not args.raw and not (r.needed_flags or r.match_flags):
+        return lines
+
+    is_new_alert = _maybe_alert(ctx, r)
+    lines.extend(_render(ctx, r))
+
+    if ctx.json_fh and is_cq:
+        _write_json(ctx, r)
+
+    if out_meta is not None:
+        out_meta['decoded']      = decoded
+        out_meta['callsign']     = r.callsign
+        out_meta['is_cq']        = is_cq
+        out_meta['needed_flags'] = r.needed_flags
+        out_meta['match_flags']  = r.match_flags
+        out_meta['is_needed']    = bool(r.needed_flags)
+        out_meta['wsjt_addr']    = wsjt_addr
+        out_meta['bell']         = is_new_alert
+
+    return lines
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Column header line
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _header_line(args: argparse.Namespace, has_adif: bool = False,
+                 has_hamdat: bool = False) -> str:
+    parts = ["##"]
+    if args.show_time:
+        parts.append(f"{'[time]':<10}")
+    parts.append(f"{'HHMMSSZ':<7}")
+    parts.append(f"{'dB':>4}")
+    parts.append(f"{'dt(s)':>7}")
+    parts.append(f"{'Hz':>5}")
+    parts.append(f"{'mode':<4}")
+    parts.append(f"{'message':<{_W_MSG}}")
+    parts.append(f"{'callsign':<{_W_CALL}}")
+    parts.append(f"{'grid':<{_W_GRID}}")
+    if has_adif:
+        parts.append(f"{'days':>{_W_DAYS}}")
+    if has_hamdat:
+        parts.append(f"{'ST':<2}")
+    w = 2 if has_adif and args.need_entity  else 0
+    x = 2 if has_adif and args.need_cqz     else 0
+    y = 2 if has_adif and args.need_country  else 0
+    parts.append(f"| {'entity':<30}  {'':{w}}CQz   {'':{x}}ITUz   {'':{y}}ct")
+    if has_adif and (args.need_was or args.need_5bwas):
+        label = "WAS " if args.need_was else "5BW "
+        parts.append(f"{label:<{_W_WAS}}")
+    if has_adif:
+        parts.append("QRZ")
+        parts.append("LoW")
+    header = "  ".join(parts)
+    sep    = "─" * min(len(header), 160)
+    return header + "\n" + sep
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Cycle bargraph helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _bargraph(cycle_tracker: CycleTracker | None) -> str:
+    """Return a bargraph string showing position within the current TX cycle."""
+    now = datetime.now(timezone.utc)
+    ms = (
+        now.hour   * 3_600_000
+        + now.minute *    60_000
+        + now.second *     1_000
+        + now.microsecond // 1_000
+    )
+    mode = cycle_tracker.current_mode if cycle_tracker else "FT8"
+    cycle_ms = 7500 if mode == "FT4" else 15000
+    fraction = (ms % cycle_ms) / cycle_ms
+    filled   = int(fraction * _BAR_WIDTH)
+    return "█" * filled + "░" * (_BAR_WIDTH - filled)
+
+
+def _fmt_age(seconds: float) -> str:
+    """Format an elapsed time as e.g. '45s', '3m05s', '1h12m'."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ANSI lexer — lets the output TextArea render ANSI escape codes as colours
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AnsiLexer(Lexer):
+    """Parse ANSI escape sequences in each buffer line for prompt_toolkit."""
+
+    def lex_document(self, document):
+        lines = document.lines
+
+        def get_line(lineno):
+            if 0 <= lineno < len(lines):
+                try:
+                    return list(to_formatted_text(ANSI(lines[lineno])))
+                except Exception:
+                    return [("", lines[lineno])]
+            return []
+
+        return get_line
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TUI Application
+# ══════════════════════════════════════════════════════════════════════════════
+
+class JtconTUI:
+    """prompt_toolkit full-screen TUI for jtcon."""
+
+    def __init__(self, args, sock, tx_sock):
+        self.args = args
+        self.sock = sock
+        self.tx_sock = tx_sock
+
+        # Data objects — all set to empty defaults; populated by _startup_then_udp().
+        self.cty           = CtyDat()
+        self.adif_log      = None
+        self.json_fh       = None
+        self.call_patterns = []
+        self.msg_patterns  = []
+        self.state_set     = set()
+        self.hamdat        = None
+        self.cycle_tracker = CycleTracker()
+        self.alerted: dict = {}   # alert key -> monotonic time last heard
+
+        self._running      = True
+        self._fatal_msg    = None   # set by _fatal(); the app exits on next render
+        self._exiting      = False
+        self._udp_down     = False
+        # Output pane: background threads queue lines in _pending; the UI thread
+        # moves them into _lines (and the TextArea) just before each render.
+        self._output_lock  = threading.Lock()
+        self._pending: list = []
+        self._lines:   list = []
+        # Top line of the decode pane while scrolled back from the command line;
+        # None means the pane follows new output.
+        self._scroll_top: int | None = None
+        self._transmitting = False
+        self._dial_freq    = 0   # Hz; updated from WSJT-X Status messages
+        self._de_call      = ""  # operator callsign; updated from WSJT-X Status messages
+
+        self._adif_mtimes: dict  = {}
+        self._line_count:  int   = 0
+        self.proxy_dests:  list  = []
+        self._cq_buffer:   dict  = {}   # idx (0-99) -> entry dict
+        self._call_idx:    dict  = {}   # callsign -> idx; one slot per station
+        self._next_idx:    int   = 0    # where to start looking for a free slot
+        self._buf_lock           = threading.Lock()
+
+        # ── Widgets ──────────────────────────────────────────────────────────
+        self.output_area = TextArea(
+            text="",
+            read_only=True,
+            scrollbar=True,
+            wrap_lines=False,
+            focusable=True,
+            lexer=AnsiLexer(),
+            style="class:output",
+        )
+        self.cmd_area = TextArea(
+            height=1,
+            multiline=False,
+            wrap_lines=False,
+            prompt="CMD> ",
+            accept_handler=self._handle_command,
+            style="class:cmd",
+        )
+        self._app = self._build_app()
+        self._app.before_render += self._flush_output
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+
+    def _build_app(self) -> Application:
+        separator = Window(height=1, char="─", style="class:separator")
+        status_window = Window(
+            content=FormattedTextControl(self._get_status_text),
+            height=1,
+            style="class:status",
+        )
+
+        layout = Layout(
+            HSplit([
+                self.output_area,
+                separator,
+                self.cmd_area,
+                status_window,
+            ]),
+            focused_element=self.cmd_area,
+        )
+
+        kb = KeyBindings()
+
+        @kb.add("c-c")
+        @kb.add("c-q")
+        def _quit(event):
+            self._exit_app()
+
+        @kb.add("tab")
+        def _toggle_focus(event):
+            app = event.app
+            if app.layout.has_focus(self.cmd_area):
+                app.layout.focus(self.output_area)
+            else:
+                app.layout.focus(self.cmd_area)
+
+        # Scroll the decode pane while typing at CMD>.  These replace the
+        # command-line history on ↑/↓.  Many terminals also send ↑/↓ for the
+        # mouse wheel, so the wheel scrolls the pane even without --mouse.
+        cmd_focused = has_focus(self.cmd_area)
+
+        @kb.add("up", filter=cmd_focused)
+        def _line_up(event):
+            self._scroll_output(-1)
+
+        @kb.add("down", filter=cmd_focused)
+        def _line_down(event):
+            self._scroll_output(1)
+
+        @kb.add("pageup", filter=cmd_focused)
+        def _page_up(event):
+            self._scroll_output(-self._page_size())
+
+        @kb.add("pagedown", filter=cmd_focused)
+        def _page_down(event):
+            self._scroll_output(self._page_size())
+
+        # eager: don't wait to see if Esc starts an Alt-key sequence.
+        @kb.add("escape", filter=cmd_focused, eager=True)
+        @kb.add("c-end", filter=cmd_focused)
+        def _to_live(event):
+            self._scroll_to_live()
+
+        if self.args.mouse:
+            self._wheel_scrolls_output(self.output_area.control)
+            self._wheel_scrolls_output(self.cmd_area.control)
+
+        style = Style.from_dict({
+            "output":     "",
+            "cmd":        "",
+            "separator":  "fg:ansibrightblack",
+            "status":     "reverse",
+            "status.tx":  "bg:ansired fg:ansiwhite bold noreverse",
+            "status.rx":  "fg:ansibrightgreen noreverse",
+            "status.scroll": "bg:ansiyellow fg:ansiblack noreverse",
+        })
+
+        return Application(
+            layout=layout,
+            key_bindings=kb,
+            style=style,
+            full_screen=True,
+            mouse_support=self.args.mouse,
+            refresh_interval=0.25,   # redraws status bar ~4×/s for smooth bargraph
+        )
+
+    # ── Status line ───────────────────────────────────────────────────────────
+
+    def _get_status_text(self):
+        bar = _bargraph(self.cycle_tracker)
+        ct  = self.cycle_tracker
+
+        if ct and ct.current_time_ms is not None:
+            parity = ct._parity
+            mode   = ct.current_mode
+            ev, od = ct._sums["even"], ct._sums["odd"]
+            all_n   = ev[2] + od[2]
+            avg_dec = (ev[0] + od[0]) / all_n if all_n else 0.0
+            avg_cq  = (ev[1] + od[1]) / all_n if all_n else 0.0
+            ev_d = ev[0] / ev[2] if ev[2] else 0.0
+            od_d = od[0] / od[2] if od[2] else 0.0
+            ev_c = ev[1] / ev[2] if ev[2] else 0.0
+            od_c = od[1] / od[2] if od[2] else 0.0
+            stats = (
+                f"  {mode}"
+                f"  dec={ct.cycle_total} cq={ct.cycle_cq}"
+                f"  avg dec={avg_dec:.1f} cq={avg_cq:.1f}"
+                f"  even dec={ev_d:.1f} cq={ev_c:.1f}"
+                f"  odd dec={od_d:.1f} cq={od_c:.1f}"
+            )
+        else:
+            parity = "even"
+            stats  = "  (waiting for decodes…)"
+
+        # Return a list of (style, text) tuples so the TX badge can be coloured.
+        if self._udp_down:
+            trx = ("class:status.tx", " UDP DOWN ")
+        elif self._transmitting:
+            trx = ("class:status.tx", " TX ")
+        else:
+            trx = ("class:status.rx", " RX ")
+
+        de = f"  de={self._de_call}" if self._de_call else ""
+        scroll = [("class:status.scroll", " SCROLL ")] if self._scroll_top is not None else []
+        return [
+            trx,
+            *scroll,
+            ("class:status", f" [{bar}] {parity}{stats}{de} "),
+        ]
+
+    # ── Command handler ───────────────────────────────────────────────────────
+
+    def _handle_command(self, buffer) -> None:
+        raw = buffer.text.strip()
+        cmd = raw.lower()
+
+        if not raw:
+            return
+
+        # Command output goes to the bottom of the pane; make sure it's visible.
+        if self._scroll_top is not None:
+            self._scroll_to_live()
+
+        if cmd in ("quit", "exit", "q"):
+            self._exit_app()
+
+        elif cmd == "clear":
+            with self._output_lock:
+                self._pending.clear()
+            self._lines = self._header().split("\n")
+            self._set_output(follow=True)
+
+        elif cmd and "list".startswith(cmd):
+            self._cmd_list()
+
+        elif re.match(r'^\d{1,2}$', raw):
+            idx = int(raw)
+            with self._buf_lock:
+                entry = self._cq_buffer.get(idx)
+            if entry:
+                self._reply_to_entry(entry)
+            else:
+                self._append_line(f"[cmd] No CQ at index {idx:02d}.")
+
+        elif _CALLSIGN_RE.match(raw):
+            entry = self._find_callsign(raw.upper())
+            if entry:
+                self._reply_to_entry(entry)
+            else:
+                self._append_line(f"[cmd] {raw.upper()} not found in rolling buffer.")
+
+        else:
+            self._append_line(
+                f"[cmd] Unknown: {raw!r}  "
+                "(commands: quit, clear, list; or enter index 00-99 / callsign to reply)"
+            )
+
+    def _reply_to_entry(self, entry: dict) -> None:
+        """Send a WSJT-X Reply for a rolling-buffer entry."""
+        decoded   = entry.get('decoded')
+        wsjt_addr = entry.get('wsjt_addr')
+        callsign  = entry.get('callsign', '?')
+        idx       = entry.get('idx', -1)
+        if not decoded or not wsjt_addr:
+            self._append_line(f"[cmd] No decode data for {callsign}.")
+            return
+        age = time.monotonic() - entry.get('last_seen', time.monotonic())
+        if age > _STALE_REPLY_S:
+            self._append_line(
+                f"[cmd] Warning: {callsign} last heard {_fmt_age(age)} ago"
+                " — WSJT-X may no longer have that decode."
+            )
+        try:
+            _send_reply(self.tx_sock, wsjt_addr, decoded, log=self._append_line)
+            self._append_line(
+                f"[cmd] ► Reply sent to {callsign} [{idx:02d}]"
+                f"  msg={decoded.get('message', '?')!r}"
+                f"  → {wsjt_addr[0]}:{wsjt_addr[1]}"
+            )
+        except Exception as exc:
+            self._append_line(f"[cmd] Reply to {callsign} failed: {exc}")
+
+    def _find_callsign(self, callsign: str) -> dict | None:
+        """Return the rolling-buffer entry for *callsign*, if any."""
+        with self._buf_lock:
+            idx = self._call_idx.get(callsign)
+            return self._cq_buffer.get(idx) if idx is not None else None
+
+    def _store_entry(self, callsign: str, meta: dict, lines: list, wsjt_addr) -> int:
+        """
+        Record a decode in the rolling buffer and return its index.
+
+        Each callsign owns one slot.  A repeat decode keeps the station's index
+        and refreshes the entry so replies use the newest decode.  A new station
+        takes the next free slot, or evicts the least recently heard station.
+        """
+        now = time.monotonic()
+        with self._buf_lock:
+            idx = self._call_idx.get(callsign)
+            if idx is not None:
+                entry = self._cq_buffer[idx]
+                entry['count'] += 1
+            else:
+                idx = self._alloc_slot()
+                old = self._cq_buffer.get(idx)
+                if old:
+                    del self._call_idx[old['callsign']]
+                self._call_idx[callsign] = idx
+                entry = self._cq_buffer[idx] = {
+                    'idx':        idx,
+                    'callsign':   callsign,
+                    'count':      1,
+                    'first_seen': now,
+                }
+            entry.update({
+                'decoded':      meta.get('decoded'),
+                'wsjt_addr':    wsjt_addr,
+                'needed_flags': meta.get('needed_flags', []),
+                'match_flags':  meta.get('match_flags', []),
+                'lines':        list(lines),
+                'last_seen':    now,
+            })
+        return idx
+
+    def _alloc_slot(self) -> int:
+        """Pick a slot for a new station; caller holds _buf_lock."""
+        for i in range(_BUF_SIZE):
+            idx = (self._next_idx + i) % _BUF_SIZE
+            if idx not in self._cq_buffer:
+                self._next_idx = (idx + 1) % _BUF_SIZE
+                return idx
+        return min(self._cq_buffer.values(), key=lambda e: e['last_seen'])['idx']
+
+    def _clear_buffer(self) -> int:
+        """Empty the rolling buffer; return how many entries were dropped."""
+        with self._buf_lock:
+            n = len(self._cq_buffer)
+            self._cq_buffer.clear()
+            self._call_idx.clear()
+            self._next_idx = 0
+        return n
+
+    def _cmd_list(self) -> None:
+        """Print NEEDED/MATCH entries from the rolling buffer, most recently heard last."""
+        with self._buf_lock:
+            hits = sorted(
+                (e for e in self._cq_buffer.values()
+                 if e['needed_flags'] or e['match_flags']),
+                key=lambda e: e['last_seen'],
+            )
+        if not hits:
+            self._append_line("[list] No NEEDED/MATCH entries in rolling buffer.")
+            return
+        now = time.monotonic()
+        self._append_line(f"[list] {len(hits)} NEEDED/MATCH entries (last heard at bottom) ——")
+        for entry in hits:
+            lines = entry['lines']
+            # Keep the decode row aligned with the column header; the heard
+            # stats go on the NEEDED/MATCH line below it.
+            seen = _col(
+                f"(last heard {_fmt_age(now - entry['last_seen'])} ago, ×{entry['count']})",
+                _DIM, self.args.color,
+            )
+            self._append_line(f"{entry['idx']:02d}  {lines[0]}")
+            if len(lines) > 1:
+                self._append_line(f"{lines[1]}  {seen}")
+            else:
+                self._append_line(f"  {seen}")
+            for line in lines[2:]:
+                self._append_line(line)
+
+    # ── Output append (thread-safe) ───────────────────────────────────────────
+
+    def _append_line(self, text: str) -> None:
+        """Queue *text* for the output pane.  Safe to call from any thread."""
+        with self._output_lock:
+            self._pending.extend(text.split("\n"))
+        self._app.invalidate()
+
+    def _flush_output(self, _app=None) -> None:
+        """before_render hook (UI thread): move queued lines into the pane."""
+        if self._fatal_msg and not self._exiting:
+            self._exit_app()
+        with self._output_lock:
+            new, self._pending = self._pending, []
+        if not new:
+            return
+        self._lines.extend(new)
+        dropped = 0
+        if len(self._lines) > _MAX_OUTPUT_LINES:
+            dropped = len(self._lines) - _TRIM_OUTPUT_TO
+            del self._lines[:dropped]
+        self._set_output(dropped)
+
+    def _set_output(self, dropped: int = 0, follow: bool = False) -> None:
+        """
+        Replace the pane text with self._lines (UI thread only).
+
+        TextArea.text setter uses Document(value, 0) — cursor at top — so the
+        Window's do_scroll() always scrolls back to line 0.  Set the Document
+        directly with cursor at the end so do_scroll() tracks the bottom.
+        When the user is reviewing older output — tabbed into the pane, or
+        scrolled back from the command line — keep their view on the same
+        lines, shifted up by the *dropped* lines trimmed from the top.
+        *follow* forces the view back to the bottom.
+        """
+        text   = "\n".join(self._lines) + "\n"
+        win    = self.output_area.window
+        buf    = self.output_area.buffer
+        if follow:
+            self._scroll_top = None
+        if self._scroll_top is not None and not self._app.layout.has_focus(win):
+            self._scroll_top = max(0, self._scroll_top - dropped)
+            doc = Document(text)
+            self.output_area.document = Document(
+                text, doc.translate_row_col_to_index(self._scroll_top, 0))
+            win.vertical_scroll = self._scroll_top
+            return
+        if not follow and self._app.layout.has_focus(win):
+            old = buf.document
+            row = max(0, old.cursor_position_row - dropped)
+            cursor = Document(text).translate_row_col_to_index(row, old.cursor_position_col)
+            win.vertical_scroll = max(0, win.vertical_scroll - dropped)
+        else:
+            cursor = len(text)
+        self.output_area.document = Document(text, cursor)
+
+    def _page_size(self) -> int:
+        info = self.output_area.window.render_info
+        return max(1, (info.window_height if info else 20) - 1)
+
+    def _scroll_output(self, delta: int) -> None:
+        """Scroll the decode pane by *delta* lines (negative = up), keeping focus."""
+        win    = self.output_area.window
+        info   = win.render_info
+        height = info.window_height if info else 20
+        # The text ends in "\n", so the document has one more (empty) row.
+        bottom = max(0, len(self._lines) + 1 - height)
+        start  = win.vertical_scroll if self._scroll_top is None else self._scroll_top
+        top    = max(0, min(bottom, start + delta))
+        if top >= bottom:
+            self._scroll_to_live()
+            return
+        self._scroll_top = top
+        buf = self.output_area.buffer
+        buf.cursor_position = buf.document.translate_row_col_to_index(top, 0)
+        win.vertical_scroll = top
+
+    def _scroll_to_live(self) -> None:
+        """Return the decode pane to the bottom and resume following output."""
+        self._scroll_top = None
+        buf = self.output_area.buffer
+        buf.cursor_position = len(buf.text)
+
+    def _wheel_scrolls_output(self, control) -> None:
+        """Make mouse-wheel events over *control* scroll the decode pane (--mouse)."""
+        original = control.mouse_handler
+
+        def handler(mouse_event):
+            if mouse_event.event_type == MouseEventType.SCROLL_UP:
+                self._scroll_output(-_WHEEL_LINES)
+                return None
+            if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+                self._scroll_output(_WHEEL_LINES)
+                return None
+            return original(mouse_event)
+
+        control.mouse_handler = handler
+
+    def _header(self) -> str:
+        return _header_line(self.args, has_adif=self.adif_log is not None,
+                            has_hamdat=self.hamdat is not None)
+
+    def _fatal(self, msg: str) -> None:
+        """Log *msg*, stop, and close the TUI; *msg* is reprinted after exit."""
+        self._append_line(msg)
+        self._fatal_msg = msg
+        self._running   = False
+        self._app.invalidate()
+
+    def _exit_app(self) -> None:
+        """Exit the TUI (UI thread only); safe to call more than once."""
+        self._running = False
+        if not self._exiting:
+            self._exiting = True
+            self._app.exit()
+
+    # ── UDP receive loop (runs in background thread) ──────────────────────────
+
+    def _udp_loop(self) -> None:
+        while self._running:
+            try:
+                ready, _, _ = select.select([self.sock], [], [], 0.2)
+                if not ready:
+                    continue
+                data, wsjt_addr = self.sock.recvfrom(65535)
+            except ConnectionResetError:
+                continue   # Windows reports ICMP port-unreachable here; harmless
+            except (OSError, ValueError) as exc:   # ValueError: socket closed
+                if self._running:
+                    self._udp_down = True
+                    self._append_line(
+                        f"[udp] Receive loop stopped: {exc} — no further decodes; restart jtcon."
+                    )
+                break
+
+            # Forward packet to proxy destinations before any other processing.
+            for dest in self.proxy_dests:
+                try:
+                    self.tx_sock.sendto(data, dest)
+                except OSError:
+                    pass
+
+            # Hot-reload ADIF when any watched file changes.
+            if self.adif_log and self._adif_mtimes:
+                try:
+                    changed = any(
+                        p.stat().st_mtime != self._adif_mtimes.get(p)
+                        for p in self.adif_log.paths
+                    )
+                    if changed:
+                        self.adif_log = AdifLog(
+                            self.adif_log.paths, self.cty, self.hamdat,
+                            qsl_only=self.args.qsl_only,
+                            log=self._append_line,
+                        )
+                        self._adif_mtimes = {
+                            p: p.stat().st_mtime for p in self.adif_log.paths
+                        }
+                        self._append_line(
+                            f"[adif] Reloaded {self.adif_log.total_qsos} QSOs"
+                            f" from {len(self.adif_log.paths)} file(s)."
+                        )
+                        adif_change_script = self.args.adif_change_script
+                        if adif_change_script:
+                            try:
+                                proc = subprocess.Popen(
+                                    [adif_change_script]
+                                    + [str(p) for p in self.adif_log.paths],
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT,
+                                    text=True,
+                                )
+                                def _relay_output(p=proc):
+                                    for line in p.stdout:
+                                        self._append_line(
+                                            f"[adif-change-script] {line.rstrip()}"
+                                        )
+                                    p.wait()
+                                threading.Thread(
+                                    target=_relay_output, daemon=True
+                                ).start()
+                            except Exception as exc:
+                                self._append_line(f"[adif-change-script] {exc}")
+                except OSError:
+                    pass
+
+            # Intercept Status messages to track TX/RX state and current band.
+            status = try_parse_status(data)
+            if status is not None:
+                self._transmitting = status.get("transmitting", False)
+                new_freq = status.get("dial_freq", 0)
+                if new_freq and self._dial_freq and new_freq != self._dial_freq:
+                    # Decodes from the old frequency can't be replied to usefully.
+                    dropped = self._clear_buffer()
+                    if dropped:
+                        self._append_line(
+                            f"[buffer] Dial frequency changed — cleared {dropped} entries."
+                        )
+                if new_freq:
+                    self._dial_freq = new_freq
+                de = status.get("de_call", "").strip()
+                if de:
+                    self._de_call = de
+                self._app.invalidate()
+                continue
+
+            meta: dict = {}
+            ctx = DecodeContext(
+                args=self.args, cty=self.cty, adif_log=self.adif_log,
+                json_fh=self.json_fh, call_patterns=self.call_patterns,
+                msg_patterns=self.msg_patterns, state_set=self.state_set,
+                hamdat=self.hamdat, cycle_tracker=self.cycle_tracker,
+                alerted=self.alerted, dial_freq=self._dial_freq,
+                de_call=self._de_call, log=self._append_line,
+            )
+            try:
+                out_lines = handle_packet(data, ctx, wsjt_addr, meta)
+            except Exception as exc:
+                out_lines = [f"[error] packet handler: {exc}"]
+
+            if meta.get('bell'):
+                sys.stderr.write('\a')
+                sys.stderr.flush()
+
+            if out_lines:
+                call = meta.get('callsign')
+                is_cq   = meta.get('is_cq')
+                is_hit  = meta.get('needed_flags') or meta.get('match_flags')
+                if call and (is_cq or is_hit):
+                    idx = self._store_entry(call.upper(), meta, out_lines, wsjt_addr)
+                    out_lines = [f"{idx:02d}  {out_lines[0]}"] + out_lines[1:]
+                else:
+                    # Non-CQ with no hit (raw mode) — indent to keep columns aligned.
+                    out_lines = [f"    {out_lines[0]}"] + out_lines[1:]
+
+                for line in out_lines:
+                    self._append_line(line)
+
+                self._line_count += 1
+                if self._line_count % 15 == 0:
+                    self._append_line(self._header())
+
+    # ── Startup (runs in background thread before UDP loop) ──────────────────
+
+    def _startup_then_udp(self) -> None:
+        """
+        Load all data files, logging each step to the decode pane, then fall
+        straight into the UDP receive loop.  Runs entirely in a background thread
+        so the TUI is already visible when the messages appear.
+        """
+        log  = self._append_line
+        args = self.args
+
+        # ── cty.dat ───────────────────────────────────────────────────────────
+        cty_path = Path(args.cty)
+        stale = False
+        if cty_path.exists():
+            age_days = (time.time() - cty_path.stat().st_mtime) / 86400
+            stale = age_days > CTY_MAX_AGE_DAYS
+        if stale or not cty_path.exists():
+            reason = f"older than {CTY_MAX_AGE_DAYS} days" if stale else "not found"
+            log(f"[cty.dat] {reason} — downloading from {CTY_DAT_URL} …")
+            try:
+                download_cty(cty_path)
+                log(f"[cty.dat] Saved to {cty_path}")
+            except Exception as exc:
+                if stale:
+                    log(f"[cty.dat] Download failed: {exc} — using cached copy")
+                else:
+                    log(f"[cty.dat] Download failed: {exc} — entity lookup unavailable")
+
+        cty = CtyDat()
+        if cty_path.exists():
+            try:
+                cty.load(cty_path)
+                log(f"[cty.dat] Loaded {len(cty._prefixes)} prefixes"
+                    f" + {len(cty._exact)} exact callsigns")
+            except Exception as exc:
+                log(f"[cty.dat] Load error: {exc} — entity lookup unavailable")
+        else:
+            log("[cty.dat] File not found — entity lookup unavailable")
+        self.cty = cty
+
+        # ── hamdat ────────────────────────────────────────────────────────────
+        if args.match_state:
+            try:
+                self.state_set = load_state_set(args.match_state)
+                log(f"[match-state] {len(self.state_set)} state(s):"
+                    f" {', '.join(sorted(self.state_set))}")
+            except OSError as exc:
+                self._fatal(f"[match-state] Cannot load state list: {exc}")
+                return
+
+        db_path = Path(args.hamdat).expanduser()
+        if db_path.exists():
+            try:
+                self.hamdat = HamdatLookup(db_path)
+                label = "Auto-detected" if args.hamdat == str(HAMDAT_DB_DEFAULT) else "Using"
+                log(f"[hamdat] {label}: {db_path}")
+            except Exception as exc:
+                if args.match_state:
+                    self._fatal(f"[hamdat] Failed to open {db_path}: {exc}")
+                    return
+                log(f"[hamdat] Warning: found but could not open {db_path}: {exc}")
+        elif args.match_state:
+            self._fatal(f"[match-state] hamdat database not found: {db_path}")
+            return
+
+        # ── ADIF ──────────────────────────────────────────────────────────────
+        adif_paths: list[Path] = []
+        for p in _find_wsjt_logs():
+            log(f"[adif] Auto-discovered: {p}")
+            adif_paths.append(p)
+        for f in (args.adif or []):
+            p = Path(f).expanduser().resolve()
+            if not p.exists():
+                self._fatal(f"[adif] File not found: {p}")
+                return
+            if p not in adif_paths:
+                adif_paths.append(p)
+
+        if adif_paths:
+            try:
+                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat,
+                                        qsl_only=args.qsl_only,
+                                        log=log)
+                for p in adif_paths:
+                    log(f"[adif] Loaded: {p.name}")
+                al = self.adif_log
+                log(f"[adif] {al.total_qsos} QSOs across {len(adif_paths)} file(s)"
+                    f" — {len(al.worked_calls)} calls,"
+                    f" {len(al.worked_dxcc)} DXCC,"
+                    f" {len(al.worked_cqz)} CQ zones worked")
+                for p in adif_paths:
+                    try:
+                        self._adif_mtimes[p] = p.stat().st_mtime
+                    except OSError:
+                        pass
+            except Exception as exc:
+                log(f"[adif] Failed to load: {exc}")
+        else:
+            log("[adif] No ADIF log found — NEEDED detection disabled")
+
+        # ── Pattern files ─────────────────────────────────────────────────────
+        try:
+            if args.match_calls:
+                self.call_patterns = load_regex_patterns(args.match_calls, log=log)
+                log(f"[match-calls] {len(self.call_patterns)} pattern(s)"
+                    f" from {', '.join(args.match_calls)}")
+            if args.match_message:
+                self.msg_patterns = load_regex_patterns(args.match_message, log=log)
+                log(f"[match-message] {len(self.msg_patterns)} pattern(s)"
+                    f" from {', '.join(args.match_message)}")
+        except OSError as exc:
+            self._fatal(f"[match] Cannot read pattern file: {exc}")
+            return
+        for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
+            if flag:
+                self.msg_patterns.append((re.compile(rf"\b{keyword}\b", re.IGNORECASE), None))
+                log(f"[match-message] {keyword} pattern active")
+
+        # ── JSON output ───────────────────────────────────────────────────────
+        if args.save:
+            try:
+                self.json_fh = open(args.save, "a", encoding="utf-8")
+                log(f"[save] Appending JSON records to: {args.save}")
+            except OSError as exc:
+                self._fatal(f"[save] Cannot open {args.save}: {exc}")
+                return
+
+        # ── UDP proxy destinations ────────────────────────────────────────────
+        if args.proxy:
+            for part in args.proxy.split(","):
+                part = part.strip()
+                try:
+                    self.proxy_dests.append(("127.0.0.1", int(part)))
+                except ValueError:
+                    log(f"[proxy] Invalid port {part!r} — must be an integer.")
+            if self.proxy_dests:
+                targets = ", ".join(f"localhost:{p}" for _, p in self.proxy_dests)
+                log(f"[proxy] Forwarding all packets to: {targets}")
+
+        # ── Column header then ready banner ───────────────────────────────────
+        log(self._header())
+        log(f"[ready] Listening on {args.host}:{args.port}"
+            f"  ({'all decodes' if args.raw else 'CQ + matched' if args.all_decodes else 'CQ calls only'})")
+
+        # ── Hand off to UDP receive loop ──────────────────────────────────────
+        self._udp_loop()
+
+    # ── Entry point ───────────────────────────────────────────────────────────
+
+    def _worker(self) -> None:
+        """Background thread: startup, then the UDP loop.  Never dies silently."""
+        try:
+            self._startup_then_udp()
+        except Exception as exc:
+            self._fatal(f"[fatal] {type(exc).__name__}: {exc}")
+
+    def run(self) -> int:
+        """Run the TUI; return a process exit status."""
+        t = threading.Thread(target=self._worker, daemon=True)
+        t.start()
+        try:
+            self._app.run()
+        finally:
+            self._running = False
+            if self.json_fh:
+                self.json_fh.close()
+            if self.hamdat:
+                self.hamdat.close()
+        if self._fatal_msg:
+            # The full-screen pane is gone; repeat the reason on the terminal.
+            print(self._fatal_msg, file=sys.stderr)
+            return 1
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Monitor WSJT-X CQ calls via UDP with a prompt_toolkit TUI.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="UDP bind address (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=2237,
+                        help="UDP port matching WSJT-X Settings → Reporting (default: 2237)")
+    parser.add_argument("--show-time", action="store_true",
+                        help="Prepend local wall-clock HH:MM:SS to each line")
+    parser.add_argument("--raw", action="store_true",
+                        help="Show ALL decoded messages, not just CQ")
+    parser.add_argument("--all", action="store_true", dest="all_decodes",
+                        help="Apply NEEDED/MATCH logic to all decoded messages, not just CQ; "
+                             "non-CQ hits are shown in magenta and added to the reply buffer. "
+                             "Combine with --raw to also show non-CQ messages with no hits. "
+                             "Requires WSJT-X Settings → Reporting → 'CQ only' to be UNCHECKED "
+                             "so that WSJT-X retains non-CQ decodes for UDP reply.")
+    parser.add_argument("--save", metavar="FILE",
+                        help="Append each CQ record as a JSON line to FILE")
+    parser.add_argument("--cty", metavar="PATH", default=str(CTY_DAT_DEFAULT),
+                        help=f"Path to cty.dat (default: {CTY_DAT_DEFAULT})")
+    parser.add_argument("--adif", metavar="FILE", nargs="+",
+                        help="Additional ADIF log file(s) for NEEDED detection "
+                             "(auto-discovered WSJT-X logs are always loaded if found)")
+    parser.add_argument("--no-need-entity",  dest="need_entity",  action="store_false", default=True,
+                        help="Disable DXCC-entity NEEDED check")
+    parser.add_argument("--no-need-cqz",     dest="need_cqz",     action="store_false", default=True,
+                        help="Disable CQ-zone NEEDED check")
+    parser.add_argument("--no-need-country", dest="need_country", action="store_false", default=True,
+                        help="Disable country-name NEEDED check")
+    parser.add_argument("--qsl-only", action="store_true", dest="qsl_only",
+                        help="Require LoTW confirmation (lotw_qsl_rcvd=Y) for NEEDED checks; "
+                             "unconfirmed QSOs shown with ❓ instead of ✅")
+    parser.add_argument("--worked-lag-days", metavar="DAYS", type=int, default=0,
+                        dest="worked_lag_days",
+                        help="Suppress NEEDED/MATCH for a callsign worked within N days "
+                             "(default 0 = suppress today; -1 = disable suppression entirely)")
+    parser.add_argument("--match-calls", metavar="FILE", nargs="+",
+                        help="File(s) of callsign regex patterns to flag as MATCH (one per line, # = comment)")
+    parser.add_argument("--match-message", metavar="FILE", nargs="+",
+                        help="File(s) of decoded-message regex patterns to flag as MATCH")
+    parser.add_argument("--pota",  action="store_true",
+                        help="Flag CQ POTA activations as MATCH")
+    parser.add_argument("--sota",  action="store_true",
+                        help="Flag CQ SOTA activations as MATCH")
+    parser.add_argument("--iota",  action="store_true",
+                        help="Flag CQ IOTA activations as MATCH")
+    parser.add_argument("--match-state", metavar="STATES",
+                        help="Comma-separated US state abbreviations (e.g. TX,CA) or a file of states to flag as MATCH")
+    parser.add_argument("--hamdat", metavar="DB", default=str(HAMDAT_DB_DEFAULT),
+                        help=f"Path to hamdat SQLite database (default: {HAMDAT_DB_DEFAULT})")
+    parser.add_argument("--alert-command", metavar="SCRIPT",
+                        help="Script to exec on NEEDED/MATCH events; alert message is passed as arg 1")
+    parser.add_argument("--alert-ntfy", metavar="TOPIC",
+                        help="POST NEEDED/MATCH alerts to ntfy.sh topic TOPIC")
+    parser.add_argument("--adif-change-script", metavar="SCRIPT",
+                        help="Script to exec each time the ADIF log file(s) are reloaded; "
+                             "reloaded file path(s) are passed as arguments")
+    parser.add_argument("--proxy", metavar="PORT[,PORT...]",
+                        help="Forward every received WSJT-X packet to these additional UDP ports "
+                             "on localhost (e.g. --proxy 2238 or --proxy 2238,2239)")
+    was_grp = parser.add_mutually_exclusive_group()
+    was_grp.add_argument("--was", dest="need_was", action="store_true", default=False,
+                         help="Flag US states not yet LoTW-confirmed as NEEDED (ARRL WAS award); "
+                              "requires --hamdat; mutually exclusive with --5bwas")
+    was_grp.add_argument("--5bwas", dest="need_5bwas", action="store_true", default=False,
+                         help="Flag US states not yet LoTW-confirmed on the current band as NEEDED "
+                              "(ARRL 5-Band WAS award); requires --hamdat; mutually exclusive with --was")
+
+    # Accepted for backward compatibility; cycle stats are always in the status bar.
+    parser.add_argument("--stats", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--debug", action="store_true",
+                        help="Dump raw packet hex and parsed fields to the decode pane")
+    parser.add_argument("--no-color", dest="color", action="store_false", default=True,
+                        help="Disable ANSI colorization of the decode output")
+    parser.add_argument("--mouse", action="store_true",
+                        help="Enable mouse support: the wheel scrolls the decode pane and "
+                             "clicking focuses a pane (hold Shift to select text)")
+
+    args = parser.parse_args()
+
+    # ── UDP sockets (must bind before TUI starts so the port is held) ─────────
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except AttributeError:
+        pass
+    sock.bind((args.host, args.port))
+    tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+
+    # ── Launch TUI — all remaining startup happens inside, logged to the pane ─
+    tui = JtconTUI(args, sock, tx_sock)
+    try:
+        status = tui.run()
+    finally:
+        sock.close()
+        tx_sock.close()
+    sys.exit(status)
+
+
+if __name__ == "__main__":
+    main()
