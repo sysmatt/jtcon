@@ -13,8 +13,8 @@ Optionally compares against an ADIF logbook to flag contacts not yet worked.
 │  ──────────────────────────────────────────────────────────────────────────────  │
 │  123045z  +05   +0.1s  1234  FT8   CQ W1ABC FN42     W1ABC     FN42     3d   │...│  ← scrollable
 │  123100z  -12   -0.3s  2100  FT8   CQ DX VK3XY QF22  VK3XY    QF22           │...│     decode pane
-│  ...                                                                             │     (Tab to focus
-│                                                                                  │      and scroll)
+│  ...                                                                             │     (↑↓ PgUp PgDn
+│                                                                                  │      to scroll)
 ├──────────────────────────────────────────────────────────────────────────────────┤
 │  CMD>                                                                            │  ← command input
 ├──────────────────────────────────────────────────────────────────────────────────┤
@@ -36,14 +36,14 @@ Optionally compares against an ADIF logbook to flag contacts not yet worked.
 | `callsign` | CQ callsign — **green** if worked on this band+mode, **yellow** if worked on a different band or mode, bold white if never worked *(with --adif)* |
 | `grid` | Grid square (green if already worked) |
 | `days` | Days since last QSO with this callsign *(with --adif)* |
-| `ST` | FCC-licensed US state *(with --match-state)* |
+| `ST` | FCC-licensed US state *(when a hamdat database is found)* — green if the state is already in your log |
 | `\| entity CQz ITUz ct` | DXCC entity, CQ zone, ITU zone, continent (cyan) |
 | `WAS` / `5BW` | WAS/5BWAS status icon + state *(with --was or --5bwas)* |
 | `QRZ` | ⭐ if callsign has QRZ confirmation (`app_qrzlog_status=C`) |
 | `LoW` | 🌎 if callsign has LoTW confirmation (`lotw_qsl_rcvd=Y`) |
 
-The `##` index cycles 00–99 and wraps.  Each CQ call is assigned a fixed index at
-arrival time; the index does not change as new calls arrive.  Non-CQ decodes that
+The `##` index runs 00–99 and each callsign owns one index: a station that keeps
+calling CQ shows the same number on every line.  Non-CQ decodes that
 produce a NEEDED or MATCH hit (with `--all`) are also indexed and replyable.
 Non-CQ lines with no hit are indented with spaces and not assigned an index.
 
@@ -180,7 +180,8 @@ Usage examples:
 - Python 3.10+
 - `prompt-toolkit` >= 3.0 — `pip install prompt-toolkit` or your OS package manager
 - `cty.dat` — downloaded automatically from country-files.com on first run and cached at
-  `~/.jtcon_cty.dat`
+  `~/.jtcon_cty.dat`; re-downloaded at startup when the cached copy is more than 30 days
+  old (the old copy is kept if the download fails)
 
 Optional:
 - An ADIF log file (`--adif`) for NEEDED detection and worked-contact coloring
@@ -263,9 +264,21 @@ All loaded log files are watched for changes and reloaded automatically mid-sess
 
 | Key | Action |
 |---|---|
+| `↑` `↓` | Scroll the decode pane one line, while typing at `CMD>` |
+| `PgUp` `PgDn` | Scroll the decode pane one page, while typing at `CMD>` |
+| `Esc` / `Ctrl-End` | Jump back to the newest output and resume following it |
 | `Tab` | Toggle focus between decode pane and command input |
-| `↑` `↓` `PgUp` `PgDn` | Scroll decode pane (when pane is focused) |
 | `Ctrl-C` / `Ctrl-Q` | Quit |
+
+You can scroll the decode pane without leaving the command line.  While you're
+scrolled back, a yellow `SCROLL` badge shows on the status line and the view stays
+put as new decodes arrive below.  Paging down to the bottom, pressing `Esc`, or
+running a command returns to the live view.  Many terminals send `↑`/`↓` for the
+mouse wheel, so the wheel scrolls the pane too.
+
+With `--mouse`, jtcon handles the mouse itself: the wheel scrolls the decode pane
+wherever the pointer is, and clicking a pane focuses it.  Most terminals then need
+**Shift**+drag to select text for copying.
 
 ## Commands
 
@@ -275,14 +288,30 @@ Type in the `CMD>` line and press Enter:
 |---|---|
 | `quit` / `exit` / `q` | Exit the program |
 | `clear` | Clear the decode pane |
-| `list` (or `l`, `li`, `lis`) | Show all NEEDED/MATCH entries from the rolling buffer |
+| `list` (or `l`, `li`, `lis`) | Show all NEEDED/MATCH entries from the rolling buffer, sorted by last heard (most recent at the bottom) |
 | `7` / `42` / `00` *(any 1–2 digit number)* | Reply to the contact at that rolling-buffer index |
-| `W1ABC` *(any callsign)* | Search the rolling buffer and reply to the most recent entry from that callsign |
+| `W1ABC` *(any callsign)* | Reply to that callsign's rolling-buffer entry |
 
-**Rolling buffer** — the last 100 entries are kept in memory.  Each CQ call is assigned
-a two-digit index (`##` column) that is stable once assigned.  With `--all`, non-CQ
-decodes that produce a NEEDED or MATCH hit are also indexed and stored.  `list` lets
-you review all flagged contacts at once; then call by index or callsign.
+**Rolling buffer** — up to 100 stations are kept in memory, one slot per callsign.
+Each station gets a two-digit index (`##` column) that stays the same while it is
+being heard.  Every repeat decode refreshes the station's entry, so a reply always
+uses the newest decode (WSJT-X only accepts a reply for a decode still in its Band
+Activity window).  When all slots are full, the least recently heard station is
+evicted.  With `--all`, non-CQ decodes that produce a NEEDED or MATCH hit are also
+stored; a station's newest decode replaces its earlier one, CQ or not.
+
+`list` shows each flagged station once, oldest first, with the time since it was
+last heard and how many times it has been decoded:
+
+```
+[list] 3 NEEDED/MATCH entries (last heard at bottom) ——
+12   4m10s ×6   123015z  -08   +0.2s  1810  FT8   CQ VK3XY QF22 ...
+07     45s ×14  123345z  +03   +0.1s   940  FT8   CQ ZL2AB RF70 ...
+31      0s ×2   123430z  -15   -0.4s  2210  FT8   CQ DX JA1XYZ PM95 ...
+```
+
+Replying to a station last heard more than 2 minutes ago prints a warning.  The
+buffer is cleared when the WSJT-X dial frequency changes.
 
 Replies use the WSJT-X UDP Reply message (type 4), equivalent to double-clicking a
 decode in the WSJT-X UI.  WSJT-X must have **Settings → Reporting → Accept UDP requests**
@@ -301,6 +330,8 @@ checked.
 --save FILE             Append each CQ record as JSON to FILE
 --cty PATH              Path to cty.dat (default: ~/.jtcon_cty.dat)
 --no-color              Disable ANSI colorization of the decode output
+--mouse                 Enable mouse support: the wheel scrolls the decode pane and
+                        clicking focuses a pane (hold Shift to select text)
 
 ADIF / NEEDED detection:
 --adif FILE [FILE ...]  Additional ADIF log file(s) for NEEDED detection
@@ -329,13 +360,15 @@ Pattern matching / alerts:
                         (ARRL 5-Band WAS award); requires --hamdat; mutually exclusive with --was
 --alert-command SCRIPT  Script to exec on NEEDED/MATCH events; alert message is arg 1
 --alert-ntfy TOPIC      POST NEEDED/MATCH alerts to ntfy.sh topic TOPIC
+                        (the terminal bell and external alerts fire once per station
+                        and flag set; they fire again if that station returns after
+                        going unheard for an hour)
 
 Networking:
 --proxy PORT[,PORT...]  Forward every received packet to these additional UDP ports on
                         localhost (e.g. --proxy 2238 or --proxy 2238,2239)
 
 Diagnostics:
---stats                 Cycle stats are always shown in the status bar
 --debug                 Dump raw packet hex and parsed fields to decode pane
 ```
 
@@ -354,7 +387,10 @@ In WSJT-X: **Settings → Reporting → UDP Server**
 ## Known Limitations
 
 - ADIF hot-reload on file change may lag by one receive cycle (~0.2 s)
-- No mouse support in the decode pane
+- The decode pane keeps the most recent ~5000 lines; older lines are trimmed
+- If a fatal startup error occurs (missing `--adif` file, unreadable pattern file, etc.)
+  jtcon exits and prints the reason; if the UDP socket fails mid-session the status
+  line shows `UDP DOWN`
 - TX state indicator requires WSJT-X to send Status messages (type 1); always shows RX
   if WSJT-X is not running or the port is misconfigured
 
