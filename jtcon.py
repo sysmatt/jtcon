@@ -106,6 +106,7 @@ Options
 """
 
 import argparse
+import importlib.metadata
 import json
 import re
 import select
@@ -135,7 +136,33 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
 
-__version__ = "2.0.0"
+def _get_version() -> str:
+    """
+    Version string matching what setuptools-scm assigns at build time.
+
+    From a git checkout (./jtcon or an editable install) ask git directly so the
+    version tracks every commit; otherwise use the installed package metadata.
+    """
+    here = Path(__file__).resolve().parent
+    if (here / ".git").exists():
+        try:
+            out = subprocess.run(
+                ["git", "describe", "--tags", "--long", "--match", "v[0-9]*"],
+                cwd=here, capture_output=True, text=True, timeout=2,
+            ).stdout.strip()
+            m = re.match(r"^v(.+)-(\d+)-g[0-9a-f]+$", out)
+            if m:
+                tag, distance = m.group(1), int(m.group(2))
+                return tag if distance == 0 else f"{tag}.post{distance}"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        return importlib.metadata.version("jtcon")
+    except importlib.metadata.PackageNotFoundError:
+        return "0+unknown"
+
+
+__version__ = _get_version()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 MAGIC      = 0xADBCCBDA

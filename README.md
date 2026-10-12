@@ -217,6 +217,28 @@ pip install -r requirements.txt   # just prompt-toolkit
 To work on the code with the `jtcon` command following your edits, install the
 checkout in editable mode: `pipx install -e .`
 
+### Versioning
+
+The version comes from git, via [setuptools-scm](https://setuptools-scm.readthedocs.io/).
+A release is a `vX.Y.Z` tag; every commit after it gets `.postN`, where N is the
+number of commits since the tag:
+
+```
+v2.0.0 tag         → 2.0.0
+3 commits later    → 2.0.0.post3
+v2.1.0 tag         → 2.1.0
+```
+
+So every pushed commit is a newer version, and `pipx upgrade jtcon` picks it up.
+To cut a release, tag it and push the tag:
+
+```bash
+git tag v2.1.0
+git push --tags
+```
+
+`jtcon --version` reports the same number, whether installed or run from a checkout.
+
 ## Usage
 
 ```bash

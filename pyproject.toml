@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -32,5 +32,9 @@ jtcon = "jtcon:main"
 [tool.setuptools]
 py-modules = ["jtcon"]
 
-[tool.setuptools.dynamic]
-version = { attr = "jtcon.__version__" }
+# Version comes from git: the latest vX.Y.Z tag, plus .postN for N commits
+# since that tag (e.g. v2.0.0 + 3 commits -> 2.0.0.post3).
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"
+fallback_version = "0+unknown"   # source without git history (e.g. GitHub zip)
