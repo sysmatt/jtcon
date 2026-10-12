@@ -11,11 +11,11 @@ flagged as NEEDED.
 TUI layout
 ----------
   ┌─────────────────────────────────────┐
-  │  scrollable decode output           │  ← top pane, Tab to focus & scroll
+  │  scrollable decode output           │  ← top pane, ↑↓ PgUp PgDn to scroll
   ├─────────────────────────────────────┤
   │  CMD>                               │  ← single-line command input
   ├─────────────────────────────────────┤
-  │  [████████░░] even  dec=…  cq=…     │  ← status line (cycle bar + stats)
+  │  RX [████████░░] even  dec=…  cq=…  │  ← status line (cycle bar + stats)
   └─────────────────────────────────────┘
 
 Key bindings
@@ -68,13 +68,15 @@ Usage
 
 Options
 -------
+  --version             Show the version number and exit
   --host HOST           UDP bind address           (default: 0.0.0.0)
   --port PORT           UDP port                   (default: 2237)
   --show-time           Prepend local wall-clock HH:MM:SS to every line
   --raw                 Show ALL decoded messages, not just CQ
   --save FILE           Append each CQ record as a JSON line to FILE
   --cty PATH            Path to cty.dat            (default: ~/.jtcon_cty.dat)
-  --adif FILE           ADIF log file for NEEDED detection
+  --adif FILE [...]     Additional ADIF log file(s) for NEEDED detection
+                        (auto-discovered WSJT-X logs are always loaded)
   --no-need-entity      Disable DXCC-entity NEEDED check
   --no-need-cqz         Disable CQ-zone NEEDED check
   --no-need-country     Disable country-name NEEDED check
@@ -102,6 +104,7 @@ Options
                         Requires WSJT-X Settings → Reporting → "CQ only" to be UNCHECKED
                         so that WSJT-X retains non-CQ decodes for UDP reply.
   --debug               Dump raw hex + parsed fields to the decode pane
+  --no-color            Disable ANSI colorization of the decode output
   --mouse               Mouse wheel scrolls the decode pane; Shift+drag selects text
 """
 

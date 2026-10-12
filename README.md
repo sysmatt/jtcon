@@ -9,10 +9,10 @@ Optionally compares against an ADIF logbook to flag contacts not yet worked.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│  HHMMSSZ   dB   dt(s)    Hz  mode  message           callsign  grid   days   │...│
+│##  HHMMSSZ   dB   dt(s)    Hz  mode  message           callsign  grid   days │...│
 │  ──────────────────────────────────────────────────────────────────────────────  │
-│  123045z  +05   +0.1s  1234  FT8   CQ W1ABC FN42     W1ABC     FN42     3d   │...│  ← scrollable
-│  123100z  -12   -0.3s  2100  FT8   CQ DX VK3XY QF22  VK3XY    QF22           │...│     decode pane
+│03  123045z  +05   +0.1s  1234  FT8   CQ W1ABC FN42     W1ABC     FN42     3d │...│  ← scrollable
+│04  123100z  -12   -0.3s  2100  FT8   CQ DX VK3XY QF22  VK3XY    QF22         │...│     decode pane
 │  ...                                                                             │     (↑↓ PgUp PgDn
 │                                                                                  │      to scroll)
 ├──────────────────────────────────────────────────────────────────────────────────┤
@@ -166,6 +166,8 @@ jtcon --adif ~/wsjtx_log.adi --5bwas --all
 | Field | Description |
 |---|---|
 | `RX` / `TX` | Current state from WSJT-X Status messages (TX shown in red) |
+| `UDP DOWN` | Shown in place of RX/TX if the UDP socket fails mid-session |
+| `SCROLL` | Yellow badge shown while the decode pane is scrolled back from the live view |
 | `[████░░░░░░░░░░]` | Bargraph showing position in the current 15 s (FT8) or 7.5 s (FT4) cycle |
 | `even` / `odd` | Parity of the current TX slot |
 | `FT8` / `FT4` | Active mode |
@@ -363,6 +365,7 @@ checked.
 ## All Options
 
 ```
+--version               Show the version number and exit
 --host HOST             UDP bind address (default: 0.0.0.0)
 --port PORT             UDP port matching WSJT-X Settings → Reporting (default: 2237)
 --show-time             Prepend local wall-clock HH:MM:SS to each line
@@ -370,7 +373,7 @@ checked.
 --all                   Apply NEEDED/MATCH logic to all decodes, not just CQ; non-CQ
                         hits shown in magenta and added to reply buffer (see --raw to
                         also show non-matching non-CQ traffic)
---save FILE             Append each CQ record as JSON to FILE
+--save FILE             Append each CQ record as a JSON line to FILE
 --cty PATH              Path to cty.dat (default: ~/.jtcon_cty.dat)
 --no-color              Disable ANSI colorization of the decode output
 --mouse                 Enable mouse support: the wheel scrolls the decode pane and
@@ -384,9 +387,10 @@ ADIF / NEEDED detection:
 --no-need-country       Disable country-name NEEDED check
 --qsl-only              Require LoTW confirmation (lotw_qsl_rcvd=Y) for NEEDED checks;
                         unconfirmed QSOs shown with ❓ instead of ✅
---worked-lag-days N     Suppress NEEDED/MATCH for a callsign worked within N days
+--worked-lag-days DAYS  Suppress NEEDED/MATCH for a callsign worked within DAYS days
                         (default 0 = suppress today; -1 = disable suppression entirely)
---adif-change-script S  Script to exec when ADIF log file(s) are reloaded;
+--adif-change-script SCRIPT
+                        Script to exec when ADIF log file(s) are reloaded;
                         reloaded file paths are passed as arguments
 
 Pattern matching / alerts:
