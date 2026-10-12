@@ -55,7 +55,11 @@ First run
 
 Install
 -------
-  pipx install git+https://github.com/sysmatt/jtcon
+  Option 1, pipx (see README for details):
+    pipx install git+https://github.com/sysmatt/jtcon                  # your user
+    sudo pipx install --global git+https://github.com/sysmatt/jtcon    # all users
+  Option 2, run from a clone:
+    git clone https://github.com/sysmatt/jtcon.git && cd jtcon && ./jtcon
 
 Usage
 -----
@@ -2186,6 +2190,7 @@ class JtconTUI:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
+        prog="jtcon",
         description="Monitor WSJT-X CQ calls via UDP with a prompt_toolkit TUI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

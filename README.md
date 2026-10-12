@@ -192,32 +192,72 @@ Optional:
 
 ## Installation
 
-Install with [pipx](https://pipx.pypa.io/), which puts the `jtcon` command on your
-PATH in its own isolated environment:
+There are two ways to run jtcon: install it with pipx (Option 1), or run it
+straight from a git clone (Option 2).
+
+### Option 1 — install with pipx (recommended)
+
+[pipx](https://pipx.pypa.io/) installs Python command-line programs, each in its own
+isolated virtual environment, and puts the command on your PATH.  It pulls in
+`prompt-toolkit` automatically.  Install pipx itself from your package manager
+(`sudo apt install pipx`, `sudo dnf install pipx`, `brew install pipx`) or with
+`python3 -m pip install --user pipx`.
+
+**For your user only** (no root needed):
 
 ```bash
 pipx install git+https://github.com/sysmatt/jtcon
+pipx ensurepath        # one time: adds ~/.local/bin to PATH; then open a new shell
 jtcon --version
 ```
 
-Upgrade to the latest version on GitHub, or remove it:
+On Linux this puts the virtual environment in `~/.local/share/pipx/venvs/jtcon/` and
+the `jtcon` command in `~/.local/bin/`.  `pipx ensurepath` adds `~/.local/bin` to
+your PATH by editing your shell startup file (e.g. `~/.bashrc`), so it takes effect in
+new terminals.  Many distributions already have `~/.local/bin` on the PATH, in which
+case it does nothing.
+
+**For every user on the system** (needs pipx 1.5 or newer):
 
 ```bash
-pipx upgrade jtcon
-pipx uninstall jtcon
+sudo pipx install --global git+https://github.com/sysmatt/jtcon
 ```
 
-### Running from a git checkout
+This puts the virtual environment in `/opt/pipx/venvs/jtcon/` and the `jtcon` command
+in `/usr/local/bin/`, which is already on everyone's PATH, so no `ensurepath` step is
+needed.
+
+**Upgrading and removing.** `pipx upgrade` installs the newest commit from GitHub
+(see [Versioning](#versioning)).  Add `--global` (and `sudo`) for a global install:
+
+```bash
+pipx upgrade jtcon                   # sudo pipx upgrade --global jtcon
+pipx uninstall jtcon                 # sudo pipx uninstall --global jtcon
+pipx list                            # show what pipx has installed, and where
+```
+
+### Option 2 — run from a git clone
+
+No install step; run it from the clone and update it with `git pull`:
 
 ```bash
 git clone https://github.com/sysmatt/jtcon.git
 cd jtcon
-pip install -r requirements.txt   # just prompt-toolkit
+sudo apt install python3-prompt-toolkit    # Debian/Ubuntu (Fedora: python3-prompt-toolkit via dnf)
+# or: python3 -m pip install --user -r requirements.txt
+./jtcon --version
 ./jtcon
 ```
 
-To work on the code with the `jtcon` command following your edits, install the
-checkout in editable mode: `pipx install -e .`
+To update later:
+
+```bash
+cd jtcon
+git pull
+```
+
+If you're working on the code and want a `jtcon` command on your PATH that runs your
+checkout, install it in editable mode with `pipx install -e .` from the clone.
 
 ### Versioning
 
