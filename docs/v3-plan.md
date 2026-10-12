@@ -264,8 +264,11 @@ jtcon --show-config                      print the merged effective config
 
 ## Package layout
 
+Target layout (`src/` layout, adopted in phase 1; later phases fill it in):
+
 ```
-jtcon/
+jtcon                    launcher: run from a checkout (puts src/ on the path)
+src/jtcon/
   __init__.py  __main__.py
   cli.py                 argparse → Config, picks a front end
   config.py              TOML load, profiles, defaults, validation
@@ -305,12 +308,34 @@ Each phase ends with the tests passing and jtcon runnable.
       worked-lag each fail a test
 - [x] `build_parser()` extracted from `main()` so tests use the real flag defaults
 
-### Phase 1: package split (mechanical)
-- [ ] The `./jtcon` launcher file and a `jtcon/` package directory can't share a
-      name: rename the launcher (e.g. `./run-jtcon`) or use `python3 -m jtcon`
-- [ ] Move code into the `jtcon/` package with no behaviour change
-- [ ] pyproject: package discovery, entry point, setuptools-scm still working
-- [ ] `./jtcon` launcher and `pipx install` still work
+### Phase 1: package split (mechanical) ✅ (pending real-world check)
+- [x] `jtcon.py` split into the `src/jtcon/` package with no behaviour change; code
+      moved by line range, names kept (renaming waits for the rewrite phases):
+
+      | Module | From v2 |
+      |---|---|
+      | `__init__.py` | usage docstring, `__version__` |
+      | `cli.py` | `build_parser`, `main` |
+      | `core/protocol.py` | packet constants, reader, Decode/Status parsing, Reply encoder |
+      | `core/cty.py` | cty.dat parser and download |
+      | `core/adif.py` | log discovery, ADIF parser, `AdifLog` |
+      | `core/hamdat.py` | hamdat lookup, state lists |
+      | `core/bands.py` | band table, WAS states, 5BWAS bands |
+      | `core/messages.py` | callsign patterns, CQ parser, directed sender |
+      | `core/patterns.py` | regex pattern files |
+      | `core/alerts.py` | alert message, script, ntfy |
+      | `core/cycle.py` | cycle tracker |
+      | `core/decode.py` | `DecodeContext`/`DecodeResult`, classify, alert dedupe, JSON, `handle_packet` |
+      | `tui/render.py` | colours, column layout, `_render`, header, bargraph |
+      | `tui/app.py` | `JtconTUI` |
+
+- [x] `src/` layout keeps the `./jtcon` launcher name (it puts `src/` on the path);
+      `python3 -m jtcon` works too.  Version detection follows the new depth
+- [x] pyproject: package discovery under `src/`, entry point `jtcon.cli:main`;
+      wheel builds, installs and runs (`jtcon --version`, `python3 -m jtcon`)
+- [x] Tests import from the new modules; all 159 pass, render snapshot unchanged
+- [x] Known wart, on purpose: `core/decode.py` imports `tui/render.py` because
+      `handle_packet` still renders.  Phase 3 removes it
 - [ ] **Checkpoint: real-world test by Matt** on a live WSJT-X session; nothing broken
       before moving on
 

@@ -4,13 +4,15 @@ Runs JtconTUI headless (no terminal); the app itself is never started.
 """
 
 import re
+import time
 
 import pytest
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-import jtcon
+from jtcon.core.decode import handle_packet
+from jtcon.tui.app import _BUF_SIZE, _MAX_OUTPUT_LINES, _STALE_REPLY_S, _TRIM_OUTPUT_TO, JtconTUI
 import wsjtx_packets as pk
 from conftest import make_args
 
@@ -33,7 +35,7 @@ class _Buffer:
 @pytest.fixture
 def clock(monkeypatch):
     now = [1000.0]
-    monkeypatch.setattr(jtcon.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
     return now
 
 
@@ -41,7 +43,7 @@ def clock(monkeypatch):
 def make_tui():
     with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
         def _make(*argv):
-            return jtcon.JtconTUI(make_args("--no-color", *argv), None, _FakeSock())
+            return JtconTUI(make_args("--no-color", *argv), None, _FakeSock())
         yield _make
 
 
@@ -53,7 +55,7 @@ def tui(make_tui):
 def store(tui, ctx, msg, addr=ADDR):
     """Feed one decode through handle_packet into the buffer, as the UDP loop does."""
     meta = {}
-    lines = jtcon.handle_packet(pk.decode(msg), ctx, addr, meta)
+    lines = handle_packet(pk.decode(msg), ctx, addr, meta)
     return tui._store_entry(meta["callsign"], meta, lines, addr)
 
 
@@ -80,7 +82,7 @@ def test_each_station_keeps_its_index(tui, make_ctx, clock):
 
 def test_full_buffer_evicts_least_recently_heard(tui, clock):
     meta = {"decoded": {}, "needed_flags": [], "match_flags": []}
-    for i in range(jtcon._BUF_SIZE):
+    for i in range(_BUF_SIZE):
         clock[0] += 1
         tui._store_entry(f"K{i}AA", meta, ["line"], ADDR)
     clock[0] += 1
@@ -90,7 +92,7 @@ def test_full_buffer_evicts_least_recently_heard(tui, clock):
     assert idx == 0
     assert tui._find_callsign("K0AA") is None
     assert tui._find_callsign("ZL1NEW")["idx"] == 0
-    assert len(tui._cq_buffer) == jtcon._BUF_SIZE
+    assert len(tui._cq_buffer) == _BUF_SIZE
 
 
 def test_clear_buffer(tui, make_ctx):
@@ -126,7 +128,7 @@ def test_reply_by_callsign(tui, make_ctx):
 
 def test_stale_reply_warns(tui, make_ctx, clock):
     store(tui, make_ctx(), "CQ VK3XY QF22")
-    clock[0] += jtcon._STALE_REPLY_S + 5
+    clock[0] += _STALE_REPLY_S + 5
     lines = command(tui, "0")
     assert lines[-2] == ("[cmd] Warning: VK3XY last heard 2m05s ago"
                          " — WSJT-X may no longer have that decode.")
@@ -182,11 +184,11 @@ def test_quit_commands(tui, monkeypatch):
 # ── Output pane ───────────────────────────────────────────────────────────────
 
 def test_output_is_trimmed(tui):
-    for i in range(jtcon._MAX_OUTPUT_LINES + 1):
+    for i in range(_MAX_OUTPUT_LINES + 1):
         tui._append_line(f"line {i}")
     tui._flush_output()
-    assert len(tui._lines) == jtcon._TRIM_OUTPUT_TO
-    assert tui._lines[-1] == f"line {jtcon._MAX_OUTPUT_LINES}"
+    assert len(tui._lines) == _TRIM_OUTPUT_TO
+    assert tui._lines[-1] == f"line {_MAX_OUTPUT_LINES}"
 
 
 def test_multiline_append_splits(tui):
@@ -220,13 +222,13 @@ def test_scroll_back_and_return_to_live(tui):
 
 
 def test_scrolled_view_shifts_when_output_is_trimmed(tui):
-    bottom = _fill(tui, jtcon._MAX_OUTPUT_LINES)
+    bottom = _fill(tui, _MAX_OUTPUT_LINES)
     tui._scroll_output(-3000)
     top = tui._scroll_top
     assert top == bottom - 3000
     tui._append_line("one more")      # pushes past the cap: trims 1001 lines
     tui._flush_output()
-    assert tui._scroll_top == top - (jtcon._MAX_OUTPUT_LINES + 1 - jtcon._TRIM_OUTPUT_TO)
+    assert tui._scroll_top == top - (_MAX_OUTPUT_LINES + 1 - _TRIM_OUTPUT_TO)
 
 
 def test_command_returns_to_live(tui):

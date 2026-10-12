@@ -30,10 +30,10 @@ Homepage = "https://github.com/sysmatt/jtcon"
 Issues = "https://github.com/sysmatt/jtcon/issues"
 
 [project.scripts]
-jtcon = "jtcon:main"
+jtcon = "jtcon.cli:main"
 
-[tool.setuptools]
-py-modules = ["jtcon"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 # Version comes from git: the latest vX.Y.Z tag, plus .postN for N commits
 # since that tag (e.g. v2.0.0 + 3 commits -> 2.0.0.post3).
@@ -44,4 +44,4 @@ fallback_version = "0+unknown"   # source without git history (e.g. GitHub zip)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src"]

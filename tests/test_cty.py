@@ -2,7 +2,8 @@
 
 import pytest
 
-import jtcon
+from jtcon.core.cty import _strip_overrides
+from jtcon.core.decode import _entity_info
 
 
 def _summary(cty, call):
@@ -63,16 +64,16 @@ def test_loaded_counts(cty):
 
 
 def test_strip_overrides():
-    assert jtcon._strip_overrides("VE2[4]") == ("VE2", {"ituz": 4})
-    assert jtcon._strip_overrides("CI0(2)[4]") == ("CI0", {"cqz": 2, "ituz": 4})
-    assert jtcon._strip_overrides("XX9{AS}") == ("XX9", {"continent": "AS"})
-    assert jtcon._strip_overrides("K") == ("K", {})
+    assert _strip_overrides("VE2[4]") == ("VE2", {"ituz": 4})
+    assert _strip_overrides("CI0(2)[4]") == ("CI0", {"cqz": 2, "ituz": 4})
+    assert _strip_overrides("XX9{AS}") == ("XX9", {"continent": "AS"})
+    assert _strip_overrides("K") == ("K", {})
 
 
 def test_entity_info_shape(cty):
-    assert jtcon._entity_info(cty, "VK3XY") == {
+    assert _entity_info(cty, "VK3XY") == {
         "primary_prefix": "VK", "entity": "Australia", "cq_zone": 30,
         "itu_zone": 59, "continent": "OC",
     }
-    assert jtcon._entity_info(cty, None) == {}
-    assert jtcon._entity_info(cty, "Q0ZZZ") == {}
+    assert _entity_info(cty, None) == {}
+    assert _entity_info(cty, "Q0ZZZ") == {}

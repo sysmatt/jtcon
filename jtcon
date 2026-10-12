@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run jtcon from a git checkout without installing it (see jtcon.py)."""
-from jtcon import main
+"""Run jtcon from a git checkout without installing it (code is in src/jtcon/)."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+
+from jtcon.cli import main  # noqa: E402
 
 main()

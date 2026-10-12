@@ -11,7 +11,9 @@ changes on purpose, regenerate the snapshot and review the diff:
 import os
 from pathlib import Path
 
-import jtcon
+from jtcon.core.bands import _freq_to_band
+from jtcon.core.decode import handle_packet
+from jtcon.tui.render import _BGRN, _BMAG, _BOLD, _BRED, _BYEL, _CYN, _DIM, _GRN, _header_line, _RST
 import wsjtx_packets as pk
 from conftest import watch_patterns
 
@@ -54,9 +56,9 @@ MESSAGES = (
 )
 
 _CODE_NAMES = {
-    jtcon._RST: "{RST}", jtcon._DIM: "{DIM}", jtcon._BOLD: "{BOLD}", jtcon._GRN: "{GRN}",
-    jtcon._BGRN: "{BGRN}", jtcon._CYN: "{CYN}", jtcon._BRED: "{BRED}",
-    jtcon._BYEL: "{BYEL}", jtcon._BMAG: "{BMAG}",
+    _RST: "{RST}", _DIM: "{DIM}", _BOLD: "{BOLD}", _GRN: "{GRN}",
+    _BGRN: "{BGRN}", _CYN: "{CYN}", _BRED: "{BRED}",
+    _BYEL: "{BYEL}", _BMAG: "{BMAG}",
 }
 
 
@@ -74,11 +76,11 @@ def _render_all(make_ctx) -> str:
     def section(title, ctx, msgs=MESSAGES, modes=("~", "+")):
         out.append(f"#### {title}")
         has_hamdat = ctx.hamdat is not None
-        out.append(_readable(jtcon._header_line(ctx.args, ctx.adif_log is not None, has_hamdat)))
+        out.append(_readable(_header_line(ctx.args, ctx.adif_log is not None, has_hamdat)))
         for msg in msgs:
             for mode in modes:
                 meta = {}
-                lines = jtcon.handle_packet(pk.decode(msg, mode=mode), ctx, ("127.0.0.1", 2237), meta)
+                lines = handle_packet(pk.decode(msg, mode=mode), ctx, ("127.0.0.1", 2237), meta)
                 out.append(f"## {mode} {msg!r}")
                 out.extend(_readable(l) for l in lines)
                 if meta:
@@ -89,7 +91,7 @@ def _render_all(make_ctx) -> str:
     for dial in DIALS:
         for opts in OPTION_SETS:
             ctx = make_ctx(*opts, dial_freq=dial, call_patterns=watch)
-            section(f"{jtcon._freq_to_band(dial)} {' '.join(opts) or '(defaults)'}", ctx)
+            section(f"{_freq_to_band(dial)} {' '.join(opts) or '(defaults)'}", ctx)
 
     section("no ADIF log", make_ctx(adif=False, call_patterns=watch), modes=("~",))
     section("no ADIF log, no hamdat", make_ctx(adif=False, hamdat=None), modes=("~",))

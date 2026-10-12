@@ -5,10 +5,16 @@ These pin the v2 rules that the v3 wanted-rule framework must reproduce.
 
 import io
 import json
+import subprocess
+import threading
+import time
+import urllib.request
 
 import pytest
 
-import jtcon
+from jtcon.core.cycle import CycleTracker
+from jtcon.core.decode import handle_packet
+from jtcon.tui.render import _BMAG
 import wsjtx_packets as pk
 from conftest import watch_patterns
 
@@ -18,7 +24,7 @@ ALL_NEW_VK = ["NEW-DXCC(VK)", "NEW-CQZ(30)", "NEW-CTRY(Australia)"]
 
 def run(ctx, msg, mode="~"):
     meta = {}
-    lines = jtcon.handle_packet(pk.decode(msg, mode=mode), ctx, ADDR, meta)
+    lines = handle_packet(pk.decode(msg, mode=mode), ctx, ADDR, meta)
     return lines, meta
 
 
@@ -136,7 +142,7 @@ def test_all_checks_directed_messages(make_ctx):
     assert meta["callsign"] == "VK3XY"
     assert meta["is_cq"] is False
     assert meta["needed_flags"] == ALL_NEW_VK
-    assert jtcon._BMAG in lines[0] and jtcon._BMAG in lines[1]   # magenta: non-CQ hit
+    assert _BMAG in lines[0] and _BMAG in lines[1]   # magenta: non-CQ hit
 
 
 def test_all_hides_directed_messages_without_a_hit(make_ctx):
@@ -159,13 +165,13 @@ def test_raw_applies_message_patterns_to_non_cq(make_ctx):
 
 def test_status_packet_is_not_a_decode(make_ctx):
     meta = {}
-    assert jtcon.handle_packet(pk.status(14_074_000), make_ctx(), ADDR, meta) == []
+    assert handle_packet(pk.status(14_074_000), make_ctx(), ADDR, meta) == []
     assert meta == {}
 
 
 def test_cycle_tracker_counts_hidden_decodes(make_ctx):
     ctx = make_ctx()
-    ctx.cycle_tracker = jtcon.CycleTracker()
+    ctx.cycle_tracker = CycleTracker()
     run(ctx, "W1ABC VK3XY -12")
     run(ctx, "CQ W1ABC FN42")
     assert (ctx.cycle_tracker.cycle_total, ctx.cycle_tracker.cycle_cq) == (2, 1)
@@ -187,14 +193,14 @@ def test_ft4_mode_name(make_ctx):
 @pytest.fixture
 def clock(monkeypatch):
     now = [1000.0]
-    monkeypatch.setattr(jtcon.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
     return now
 
 
 @pytest.fixture
 def popen(monkeypatch):
     calls = []
-    monkeypatch.setattr(jtcon.subprocess, "Popen", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: calls.append(argv))
     return calls
 
 
@@ -238,8 +244,8 @@ def test_ntfy_alert(make_ctx, monkeypatch, clock):
         sent.append(req)
         return io.BytesIO()
 
-    monkeypatch.setattr(jtcon.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(jtcon.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
     run(make_ctx("--alert-ntfy", "my-topic"), "CQ VK3XY QF22")
     (req,) = sent
     assert req.full_url == "https://ntfy.sh/my-topic"

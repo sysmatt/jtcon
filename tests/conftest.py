@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-import jtcon
+import jtcon.core.adif
+import jtcon.core.decode
+import jtcon.tui.render
+from jtcon.cli import build_parser
+from jtcon.core.adif import AdifLog
+from jtcon.core.cty import CtyDat
+from jtcon.core.decode import DecodeContext
+from jtcon.core.hamdat import load_state_set
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CTY_PATH = FIXTURES / "cty.dat"
@@ -33,7 +40,8 @@ class _FrozenDatetime(datetime):
 
 @pytest.fixture(autouse=True)
 def frozen_today(monkeypatch):
-    monkeypatch.setattr(jtcon, "datetime", _FrozenDatetime)
+    for mod in (jtcon.core.adif, jtcon.core.decode, jtcon.tui.render):
+        monkeypatch.setattr(mod, "datetime", _FrozenDatetime)
 
 
 class FakeHamdat:
@@ -63,7 +71,7 @@ def make_hamdat_db(path: Path, states: dict = HAMDAT_STATES) -> Path:
 
 @pytest.fixture(scope="session")
 def cty():
-    c = jtcon.CtyDat()
+    c = CtyDat()
     c.load(CTY_PATH)
     return c
 
@@ -71,14 +79,14 @@ def cty():
 @pytest.fixture
 def make_adif(cty):
     def _make(paths=(LOG_PATH,), hamdat=FakeHamdat(), qsl_only=False):
-        return jtcon.AdifLog([Path(p) for p in paths], cty, hamdat,
-                             qsl_only=qsl_only, log=lambda m: None)
+        return AdifLog([Path(p) for p in paths], cty, hamdat,
+                       qsl_only=qsl_only, log=lambda m: None)
     return _make
 
 
 def make_args(*argv: str):
     """Parse a v2 command line with jtcon's real parser."""
-    return jtcon.build_parser().parse_args(list(argv))
+    return build_parser().parse_args(list(argv))
 
 
 @pytest.fixture
@@ -94,13 +102,13 @@ def make_ctx(cty, make_adif):
         for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
             if flag:
                 msg_patterns.append((re.compile(rf"\b{keyword}\b", re.IGNORECASE), None))
-        return jtcon.DecodeContext(
+        return DecodeContext(
             args=args, cty=cty,
             adif_log=make_adif(hamdat=hamdat, qsl_only=args.qsl_only) if adif else None,
             json_fh=json_fh,
             call_patterns=list(call_patterns),
             msg_patterns=msg_patterns,
-            state_set=jtcon.load_state_set(args.match_state) if args.match_state else set(),
+            state_set=load_state_set(args.match_state) if args.match_state else set(),
             hamdat=hamdat, cycle_tracker=None,
             alerted={} if alerted is None else alerted,
             dial_freq=dial_freq, de_call=MY_CALL,

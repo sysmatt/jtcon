@@ -2,12 +2,14 @@
 
 from datetime import date
 
-import jtcon
+from jtcon.cli import build_parser
+from jtcon.core.adif import AdifLog, parse_adif
+from jtcon.core.decode import _entity_info
 from conftest import LOG_PATH, FakeHamdat
 
 
 def test_parse_adif_records():
-    qsos = jtcon.parse_adif(LOG_PATH)
+    qsos = parse_adif(LOG_PATH)
     assert len(qsos) == 9
     assert qsos[0] == {
         "call": "W1ABC", "band": "20m", "mode": "FT8", "qso_date": "20250101",
@@ -23,7 +25,7 @@ def test_parse_adif_records():
 def test_parse_adif_without_header_or_final_eor(tmp_path):
     f = tmp_path / "bare.adi"
     f.write_text("<call:4>K1AA <band:3>20m <eor>\n<call:4>K2BB <band:3>40m\n")
-    assert jtcon.parse_adif(f) == [
+    assert parse_adif(f) == [
         {"call": "K1AA", "band": "20m"},
         {"call": "K2BB", "band": "40m"},
     ]
@@ -32,7 +34,7 @@ def test_parse_adif_without_header_or_final_eor(tmp_path):
 def test_parse_adif_empty(tmp_path):
     f = tmp_path / "empty.adi"
     f.write_text("header only <EOH>\n")
-    assert jtcon.parse_adif(f) == []
+    assert parse_adif(f) == []
 
 
 def test_worked_index(make_adif):
@@ -100,7 +102,7 @@ def test_states_without_hamdat(make_adif):
 
 def test_unreadable_file_is_logged_and_skipped(cty, tmp_path):
     logged = []
-    a = jtcon.AdifLog([tmp_path / "missing.adi", LOG_PATH], cty, FakeHamdat(),
+    a = AdifLog([tmp_path / "missing.adi", LOG_PATH], cty, FakeHamdat(),
                       log=logged.append)
     assert a.total_qsos == 9
     assert len(logged) == 1 and logged[0].startswith("[adif] Cannot read missing.adi")
@@ -108,10 +110,10 @@ def test_unreadable_file_is_logged_and_skipped(cty, tmp_path):
 
 def test_needed_and_worked_flags(make_adif, cty):
     a = make_adif(qsl_only=True)
-    args = jtcon.build_parser().parse_args(["--qsl-only"])
-    ja = jtcon._entity_info(cty, "JA1XYZ")    # worked, not LoTW-confirmed
-    vk = jtcon._entity_info(cty, "VK3XY")     # never worked
-    dl = jtcon._entity_info(cty, "DL1ABC")    # LoTW-confirmed
+    args = build_parser().parse_args(["--qsl-only"])
+    ja = _entity_info(cty, "JA1XYZ")    # worked, not LoTW-confirmed
+    vk = _entity_info(cty, "VK3XY")     # never worked
+    dl = _entity_info(cty, "DL1ABC")    # LoTW-confirmed
     assert a.needed_flags(ja, args) == ["NEW-DXCC(JA)", "NEW-CQZ(25)", "NEW-CTRY(Japan)"]
     assert a.worked_flags(ja, args) == []
     assert a.worked_flags_all(ja, args) == ["dxcc", "cqz", "country"]
@@ -120,5 +122,5 @@ def test_needed_and_worked_flags(make_adif, cty):
     assert a.needed_flags(dl, args) == []
     assert a.worked_flags(dl, args) == ["dxcc", "cqz", "country"]
 
-    only_dxcc = jtcon.build_parser().parse_args(["--no-need-cqz", "--no-need-country"])
+    only_dxcc = build_parser().parse_args(["--no-need-cqz", "--no-need-country"])
     assert a.needed_flags(vk, only_dxcc) == ["NEW-DXCC(VK)"]
