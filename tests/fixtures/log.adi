@@ -1,0 +1,11 @@
+Test log for jtcon.  Tests freeze "today" at 2026-10-12.
+<adif_ver:5>3.1.4 <programid:6>WSJT-X <EOH>
+<call:5>W1ABC <band:3>20m <mode:3>FT8 <qso_date:8>20250101 <lotw_qsl_rcvd:1>Y <state:2>MA <gridsquare:4>FN42 <app_qrzlog_status:1>C <EOR>
+<call:5>K2XYZ <band:3>40m <mode:4>MFSK <submode:3>FT4 <qso_date:8>20250601 <state:2>NJ <EOR>
+<call:6>JA1XYZ <band:3>20m <mode:3>FT8 <qso_date:8>20251010 <EOR>
+<call:5>W1ABC <band:3>30m <mode:3>FT8 <qso_date:8>20250301 <EOR>
+<call:6>DL1ABC <band:3>20m <mode:3>FT8 <qso_date:8>20261012 <lotw_qsl_rcvd:1>Y <gridsquare:6>JO62QM <EOR>
+<call:5>W9ZZZ <band:3>15m <mode:3>FT8 <qso_date:8>20260101 <lotw_qsl_rcvd:1>Y <EOR>
+<call:5>G4ABC <band:3>17m <mode:3>FT8 <qso_date:8>20240505 <cqz:2>14 <eqsl_qsl_rcvd:1>Y <country:7>ENGLAND <EOR>
+<CALL:6:S>EA8ABC <BAND:3>10m <MODE:3>FT8 <QSO_DATE:8>20240707 <CQ_ZONE:2>33 <APP_QRZLOG_STATUS:1>C <COMMENT:9>two words <EOR>
+<call:5>K5TX <band:3>20m <mode:3>FT8 <qso_date:8>20260901 <state:2>TX <EOR>

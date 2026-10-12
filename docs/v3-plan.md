@@ -288,23 +288,39 @@ tests/
 
 Each phase ends with the tests passing and jtcon runnable.
 
-### Phase 0: safety net
-- [ ] pytest set up, `tests/` with fixtures: recorded Decode/Status packets, a sample
-      ADIF log, a pinned cty.dat
-- [ ] Characterization tests of today's behaviour: packet parsing, cty lookup
-      (including compound calls), ADIF parsing, NEEDED/MATCH results for a replayed
-      packet stream
-- [ ] Rendered-output snapshot for the replayed stream (guards phases 1–3)
+### Phase 0: safety net ✅
+- [x] pytest set up (`python3 -m pytest`), `tests/` with fixtures: a sample ADIF log,
+      a pinned cty.dat, a fake and a real (SQLite) hamdat, and a WSJT-X packet builder
+      (`tests/wsjtx_packets.py`)
+- [x] Characterization tests: packet parsing and Reply encoding, cty lookup
+      (compound calls, overrides), ADIF parsing and the worked index, NEEDED/MATCH
+      rules, alerts, JSON records, rolling buffer, CMD> commands, output pane
+- [x] Rendered-output snapshot (`tests/snapshots/render_v2.txt`): 11 option sets ×
+      3 bands × 17 messages × FT8/FT4.  Regenerate on purpose with
+      `JTCON_UPDATE_SNAPSHOTS=1 python3 -m pytest tests/test_render_snapshot.py`
+- [x] End-to-end test: real `./jtcon` in a pseudo-terminal with a throwaway HOME, fed
+      UDP packets; checks startup, replies received, `list`, ADIF hot reload, dial
+      change, quit and exit codes.  Black-box, so it guards every later phase
+- [x] Checked the net catches breakage: a column-width change and an off-by-one in
+      worked-lag each fail a test
+- [x] `build_parser()` extracted from `main()` so tests use the real flag defaults
 
 ### Phase 1: package split (mechanical)
+- [ ] The `./jtcon` launcher file and a `jtcon/` package directory can't share a
+      name: rename the launcher (e.g. `./run-jtcon`) or use `python3 -m jtcon`
 - [ ] Move code into the `jtcon/` package with no behaviour change
 - [ ] pyproject: package discovery, entry point, setuptools-scm still working
 - [ ] `./jtcon` launcher and `pipx install` still work
+- [ ] **Checkpoint: real-world test by Matt** on a live WSJT-X session; nothing broken
+      before moving on
 
 ### Phase 2: configuration and new CLI
 - [ ] `Config` dataclass replaces `argparse.Namespace` everywhere in the core
 - [ ] TOML loading, profiles, CLI overrides, `--show-config`
 - [ ] New CLI; v2 flags removed
+- [ ] **Checkpoint: Matt supplies real v2 command lines**; translate each into a v3
+      config/profile, run them live, and confirm the behaviour matches.  The
+      translations seed the migration notes in phase 8
 
 ### Phase 3: events and engine
 - [ ] Typed events for all WSJT-X messages we use; encoders for Reply and Highlight
@@ -346,6 +362,20 @@ Each phase ends with the tests passing and jtcon runnable.
 - [ ] TUI on Textual: stations table plus live log, select-and-Enter to reply, rule
       toggles
 - [ ] GUI, on the same Engine
+
+## v2 quirks found while writing tests
+
+Pinned by the Phase 0 tests so the refactor doesn't change them by accident.  Fix
+them deliberately (phase 5 for most), updating the tests as part of the fix.
+
+| # | Quirk | Where |
+|---|---|---|
+| Q1 | `CQ RR73` is parsed as a CQ from callsign "RR73" | `parse_cq_message` |
+| Q2 | A hashed callsign in a CQ (`CQ <W1ABC/P> FN42`) isn't recognised | `parse_cq_message` |
+| Q3 | The ✅❓❌ icons sit in front of the *next* label: the DXCC icon is printed before `CQ5`, the CQ-zone icon before `ITU8`, the country icon before the continent | `_render` |
+| Q4 | Only LoTW counts as a confirmation; QRZ, eQSL and card are ignored (v3 confirmation sources fix this) | `AdifLog` |
+| Q5 | `--raw` applies message patterns (POTA etc.) to non-CQ decodes, but not callsign or entity checks | `_classify` |
+| Q6 | cty.dat's `=VERSION` marker line is loaded as an exact callsign (harmless) | `CtyDat._parse` |
 
 ## Open decisions
 

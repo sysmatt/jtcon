@@ -22,6 +22,9 @@ classifiers = [
 ]
 dependencies = ["prompt-toolkit>=3.0"]
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [project.urls]
 Homepage = "https://github.com/sysmatt/jtcon"
 Issues = "https://github.com/sysmatt/jtcon/issues"
@@ -38,3 +41,7 @@ py-modules = ["jtcon"]
 version_scheme = "post-release"
 local_scheme = "no-local-version"
 fallback_version = "0+unknown"   # source without git history (e.g. GitHub zip)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

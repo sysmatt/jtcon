@@ -2188,7 +2188,7 @@ class JtconTUI:
 #  Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jtcon",
         description="Monitor WSJT-X CQ calls via UDP with a prompt_toolkit TUI.",
@@ -2271,8 +2271,11 @@ def main() -> None:
     parser.add_argument("--mouse", action="store_true",
                         help="Enable mouse support: the wheel scrolls the decode pane and "
                              "clicking focuses a pane (hold Shift to select text)")
+    return parser
 
-    args = parser.parse_args()
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     # ── UDP sockets (must bind before TUI starts so the port is held) ─────────
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
