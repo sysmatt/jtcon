@@ -60,55 +60,34 @@ Install
   Option 2, run from a clone:
     git clone https://github.com/sysmatt/jtcon.git && cd jtcon && ./jtcon
 
+Configuration
+-------------
+  Settings live in ~/.config/jtcon/config.toml; profiles in
+  ~/.config/jtcon/profiles/<name>.toml are layered on top with --profile.
+  Start with:  jtcon --init-config   and check with:  jtcon --show-config
+
 Usage
 -----
   jtcon
-  jtcon --adif ~/Documents/wsjtx_log.adi
-  jtcon --adif ~/wsjtx_log.adi --save cq.jsonl
-  jtcon --raw --show-time
-  jtcon --match-calls watchlist.txt
-  jtcon --pota --sota
+  jtcon --profile pota
+  jtcon --wanted dxcc,was,pota --scope all
+  jtcon --save cq.jsonl
 
 Options
 -------
   --version             Show the version number and exit
-  --host HOST           UDP bind address           (default: 0.0.0.0)
+  --config FILE         Config file instead of ~/.config/jtcon/config.toml
+  --profile NAME        Layer profiles/NAME.toml on top of the config
+  --show-config         Print the effective configuration and exit
+  --init-config         Write a commented starter config file and exit
+  --list-rules          List the wanted rules and their settings, and exit
+  --wanted RULES        Rules or [[wanted]] names for this run, e.g. dxcc,was,pota
+  --scope cq|all        Check CQ decodes only, or all decodes
   --port PORT           UDP port                   (default: 2237)
-  --show-time           Prepend local wall-clock HH:MM:SS to every line
-  --raw                 Show ALL decoded messages, not just CQ
   --save FILE           Append each CQ record as a JSON line to FILE
-  --cty PATH            Path to cty.dat            (default: ~/.jtcon_cty.dat)
-  --adif FILE [...]     Additional ADIF log file(s) for NEEDED detection
-                        (auto-discovered WSJT-X logs are always loaded)
-  --no-need-entity      Disable DXCC-entity NEEDED check
-  --no-need-cqz         Disable CQ-zone NEEDED check
-  --no-need-country     Disable country-name NEEDED check
-  --qsl-only            Require LoTW confirmation for NEEDED checks; ❓ icon
-                        marks worked-but-unconfirmed entities
-  --worked-lag-days N   Suppress NEEDED/MATCH for a callsign worked within N days
-                        (default 0 = suppress today; -1 = disable suppression)
-  --match-calls FILE    File(s) of callsign regex patterns
-  --match-message FILE  File(s) of decoded-message regex patterns
-  --alert-command SCRIPT  Script to exec on NEEDED/MATCH events
-  --alert-ntfy TOPIC    POST NEEDED/MATCH alerts to ntfy.sh topic
-  --adif-change-script SCRIPT  Script to exec when ADIF log file(s) are reloaded
-  --proxy PORT[,...]    Forward received packets to additional UDP ports on localhost
-  --pota                Flag CQ POTA calls as MATCH
-  --sota                Flag CQ SOTA calls as MATCH
-  --iota                Flag CQ IOTA calls as MATCH
-  --match-state STATES  Comma-separated US state abbreviations or file
-  --hamdat DB           Path to hamdat SQLite database
-  --was                 Flag US states not yet LoTW-confirmed as NEEDED (WAS award)
-  --5bwas               Flag US states not yet LoTW-confirmed on the current band
-                        as NEEDED (5-Band WAS award); mutually exclusive with --was
-  --all                 Apply NEEDED/MATCH logic to ALL decoded messages, not just CQ;
-                        non-CQ hits are shown in magenta and added to the reply buffer.
-                        Combine with --raw to also show non-CQ messages with no hits.
-                        Requires WSJT-X Settings → Reporting → "CQ only" to be UNCHECKED
-                        so that WSJT-X retains non-CQ decodes for UDP reply.
-  --debug               Dump raw hex + parsed fields to the decode pane
-  --no-color            Disable ANSI colorization of the decode output
   --mouse               Mouse wheel scrolls the decode pane; Shift+drag selects text
+  --no-color            Disable ANSI colorization of the decode output
+  --debug               Dump raw hex + parsed fields to the decode pane
 """
 
 import importlib.metadata

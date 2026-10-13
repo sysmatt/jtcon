@@ -2,10 +2,9 @@
 
 from datetime import date
 
-from jtcon.cli import build_parser
 from jtcon.core.adif import AdifLog, parse_adif
 from jtcon.core.decode import _entity_info
-from conftest import LOG_PATH, FakeHamdat
+from conftest import LOG_PATH, FakeHamdat, v2_config
 
 
 def test_parse_adif_records():
@@ -110,7 +109,7 @@ def test_unreadable_file_is_logged_and_skipped(cty, tmp_path):
 
 def test_needed_and_worked_flags(make_adif, cty):
     a = make_adif(qsl_only=True)
-    args = build_parser().parse_args(["--qsl-only"])
+    args = v2_config("--qsl-only")
     ja = _entity_info(cty, "JA1XYZ")    # worked, not LoTW-confirmed
     vk = _entity_info(cty, "VK3XY")     # never worked
     dl = _entity_info(cty, "DL1ABC")    # LoTW-confirmed
@@ -122,5 +121,5 @@ def test_needed_and_worked_flags(make_adif, cty):
     assert a.needed_flags(dl, args) == []
     assert a.worked_flags(dl, args) == ["dxcc", "cqz", "country"]
 
-    only_dxcc = build_parser().parse_args(["--no-need-cqz", "--no-need-country"])
+    only_dxcc = v2_config("--no-need-cqz", "--no-need-country")
     assert a.needed_flags(vk, only_dxcc) == ["NEW-DXCC(VK)"]

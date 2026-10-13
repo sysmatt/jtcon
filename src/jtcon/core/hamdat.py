@@ -11,17 +11,14 @@ HAMDAT_DB_DEFAULT = Path.home() / ".hamdat" / "hamdat.db"
 #  State / hamdat helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_state_set(value: str) -> set:
-    p = Path(value)
-    if p.is_file():
-        states = set()
-        for raw in p.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
+def load_state_file(path: Path) -> set:
+    """States from a file, one per line; # starts a comment.  Raises OSError."""
+    states = set()
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
             states.add(line.upper())
-        return states
-    return {s.strip().upper() for s in value.split(",") if s.strip()}
+    return states
 
 
 class HamdatLookup:

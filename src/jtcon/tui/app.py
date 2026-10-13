@@ -25,9 +25,9 @@ from jtcon.core.adif import AdifLog, _find_wsjt_logs
 from jtcon.core.cty import CTY_DAT_URL, CTY_MAX_AGE_DAYS, CtyDat, download_cty
 from jtcon.core.cycle import CycleTracker
 from jtcon.core.decode import DecodeContext, handle_packet
-from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup, load_state_set
+from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup, load_state_file
 from jtcon.core.messages import _CALLSIGN_RE
-from jtcon.core.patterns import load_regex_patterns
+from jtcon.core.patterns import ACTIVATION_KEYWORDS, keyword_patterns, load_regex_patterns
 from jtcon.core.protocol import _send_reply, try_parse_status
 from jtcon.tui.render import _DIM, _bargraph, _col, _fmt_age, _header_line
 
@@ -67,8 +67,8 @@ class AnsiLexer(Lexer):
 class JtconTUI:
     """prompt_toolkit full-screen TUI for jtcon."""
 
-    def __init__(self, args, sock, tx_sock):
-        self.args = args
+    def __init__(self, config, sock, tx_sock):
+        self.config = config
         self.sock = sock
         self.tx_sock = tx_sock
 
@@ -190,7 +190,7 @@ class JtconTUI:
         def _to_live(event):
             self._scroll_to_live()
 
-        if self.args.mouse:
+        if self.config.display.mouse:
             self._wheel_scrolls_output(self.output_area.control)
             self._wheel_scrolls_output(self.cmd_area.control)
 
@@ -209,7 +209,7 @@ class JtconTUI:
             key_bindings=kb,
             style=style,
             full_screen=True,
-            mouse_support=self.args.mouse,
+            mouse_support=self.config.display.mouse,
             refresh_interval=0.25,   # redraws status bar ~4×/s for smooth bargraph
         )
 
@@ -408,7 +408,7 @@ class JtconTUI:
             # stats go on the NEEDED/MATCH line below it.
             seen = _col(
                 f"(last heard {_fmt_age(now - entry['last_seen'])} ago, ×{entry['count']})",
-                _DIM, self.args.color,
+                _DIM, self.config.display.color,
             )
             self._append_line(f"{entry['idx']:02d}  {lines[0]}")
             if len(lines) > 1:
@@ -517,7 +517,7 @@ class JtconTUI:
         control.mouse_handler = handler
 
     def _header(self) -> str:
-        return _header_line(self.args, has_adif=self.adif_log is not None,
+        return _header_line(self.config, has_adif=self.adif_log is not None,
                             has_hamdat=self.hamdat is not None)
 
     def _fatal(self, msg: str) -> None:
@@ -570,7 +570,7 @@ class JtconTUI:
                     if changed:
                         self.adif_log = AdifLog(
                             self.adif_log.paths, self.cty, self.hamdat,
-                            qsl_only=self.args.qsl_only,
+                            qsl_only=self.config.entity_needs_lotw,
                             log=self._append_line,
                         )
                         self._adif_mtimes = {
@@ -580,11 +580,11 @@ class JtconTUI:
                             f"[adif] Reloaded {self.adif_log.total_qsos} QSOs"
                             f" from {len(self.adif_log.paths)} file(s)."
                         )
-                        adif_change_script = self.args.adif_change_script
+                        adif_change_script = self.config.actions.script_on_log_reload
                         if adif_change_script:
                             try:
                                 proc = subprocess.Popen(
-                                    [adif_change_script]
+                                    [str(adif_change_script)]
                                     + [str(p) for p in self.adif_log.paths],
                                     stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE,
@@ -627,7 +627,7 @@ class JtconTUI:
 
             meta: dict = {}
             ctx = DecodeContext(
-                args=self.args, cty=self.cty, adif_log=self.adif_log,
+                config=self.config, cty=self.cty, adif_log=self.adif_log,
                 json_fh=self.json_fh, call_patterns=self.call_patterns,
                 msg_patterns=self.msg_patterns, state_set=self.state_set,
                 hamdat=self.hamdat, cycle_tracker=self.cycle_tracker,
@@ -669,11 +669,15 @@ class JtconTUI:
         straight into the UDP receive loop.  Runs entirely in a background thread
         so the TUI is already visible when the messages appear.
         """
-        log  = self._append_line
-        args = self.args
+        log = self._append_line
+        cfg = self.config
+        for src in cfg.sources:
+            log(f"[config] Loaded {src}")
+        rules = ", ".join(w.name for w in cfg.wanted) or "none"
+        log(f"[config] Wanted rules: {rules}")
 
         # ── cty.dat ───────────────────────────────────────────────────────────
-        cty_path = Path(args.cty)
+        cty_path = cfg.inputs.cty
         stale = False
         if cty_path.exists():
             age_days = (time.time() - cty_path.stat().st_mtime) / 86400
@@ -703,28 +707,31 @@ class JtconTUI:
         self.cty = cty
 
         # ── hamdat ────────────────────────────────────────────────────────────
-        if args.match_state:
-            try:
-                self.state_set = load_state_set(args.match_state)
-                log(f"[match-state] {len(self.state_set)} state(s):"
-                    f" {', '.join(sorted(self.state_set))}")
-            except OSError as exc:
-                self._fatal(f"[match-state] Cannot load state list: {exc}")
-                return
+        states_rule = cfg.rule("states")
+        if states_rule:
+            self.state_set = set(states_rule.settings["states"])
+            if states_rule.settings["file"]:
+                try:
+                    self.state_set |= load_state_file(states_rule.settings["file"])
+                except OSError as exc:
+                    self._fatal(f"[states] Cannot load state list: {exc}")
+                    return
+            log(f"[states] {len(self.state_set)} state(s):"
+                f" {', '.join(sorted(self.state_set))}")
 
-        db_path = Path(args.hamdat).expanduser()
+        db_path = cfg.inputs.hamdat
         if db_path.exists():
             try:
                 self.hamdat = HamdatLookup(db_path)
-                label = "Auto-detected" if args.hamdat == str(HAMDAT_DB_DEFAULT) else "Using"
+                label = "Auto-detected" if db_path == HAMDAT_DB_DEFAULT else "Using"
                 log(f"[hamdat] {label}: {db_path}")
             except Exception as exc:
-                if args.match_state:
+                if states_rule:
                     self._fatal(f"[hamdat] Failed to open {db_path}: {exc}")
                     return
                 log(f"[hamdat] Warning: found but could not open {db_path}: {exc}")
-        elif args.match_state:
-            self._fatal(f"[match-state] hamdat database not found: {db_path}")
+        elif states_rule:
+            self._fatal(f"[states] hamdat database not found: {db_path}")
             return
 
         # ── ADIF ──────────────────────────────────────────────────────────────
@@ -732,8 +739,8 @@ class JtconTUI:
         for p in _find_wsjt_logs():
             log(f"[adif] Auto-discovered: {p}")
             adif_paths.append(p)
-        for f in (args.adif or []):
-            p = Path(f).expanduser().resolve()
+        for f in cfg.inputs.adif:
+            p = f.resolve()
             if not p.exists():
                 self._fatal(f"[adif] File not found: {p}")
                 return
@@ -743,15 +750,19 @@ class JtconTUI:
         if adif_paths:
             try:
                 self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat,
-                                        qsl_only=args.qsl_only,
+                                        qsl_only=cfg.entity_needs_lotw,
                                         log=log)
                 for p in adif_paths:
                     log(f"[adif] Loaded: {p.name}")
                 al = self.adif_log
-                log(f"[adif] {al.total_qsos} QSOs across {len(adif_paths)} file(s)"
-                    f" — {len(al.worked_calls)} calls,"
-                    f" {len(al.worked_dxcc)} DXCC,"
-                    f" {len(al.worked_cqz)} CQ zones worked")
+                summary = (f"[adif] {al.total_qsos} QSOs across {len(adif_paths)} file(s)"
+                           f" — {len(al.worked_calls)} calls,"
+                           f" {len(al.worked_dxcc_all)} DXCC,"
+                           f" {len(al.worked_cqz_all)} CQ zones worked")
+                if cfg.entity_needs_lotw:
+                    summary += (f"; {len(al.worked_dxcc)} DXCC,"
+                                f" {len(al.worked_cqz)} CQ zones LoTW-confirmed")
+                log(summary)
                 for p in adif_paths:
                     try:
                         self._adif_mtimes[p] = p.stat().st_mtime
@@ -762,49 +773,46 @@ class JtconTUI:
         else:
             log("[adif] No ADIF log found — NEEDED detection disabled")
 
-        # ── Pattern files ─────────────────────────────────────────────────────
+        # ── Watchlists ────────────────────────────────────────────────────────
         try:
-            if args.match_calls:
-                self.call_patterns = load_regex_patterns(args.match_calls, log=log)
-                log(f"[match-calls] {len(self.call_patterns)} pattern(s)"
-                    f" from {', '.join(args.match_calls)}")
-            if args.match_message:
-                self.msg_patterns = load_regex_patterns(args.match_message, log=log)
-                log(f"[match-message] {len(self.msg_patterns)} pattern(s)"
-                    f" from {', '.join(args.match_message)}")
+            for key, attr in (("callsigns", "call_patterns"), ("message", "msg_patterns")):
+                spec = cfg.rule(key)
+                if spec:
+                    files = spec.settings["files"]
+                    patterns = load_regex_patterns(files, log=log)
+                    setattr(self, attr, patterns)
+                    log(f"[{key}] {len(patterns)} pattern(s)"
+                        f" from {', '.join(str(f) for f in files)}")
         except OSError as exc:
-            self._fatal(f"[match] Cannot read pattern file: {exc}")
+            self._fatal(f"[wanted] Cannot read pattern file: {exc}")
             return
-        for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
-            if flag:
-                self.msg_patterns.append((re.compile(rf"\b{keyword}\b", re.IGNORECASE), None))
-                log(f"[match-message] {keyword} pattern active")
+        rules = [w.rule for w in cfg.wanted]
+        self.msg_patterns.extend(keyword_patterns(rules))
+        for key, word in ACTIVATION_KEYWORDS.items():
+            if key in rules:
+                log(f"[{key}] {word} pattern active")
 
         # ── JSON output ───────────────────────────────────────────────────────
-        if args.save:
+        json_log = cfg.actions.json_log
+        if json_log:
             try:
-                self.json_fh = open(args.save, "a", encoding="utf-8")
-                log(f"[save] Appending JSON records to: {args.save}")
+                self.json_fh = open(json_log, "a", encoding="utf-8")
+                log(f"[save] Appending JSON records to: {json_log}")
             except OSError as exc:
-                self._fatal(f"[save] Cannot open {args.save}: {exc}")
+                self._fatal(f"[save] Cannot open {json_log}: {exc}")
                 return
 
         # ── UDP proxy destinations ────────────────────────────────────────────
-        if args.proxy:
-            for part in args.proxy.split(","):
-                part = part.strip()
-                try:
-                    self.proxy_dests.append(("127.0.0.1", int(part)))
-                except ValueError:
-                    log(f"[proxy] Invalid port {part!r} — must be an integer.")
-            if self.proxy_dests:
-                targets = ", ".join(f"localhost:{p}" for _, p in self.proxy_dests)
-                log(f"[proxy] Forwarding all packets to: {targets}")
+        self.proxy_dests = [("127.0.0.1", port) for port in cfg.udp.proxy]
+        if self.proxy_dests:
+            targets = ", ".join(f"localhost:{p}" for _, p in self.proxy_dests)
+            log(f"[proxy] Forwarding all packets to: {targets}")
 
         # ── Column header then ready banner ───────────────────────────────────
         log(self._header())
-        log(f"[ready] Listening on {args.host}:{args.port}"
-            f"  ({'all decodes' if args.raw else 'CQ + matched' if args.all_decodes else 'CQ calls only'})")
+        scope = ("all decodes" if cfg.show_all else
+                 "CQ + matched" if cfg.evaluate_all else "CQ calls only")
+        log(f"[ready] Listening on {cfg.udp.host}:{cfg.udp.port}  ({scope})")
 
         # ── Hand off to UDP receive loop ──────────────────────────────────────
         self._udp_loop()

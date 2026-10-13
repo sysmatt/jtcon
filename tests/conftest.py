@@ -10,11 +10,12 @@ import pytest
 import jtcon.core.adif
 import jtcon.core.decode
 import jtcon.tui.render
-from jtcon.cli import build_parser
+from jtcon.config import build_config, check_layer
 from jtcon.core.adif import AdifLog
 from jtcon.core.cty import CtyDat
 from jtcon.core.decode import DecodeContext
-from jtcon.core.hamdat import load_state_set
+from jtcon.core.patterns import keyword_patterns
+from v2flags import v2_to_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CTY_PATH = FIXTURES / "cty.dat"
@@ -84,31 +85,35 @@ def make_adif(cty):
     return _make
 
 
-def make_args(*argv: str):
-    """Parse a v2 command line with jtcon's real parser."""
-    return build_parser().parse_args(list(argv))
+def make_config(layer: dict | None = None, wanted: str | None = None):
+    """A Config from one config-file-shaped layer over the built-in defaults."""
+    return build_config(check_layer(layer or {}, FIXTURES), wanted)
+
+
+def v2_config(*argv: str):
+    """The v3 Config equivalent to a v2 command line (see v2flags.py)."""
+    return make_config(v2_to_config(*argv))
 
 
 @pytest.fixture
 def make_ctx(cty, make_adif):
     """
     Build a DecodeContext the way startup does: adif, hamdat and patterns are
-    derived from the command line.  Pass adif=False / hamdat=None to drop them.
+    derived from the config.  Positional arguments are a v2 command line; pass
+    config= (a config-file-shaped dict) to use v3 settings instead.  Pass
+    adif=False / hamdat=None to drop them.
     """
-    def _make(*argv, adif=True, hamdat=FakeHamdat(), dial_freq=14_074_000,
+    def _make(*argv, config=None, adif=True, hamdat=FakeHamdat(), dial_freq=14_074_000,
               call_patterns=(), alerted=None, json_fh=None, log=None):
-        args = make_args(*argv)
-        msg_patterns = []
-        for flag, keyword in ((args.pota, "POTA"), (args.sota, "SOTA"), (args.iota, "IOTA")):
-            if flag:
-                msg_patterns.append((re.compile(rf"\b{keyword}\b", re.IGNORECASE), None))
+        cfg = make_config(config) if config is not None else v2_config(*argv)
+        states = cfg.rule("states")
         return DecodeContext(
-            args=args, cty=cty,
-            adif_log=make_adif(hamdat=hamdat, qsl_only=args.qsl_only) if adif else None,
+            config=cfg, cty=cty,
+            adif_log=make_adif(hamdat=hamdat, qsl_only=cfg.entity_needs_lotw) if adif else None,
             json_fh=json_fh,
             call_patterns=list(call_patterns),
-            msg_patterns=msg_patterns,
-            state_set=load_state_set(args.match_state) if args.match_state else set(),
+            msg_patterns=keyword_patterns([w.rule for w in cfg.wanted]),
+            state_set=set(states.settings["states"]) if states else set(),
             hamdat=hamdat, cycle_tracker=None,
             alerted={} if alerted is None else alerted,
             dial_freq=dial_freq, de_call=MY_CALL,

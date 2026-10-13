@@ -44,6 +44,7 @@ def _free_udp_port() -> int:
 
 def _env(home: Path, **extra) -> dict:
     env = dict(os.environ)
+    env.pop("XDG_CONFIG_HOME", None)        # config comes from HOME/.config only
     env.update(HOME=str(home), TERM="xterm", COLUMNS=str(COLS), LINES=str(ROWS),
                PYTHONUSERBASE=site.getuserbase(),   # keep user-installed packages
                **extra)
@@ -135,6 +136,13 @@ def home(tmp_path):
     return h
 
 
+def write_config(home: Path, text: str, name: str = "config.toml") -> Path:
+    path = home / ".config" / "jtcon" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 @pytest.fixture
 def launch(home):
     procs = []
@@ -164,8 +172,26 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     watch = tmp_path / "watch.txt"
     watch.write_text("# watchlist\n^VK\n^ZL\n")
     saved = tmp_path / "cq.jsonl"
-    app = launch("--host", "127.0.0.1", "--port", str(port), "--all", "--was",
-                 "--match-calls", str(watch), "--pota", "--save", str(saved))
+    config = write_config(home, f"""
+        [udp]
+        host = "127.0.0.1"
+        [scope]
+        decodes = "all"
+        [[wanted]]
+        rule = "dxcc"
+        [[wanted]]
+        rule = "cqz"
+        [[wanted]]
+        rule = "country"
+        [[wanted]]
+        rule = "was"
+        [[wanted]]
+        rule = "pota"
+        [[wanted]]
+        rule = "callsigns"
+        files = "{watch}"
+        """)
+    app = launch("--port", str(port), "--save", str(saved))   # CLI overrides
     jt = ("127.0.0.1", port)
 
     # ── Startup: everything auto-discovered from HOME ─────────────────────────
@@ -173,10 +199,13 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     s = app.screen()
     assert "[cty.dat] Loaded 4798 prefixes + 2708 exact callsigns" in s
     assert f"[adif] Auto-discovered: {home}/.local/share/WSJT-X/wsjtx_log.adi" in s
-    assert "[adif] 9 QSOs across 1 file(s) — 8 calls, 5 DXCC, 4 CQ zones worked" in s
+    assert f"[config] Loaded {config}" in s
+    assert "[config] Wanted rules: dxcc, cqz, country, was, pota, callsigns" in s
+    assert ("[adif] 9 QSOs across 1 file(s) — 8 calls, 5 DXCC, 4 CQ zones worked;"
+            " 2 DXCC, 2 CQ zones LoTW-confirmed") in s
     assert f"[hamdat] Auto-detected: {home}/.hamdat/hamdat.db" in s
-    assert f"[match-calls] 2 pattern(s) from {watch}" in s
-    assert "[match-message] POTA pattern active" in s
+    assert f"[callsigns] 2 pattern(s) from {watch}" in s
+    assert "[pota] POTA pattern active" in s
     assert f"[save] Appending JSON records to: {saved}" in s
     assert "downloading" not in s                      # fresh cty.dat: no refresh
 
@@ -216,10 +245,11 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     app.wait_for(r"\[list\] 4 NEEDED/MATCH entries \(last heard at bottom\)")
     app.wait_for(r"\(last heard \d+s ago, ×1\)")
 
-    # ── ADIF hot reload: log VK3XY, and it's no longer needed ─────────────────
+    # ── ADIF hot reload: a LoTW-confirmed VK3XY QSO, and it's no longer needed ──
     adif = home / ".local" / "share" / "WSJT-X" / "wsjtx_log.adi"
     with adif.open("a") as f:
-        f.write("<call:5>VK3XY <band:3>20m <mode:3>FT8 <qso_date:8>20240101 <EOR>\n")
+        f.write("<call:5>VK3XY <band:3>20m <mode:3>FT8 <qso_date:8>20240101"
+                " <lotw_qsl_rcvd:1>Y <EOR>\n")
     wsjtx.sendto(pk.decode("CQ VK3XY QF22", time_ms=45_030_000), jt)
     app.wait_for(r"\[adif\] Reloaded 10 QSOs from 1 file\(s\)\.")
     app.wait_for(r"00  123030z.{0,60}CQ VK3XY QF22")     # same station keeps index 00
@@ -242,17 +272,18 @@ def test_live_session(launch, home, wsjtx, tmp_path):
 
 def test_tx_status_and_ctrl_q(launch, wsjtx):
     port = _free_udp_port()
-    app = launch("--host", "127.0.0.1", "--port", str(port))
-    app.wait_for(r"\[ready\] Listening on .*\(CQ calls only\)")
+    app = launch("--port", str(port))
+    app.wait_for(r"\[ready\] Listening on 0\.0\.0\.0:\d+  \(CQ calls only\)")
     wsjtx.sendto(pk.status(14_074_000, transmitting=True), ("127.0.0.1", port))
     app.wait_for(r" TX ")      # only changed cells are redrawn, so match little
     app.type("\x11")                     # Ctrl-Q quits
     assert app.wait_exit() == 0
 
 
-def test_fatal_startup_error_exits_1(launch, tmp_path):
+def test_fatal_startup_error_exits_1(launch, home, tmp_path):
     missing = tmp_path / "nope.adi"
-    app = launch("--port", str(_free_udp_port()), "--adif", str(missing))
+    write_config(home, f'[inputs]\nadif = ["{missing}"]\n')
+    app = launch("--port", str(_free_udp_port()))
     assert app.wait_exit() == 1
     assert f"[adif] File not found: {missing}" in app.screen()
 
@@ -261,7 +292,7 @@ def test_stale_cty_is_refreshed(launch, home):
     old = time.time() - 40 * 86400
     os.utime(home / ".jtcon_cty.dat", (old, old))
     # A dead proxy makes the download fail fast, without touching the network.
-    app = launch("--host", "127.0.0.1", "--port", str(_free_udp_port()),
+    app = launch("--port", str(_free_udp_port()),
                  https_proxy="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9")
     app.wait_for(r"\[cty\.dat\] older than 30 days — downloading from "
                  r"https://www\.country-files\.com/cty/cty\.dat")
@@ -287,12 +318,56 @@ def test_cli_help(home):
     r = _run_cli("--help", home=home)
     assert r.returncode == 0
     assert r.stdout.startswith("usage: jtcon ")
-    for flag in ("--adif", "--all", "--was", "--5bwas", "--mouse", "--alert-ntfy"):
+    for flag in ("--config", "--profile", "--wanted", "--scope", "--show-config",
+                 "--init-config", "--list-rules", "--save", "--mouse", "--no-color"):
         assert flag in r.stdout
-    assert "--stats" not in r.stdout
+    for gone in ("--adif", "--qsl-only", "--alert-ntfy", "--5bwas"):
+        assert gone not in r.stdout
 
 
-def test_cli_was_and_5bwas_are_exclusive(home):
-    r = _run_cli("--was", "--5bwas", home=home)
+def test_cli_v2_flag_is_refused(home):
+    r = _run_cli("--qsl-only", home=home)
     assert r.returncode == 2
-    assert "not allowed with argument" in r.stderr
+    assert "unrecognized arguments: --qsl-only" in r.stderr
+
+
+def test_cli_list_rules(home):
+    r = _run_cli("--list-rules", home=home)
+    assert r.returncode == 0
+    assert "5bwas" in r.stdout and "files: (required)" in r.stdout
+
+
+def test_cli_init_config_then_show_config(home):
+    r = _run_cli("--init-config", home=home)
+    path = home / ".config" / "jtcon" / "config.toml"
+    assert r.returncode == 0 and r.stdout == f"Wrote {path}\n"
+    assert _run_cli("--init-config", home=home).returncode == 1   # won't overwrite
+
+    r = _run_cli("--show-config", "--wanted", "was,pota", "--scope", "all", home=home)
+    assert r.returncode == 0
+    assert f"# from: {path}" in r.stdout
+    assert 'decodes = "all"' in r.stdout
+    assert '[[wanted]]\nrule = "was"\nname = "was"\nconfirm = ["lotw"]' in r.stdout
+    assert '[[wanted]]\nrule = "pota"\nname = "pota"' in r.stdout
+    assert 'rule = "dxcc"' not in r.stdout
+
+
+def test_cli_profile(home):
+    write_config(home, '[udp]\nport = 2240\n[[wanted]]\nrule = "dxcc"\n')
+    write_config(home, '[[wanted]]\nrule = "pota"\n', name="profiles/parks.toml")
+    r = _run_cli("--profile", "parks", "--show-config", home=home)
+    assert r.returncode == 0
+    assert "port = 2240" in r.stdout                 # from the base config
+    assert 'rule = "pota"' in r.stdout and 'rule = "dxcc"' not in r.stdout
+
+
+def test_cli_config_error_exits_2(home):
+    path = write_config(home, '[[wanted]]\nrule = "was"\n[[wanted]]\nrule = "5bwas"\n')
+    r = _run_cli(home=home)
+    assert r.returncode == 2
+    assert r.stderr == ("jtcon: config error: rules 'was' and '5bwas' can't be used"
+                        " together yet\n")
+    path.write_text("[udp]\nprot = 1\n")
+    r = _run_cli(home=home)
+    assert r.returncode == 2
+    assert f"{path}: unknown setting 'udp.prot'" in r.stderr

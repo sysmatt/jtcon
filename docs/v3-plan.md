@@ -135,10 +135,10 @@ Planned built-in rules:
 
 | Rule | Kind | Default `confirm` | Notes |
 |---|---|---|---|
-| `dxcc` | award | lotw, card | Per entity |
-| `cqz` | award | lotw, card | Per CQ zone |
-| `ituz` | award | lotw, card | New |
-| `country` | award | lotw, card | Country name |
+| `dxcc` | award | lotw | Per entity |
+| `cqz` | award | lotw | Per CQ zone |
+| `ituz` | award | lotw | New |
+| `country` | award | lotw | Country name |
 | `was` | award | lotw | Per US state; needs hamdat |
 | `5bwas` | award | lotw | Per state × band, 5 WAS bands |
 | `grid` | award | any | New; 4-character grid |
@@ -197,33 +197,54 @@ Textual both run on asyncio, so either UI can share the loop).
 
 ### Configuration
 
-TOML, with profiles.  CLI flags override the file.
+TOML, with profiles.  Implemented in phase 2 (`src/jtcon/config.py`).
 
-- `~/.config/jtcon/config.toml`: base config
-- `~/.config/jtcon/profiles/<name>.toml`: overlay, selected with `--profile NAME`
-- `--config FILE`: use a specific file instead
+Layers, later ones winning: built-in defaults → `~/.config/jtcon/config.toml` (or
+`--config FILE`; `$XDG_CONFIG_HOME` is honoured) → `profiles/<name>.toml` next to
+it (`--profile NAME`, or a path) → command-line flags.
 
-Sketch:
+- **Merging:** tables merge setting by setting; every other value, lists included,
+  replaces.  A profile with `[[wanted]]` entries replaces the whole rule list; a
+  profile without any keeps the base file's rules.
+- **Paths** expand `~`; relative paths are relative to the file they're written in
+  (CLI paths: the current directory).
+- **Validation:** unknown settings and wrong types are errors naming the file and
+  the setting, so typos never pass silently.  Exit status 2.
+- **No config file:** rules dxcc, cqz and country, counted by LoTW confirmation.
+- **`confirm`** lists the confirmation sources that count; `[]` means worked is
+  enough.  Default `["lotw"]` for every award rule (Matt: the ❓ icon then shows
+  worked-but-unconfirmed).
+
+Current shape (phase 7 adds `[inputs.qrz]` and the QRZ upload action; phase 6 may
+add bell/highlight routing under `[actions]`):
 
 ```toml
 [udp]
-port = 2237
-# multicast_group = "224.0.0.73"
+host  = "0.0.0.0"
+port  = 2237
+proxy = [2238]                # forward packets to localhost ports
+# multicast_group = "224.0.0.73"    (D3, later)
+
+[display]
+show      = "cq"              # "cq": CQs plus wanted hits; "all": every decode
+show_time = false
+color     = true
+mouse     = false
+debug     = false
+
+[scope]
+decodes = "cq"                # check "cq" decodes only, or "all"
 
 [inputs]
 adif   = ["~/logs/old_contest.adi"]   # WSJT-X log is auto-discovered as well
 hamdat = "~/.hamdat/hamdat.db"
+cty    = "~/.jtcon_cty.dat"
 
-[inputs.qrz]
-enabled = true
-refresh_minutes = 30
-# api_key from the env var or the qrzlog config (see D4)
-
-[scope]
-decodes = "cq"            # "cq" or "all"
+[filters]
+suppress_worked_within_days = 0       # -1 = never suppress
 
 [[wanted]]
-rule = "dxcc"
+rule = "dxcc"                 # confirm = ["lotw"] by default
 
 [[wanted]]
 rule    = "was"
@@ -231,36 +252,63 @@ name    = "WAS-ARRL"
 confirm = ["lotw"]
 
 [[wanted]]
-rule    = "was"
-name    = "WAS-QRZ"
-confirm = ["qrz"]
+rule  = "callsigns"
+files = ["~/watchlist.txt"]
 
 [[wanted]]
-rule = "pota"
+rule   = "states"
+states = ["AK", "DE"]         # or file = "states.txt"
 
-[[wanted]]
-rule = "callsigns"
-file = "~/watchlist.txt"
+[actions.ntfy]
+topic = "my-topic"
 
-[filters]
-suppress_worked_within_days = 0
+[actions.script]
+on_wanted     = "~/bin/alert.sh"      # alert text as $1
+on_log_reload = "~/bin/upload.sh"     # ADIF paths as arguments
 
-[actions]
-on_wanted     = ["bell", "highlight", "ntfy"]
-on_qso_logged = ["qrz_upload"]
-ntfy_topic    = "my-topic"
+[actions.json_log]
+file = "~/jtcon-spots.jsonl"
 ```
 
-CLI sketch (replaces the v2 flags):
+CLI (the v2 flags are gone):
 
 ```
-jtcon [--config FILE | --profile NAME]
-      [--wanted dxcc,was,pota,...]       override the rule list for this run
+jtcon [--config FILE] [--profile NAME]
+      [--wanted dxcc,was,pota,...]       rules or [[wanted]] names for this run; "none"
       [--scope cq|all]
       [--port N] [--save FILE] [--mouse] [--no-color] [--debug]
-jtcon --list-rules                       show available rules and their settings
-jtcon --show-config                      print the merged effective config
+jtcon --list-rules                       available rules and their settings
+jtcon --show-config                      the merged effective config, as TOML
+jtcon --init-config                      write a commented starter config.toml
 ```
+
+v2 → v3 migration:
+
+| v2 flag | v3 |
+|---|---|
+| `--host`, `--port`, `--proxy 2238,2239` | `[udp] host`, `port`, `proxy = [2238, 2239]`; `--port` stays |
+| `--raw` | `[display] show = "all"` |
+| `--all` | `[scope] decodes = "all"`, or `--scope all` |
+| `--show-time` | `[display] show_time = true` |
+| `--no-color`, `--mouse`, `--debug` | `[display]`; the flags stay |
+| `--cty`, `--adif`, `--hamdat` | `[inputs] cty`, `adif = [...]`, `hamdat` |
+| default NEEDED checks | `[[wanted]]` dxcc, cqz, country, now `confirm = ["lotw"]` by default; `confirm = []` is v2's behaviour |
+| `--qsl-only` | the default now |
+| `--no-need-entity/-cqz/-country` | leave that rule out of `[[wanted]]` |
+| `--was`, `--5bwas` | `[[wanted]] rule = "was"` / `"5bwas"` |
+| `--pota`, `--sota`, `--iota` | `[[wanted]] rule = "pota"` etc. |
+| `--match-calls F...` | `[[wanted]] rule = "callsigns"`, `files = [...]` |
+| `--match-message F...` | `[[wanted]] rule = "message"`, `files = [...]` |
+| `--match-state AK,DE` | `[[wanted]] rule = "states"`, `states = [...]` or `file` |
+| `--worked-lag-days N` | `[filters] suppress_worked_within_days = N` |
+| `--alert-command S` | `[actions.script] on_wanted` |
+| `--alert-ntfy T` | `[actions.ntfy] topic` |
+| `--adif-change-script S` | `[actions.script] on_log_reload` |
+| `--save F` | `[actions.json_log] file`; `--save` stays |
+| `--stats` | removed (did nothing) |
+
+`tests/v2flags.py` implements this table; the render snapshot runs through it, which
+proves each translation renders exactly as v2 did.
 
 ## Package layout
 
@@ -308,7 +356,7 @@ Each phase ends with the tests passing and jtcon runnable.
       worked-lag each fail a test
 - [x] `build_parser()` extracted from `main()` so tests use the real flag defaults
 
-### Phase 1: package split (mechanical) ✅ (pending real-world check)
+### Phase 1: package split (mechanical) ✅
 - [x] `jtcon.py` split into the `src/jtcon/` package with no behaviour change; code
       moved by line range, names kept (renaming waits for the rewrite phases):
 
@@ -336,16 +384,41 @@ Each phase ends with the tests passing and jtcon runnable.
 - [x] Tests import from the new modules; all 159 pass, render snapshot unchanged
 - [x] Known wart, on purpose: `core/decode.py` imports `tui/render.py` because
       `handle_packet` still renders.  Phase 3 removes it
-- [ ] **Checkpoint: real-world test by Matt** on a live WSJT-X session; nothing broken
-      before moving on
+- [x] **Checkpoint: real-world test by Matt** on a live WSJT-X session; no issues found
 
-### Phase 2: configuration and new CLI
-- [ ] `Config` dataclass replaces `argparse.Namespace` everywhere in the core
-- [ ] TOML loading, profiles, CLI overrides, `--show-config`
-- [ ] New CLI; v2 flags removed
-- [ ] **Checkpoint: Matt supplies real v2 command lines**; translate each into a v3
-      config/profile, run them live, and confirm the behaviour matches.  The
-      translations seed the migration notes in phase 8
+### Phase 2: configuration and new CLI ✅ (pending Matt's live check)
+- [x] `Config` dataclass (`config.py`) replaces `argparse.Namespace` everywhere; the
+      core reads it through `cfg.wants(rule)`, `cfg.rule(rule)`, `cfg.evaluate_all`,
+      `cfg.show_all` and `cfg.entity_needs_lotw` until phase 5 replaces the v2 checks
+- [x] TOML loading, profiles, CLI overrides, validation, `--show-config`,
+      `--init-config` (commented template), `--list-rules` (rule registry)
+- [x] New CLI; v2 flags removed (they now fail as unrecognized arguments)
+- [x] Python 3.11 minimum (D1)
+- [x] Startup log shows the config files loaded and the active rules; the ADIF
+      summary adds LoTW-confirmed counts
+- [x] Labels stay NEEDED/MATCH until phase 5.  Settings v2 code can't honour yet are
+      refused with a clear error rather than ignored: a rule used twice, `was` with
+      `5bwas`, different `confirm` on dxcc/cqz/country, any `confirm` other than
+      `[]`/`["lotw"]` (`["lotw"]` only for was/5bwas)
+- [x] Tests: 207 pass.  Render snapshot unchanged via the v2 translator; new
+      `test_config.py`; end-to-end tests run from a config file in the temp HOME
+- [x] Matt's v2 command line translated (below); `test_config.py` checks the profile
+      equals the v2 flags exactly
+- [ ] **Checkpoint: Matt runs the translated config live** and confirms the
+      behaviour matches v2.  His line already used `--qsl-only`, so the new LoTW
+      default changes nothing for him; only some startup log lines read differently
+
+Matt's v2 command line:
+
+```
+jtcon --adif /home/k2tta/ham/data/qrzlog.adif /home/k2tta/.local/share/WS/wsjtx_log.adi
+      --alert-ntfy k2tta-jtwatch --match-state AK,DE --qsl-only
+      --adif-change-script /home/k2tta/ham/up.sh
+      --match-calls /home/k2tta/ham/data/wanted.txt /home/k2tta/ham/data/SCARC.txt
+      --worked-lag-days 5 --5bwas --all
+```
+
+as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 
 ### Phase 3: events and engine
 - [ ] Typed events for all WSJT-X messages we use; encoders for Reply and Highlight
@@ -406,7 +479,7 @@ them deliberately (phase 5 for most), updating the tests as part of the fix.
 
 | # | Question | Leaning |
 |---|---|---|
-| D1 | Minimum Python: 3.11 (built-in `tomllib`) or stay on 3.10 and add `tomli` | 3.11 |
+| D1 | Minimum Python: 3.11 (built-in `tomllib`) or stay on 3.10 and add `tomli` | **Decided: 3.11** (phase 2) |
 | D2 | QRZ code: make `qrzlog` an importable library that jtcon depends on, or copy a small QRZ client into jtcon | Undecided |
 | D3 | Add UDP multicast support in v3 | Yes, small |
 | D4 | QRZ API key: jtcon's own config, env var, or read qrzlog's `~/.config/qrzlog/qrzlog.ini` | Env var + jtcon config, fall back to qrzlog's |

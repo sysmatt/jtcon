@@ -1,4 +1,4 @@
-"""Regex pattern files (--match-calls, --match-message)."""
+"""Regex patterns: watchlist files and activation keywords."""
 
 import re
 import sys
@@ -27,6 +27,15 @@ def load_regex_patterns(file_paths: list, log=None) -> list:
             except re.error as exc:
                 _log(f"[match] {p.name}:{i}: invalid regex {line!r}: {exc}")
     return patterns
+
+
+ACTIVATION_KEYWORDS = {"pota": "POTA", "sota": "SOTA", "iota": "IOTA"}
+
+
+def keyword_patterns(rules) -> list:
+    """Message patterns for the activation rules (pota/sota/iota) among *rules*."""
+    return [(re.compile(rf"\b{ACTIVATION_KEYWORDS[r]}\b", re.IGNORECASE), None)
+            for r in ACTIVATION_KEYWORDS if r in rules]
 
 
 def _regex_matches(value: str, patterns: list) -> list:

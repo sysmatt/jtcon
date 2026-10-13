@@ -1,6 +1,5 @@
-"""External alerts: --alert-command script and ntfy.sh."""
+"""External alerts: the on_wanted script and ntfy.sh."""
 
-import argparse
 import subprocess
 import sys
 import threading
@@ -26,24 +25,25 @@ def _build_alert_msg(callsign, entity_info: dict,
     return " | ".join(segments)
 
 
-def _send_alerts(msg: str, args: argparse.Namespace, log=None) -> None:
+def _send_alerts(msg: str, actions, log=None) -> None:
+    """*actions* is the Config's ActionsConfig."""
     _log = log or (lambda m: print(m, file=sys.stderr))
-    if args.alert_command:
+    if actions.script_on_wanted:
         try:
             subprocess.Popen(
-                [args.alert_command, msg],
+                [str(actions.script_on_wanted), msg],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except Exception as exc:
             _log(f"[alert-command] {exc}")
-    if args.alert_ntfy:
+    if actions.ntfy_topic:
         # Network I/O runs in its own thread so a slow server can't stall decoding.
         def _post():
             try:
                 req = urllib.request.Request(
-                    f"https://ntfy.sh/{args.alert_ntfy}",
+                    f"https://ntfy.sh/{actions.ntfy_topic}",
                     data=msg.encode("utf-8"),
                     method="POST",
                 )

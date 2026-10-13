@@ -11,7 +11,7 @@ import pytest
 from jtcon.core.alerts import _build_alert_msg
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.cycle import CycleTracker
-from jtcon.core.hamdat import load_state_set
+from jtcon.core.hamdat import load_state_file
 from jtcon.core.messages import _directed_sender, parse_cq_message
 from jtcon.core.patterns import _regex_matches, load_regex_patterns
 from jtcon.tui.render import _fmt_age
@@ -96,11 +96,12 @@ def test_cycle_tracker():
     assert ct._sums["odd"] == [1, 0, 1]
 
 
-def test_load_state_set(tmp_path):
-    assert load_state_set("tx, ca,,NY") == {"TX", "CA", "NY"}
+def test_load_state_file(tmp_path):
     f = tmp_path / "states.txt"
     f.write_text("# my states\nma\n\n  nh  \n")
-    assert load_state_set(str(f)) == {"MA", "NH"}
+    assert load_state_file(f) == {"MA", "NH"}
+    with pytest.raises(OSError):
+        load_state_file(tmp_path / "missing.txt")
 
 
 def test_load_regex_patterns(tmp_path):

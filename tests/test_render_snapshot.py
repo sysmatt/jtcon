@@ -76,7 +76,7 @@ def _render_all(make_ctx) -> str:
     def section(title, ctx, msgs=MESSAGES, modes=("~", "+")):
         out.append(f"#### {title}")
         has_hamdat = ctx.hamdat is not None
-        out.append(_readable(_header_line(ctx.args, ctx.adif_log is not None, has_hamdat)))
+        out.append(_readable(_header_line(ctx.config, ctx.adif_log is not None, has_hamdat)))
         for msg in msgs:
             for mode in modes:
                 meta = {}

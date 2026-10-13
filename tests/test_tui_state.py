@@ -14,7 +14,7 @@ from prompt_toolkit.output import DummyOutput
 from jtcon.core.decode import handle_packet
 from jtcon.tui.app import _BUF_SIZE, _MAX_OUTPUT_LINES, _STALE_REPLY_S, _TRIM_OUTPUT_TO, JtconTUI
 import wsjtx_packets as pk
-from conftest import make_args
+from conftest import v2_config
 
 ADDR = ("127.0.0.1", 2237)
 
@@ -43,7 +43,7 @@ def clock(monkeypatch):
 def make_tui():
     with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
         def _make(*argv):
-            return JtconTUI(make_args("--no-color", *argv), None, _FakeSock())
+            return JtconTUI(v2_config("--no-color", *argv), None, _FakeSock())
         yield _make
 
 

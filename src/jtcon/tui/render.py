@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from jtcon.core.bands import _5BWAS_BANDS, _WAS_STATES
 
 if TYPE_CHECKING:
+    from jtcon.config import Config
     from jtcon.core.cycle import CycleTracker
     from jtcon.core.decode import DecodeContext, DecodeResult
 
@@ -41,14 +41,14 @@ _BAR_WIDTH = 14   # characters wide for the cycle bargraph
 
 def _render(ctx: DecodeContext, r: DecodeResult) -> list:
     """Return the fixed-width display line plus any NEEDED/MATCH alert line."""
-    args, adif_log, color = ctx.args, ctx.adif_log, ctx.args.color
+    cfg, adif_log, color = ctx.config, ctx.adif_log, ctx.config.display.color
     decoded   = r.decoded
-    checkable = r.is_cq or args.all_decodes
+    checkable = r.is_cq or cfg.evaluate_all
     is_hit    = bool(r.needed_flags or r.match_flags)
     band      = ctx.band
     cols: list = []
 
-    if args.show_time:
+    if cfg.display.show_time:
         cols.append(_col(f"[{datetime.now().strftime('%H:%M:%S')}]", _DIM, color))
 
     cols.append(_col(r.period_utc,              _DIM, color))
@@ -96,13 +96,13 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
     # Status icons are 2 cells wide; reserve the space even when blank so the
     # columns after the entity block stay aligned with the header.
     icon_on = [bool(adif_log) and on
-               for on in (args.need_entity, args.need_cqz, args.need_country)]
+               for on in (cfg.wants("dxcc"), cfg.wants("cqz"), cfg.wants("country"))]
     ei = r.entity_info
     if ei:
         icons = ["", "", ""]
         if adif_log and checkable:
-            wf     = set(adif_log.worked_flags(ei, args))
-            wf_all = set(adif_log.worked_flags_all(ei, args))
+            wf     = set(adif_log.worked_flags(ei, cfg))
+            wf_all = set(adif_log.worked_flags_all(ei, cfg))
             for i, kind in enumerate(("dxcc", "cqz", "country")):
                 if icon_on[i]:
                     icons[i] = "✅" if kind in wf else ("❓" if kind in wf_all else "❌")
@@ -118,10 +118,11 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
         cols.append(f"| {'':<30}  {pad[0]}{'':5} {pad[1]}{'':6} {pad[2]}{'':2}")
 
     st = r.station_state
-    if adif_log and (args.need_was or args.need_5bwas):
+    need_was, need_5bwas = cfg.wants("was"), cfg.wants("5bwas")
+    if adif_log and (need_was or need_5bwas):
         was_em = ""
         if checkable and st in _WAS_STATES:
-            if args.need_was:
+            if need_was:
                 if   st in adif_log.worked_states_lotw: was_em = "✅"
                 elif st in adif_log.worked_states_all:  was_em = "❓"
                 else:                                   was_em = "❌"
@@ -134,7 +135,7 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
         cols.append(f"{was_em}{st:<2}" if was_em else " " * _W_WAS)
 
     if adif_log:
-        if args.need_5bwas:
+        if need_5bwas:
             qrz  = adif_log.qrz_confirmed_by_band.get(band or "", set())
             lotw = adif_log.lotw_rcvd_by_band.get(band or "", set())
         else:
@@ -161,10 +162,10 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
 #  Column header line
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _header_line(args: argparse.Namespace, has_adif: bool = False,
+def _header_line(cfg: Config, has_adif: bool = False,
                  has_hamdat: bool = False) -> str:
     parts = ["##"]
-    if args.show_time:
+    if cfg.display.show_time:
         parts.append(f"{'[time]':<10}")
     parts.append(f"{'HHMMSSZ':<7}")
     parts.append(f"{'dB':>4}")
@@ -178,12 +179,12 @@ def _header_line(args: argparse.Namespace, has_adif: bool = False,
         parts.append(f"{'days':>{_W_DAYS}}")
     if has_hamdat:
         parts.append(f"{'ST':<2}")
-    w = 2 if has_adif and args.need_entity  else 0
-    x = 2 if has_adif and args.need_cqz     else 0
-    y = 2 if has_adif and args.need_country  else 0
+    w = 2 if has_adif and cfg.wants("dxcc")    else 0
+    x = 2 if has_adif and cfg.wants("cqz")     else 0
+    y = 2 if has_adif and cfg.wants("country") else 0
     parts.append(f"| {'entity':<30}  {'':{w}}CQz   {'':{x}}ITUz   {'':{y}}ct")
-    if has_adif and (args.need_was or args.need_5bwas):
-        label = "WAS " if args.need_was else "5BW "
+    if has_adif and (cfg.wants("was") or cfg.wants("5bwas")):
+        label = "WAS " if cfg.wants("was") else "5BW "
         parts.append(f"{label:<{_W_WAS}}")
     if has_adif:
         parts.append("QRZ")

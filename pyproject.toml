@@ -7,7 +7,7 @@ name = "jtcon"
 dynamic = ["version"]
 description = "Full-screen TUI monitor for WSJT-X: CQ calls enriched with DXCC/zone info, NEEDED alerts from your ADIF log, and one-key replies"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"   # tomllib
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Matt Hoskins", email = "matthoskins@gmail.com" }]

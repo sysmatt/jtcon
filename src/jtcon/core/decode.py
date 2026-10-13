@@ -1,11 +1,11 @@
 """Turn one Decode packet into a classified, rendered result."""
 
-import argparse
 import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from jtcon.config import Config
 from jtcon.core.adif import AdifLog
 from jtcon.core.alerts import _build_alert_msg, _send_alerts
 from jtcon.core.bands import _5BWAS_BANDS, _WAS_STATES, _freq_to_band
@@ -29,7 +29,7 @@ _ALERT_REPEAT_S = 3600  # re-alert a station after it has gone unheard this long
 @dataclass
 class DecodeContext:
     """Everything handle_packet needs besides the packet itself."""
-    args:          argparse.Namespace
+    config:        Config
     cty:           CtyDat
     adif_log:      AdifLog | None
     json_fh:       object
@@ -80,12 +80,12 @@ def _entity_info(cty: CtyDat, callsign: str | None) -> dict:
 
 def _classify(ctx: DecodeContext, r: DecodeResult) -> None:
     """Fill r.station_state, r.needed_flags and r.match_flags."""
-    args, adif_log = ctx.args, ctx.adif_log
-    checkable = r.is_cq or args.all_decodes
+    cfg, adif_log = ctx.config, ctx.adif_log
+    checkable = r.is_cq or cfg.evaluate_all
 
     needed: list = []
     if adif_log and checkable and r.entity_info:
-        needed = adif_log.needed_flags(r.entity_info, args)
+        needed = adif_log.needed_flags(r.entity_info, cfg)
 
     match: list = []
     if ctx.call_patterns and r.callsign:
@@ -100,20 +100,21 @@ def _classify(ctx: DecodeContext, r: DecodeResult) -> None:
     # WAS / 5BWAS
     st = r.station_state
     if adif_log and checkable and st in _WAS_STATES:
-        if args.need_was:
+        if cfg.wants("was"):
             if st not in adif_log.worked_states_lotw:
                 needed.append(f"NEW-WAS({st})")
-        elif args.need_5bwas:
+        elif cfg.wants("5bwas"):
             band = ctx.band
             if band in _5BWAS_BANDS:
                 if band not in adif_log.worked_states_bands_lotw.get(st, set()):
                     needed.append(f"NEW-5BWAS({st}/{band})")
 
     # Worked-lag-days suppression
-    if (adif_log and r.callsign and args.worked_lag_days >= 0
+    lag = cfg.filters.suppress_worked_within_days
+    if (adif_log and r.callsign and lag >= 0
             and r.callsign in adif_log.last_worked):
         elapsed = (datetime.now(timezone.utc).date() - adif_log.last_worked[r.callsign]).days
-        if elapsed <= args.worked_lag_days:
+        if elapsed <= lag:
             needed, match = [], []
 
     r.needed_flags, r.match_flags = needed, match
@@ -136,10 +137,11 @@ def _maybe_alert(ctx: DecodeContext, r: DecodeResult) -> bool:
     if len(ctx.alerted) > 5000:
         for k in [k for k, t in ctx.alerted.items() if now - t >= _ALERT_REPEAT_S]:
             del ctx.alerted[k]
-    if ctx.args.alert_command or ctx.args.alert_ntfy:
+    actions = ctx.config.actions
+    if actions.script_on_wanted or actions.ntfy_topic:
         _send_alerts(
             _build_alert_msg(r.callsign, r.entity_info, r.needed_flags, r.match_flags),
-            ctx.args,
+            actions,
             log=ctx.log,
         )
     return True
@@ -193,10 +195,10 @@ def handle_packet(
     if parsed is None:
         return []
     schema, decoded = parsed
-    args  = ctx.args
+    cfg   = ctx.config
     lines = []
 
-    if args.debug:
+    if cfg.display.debug:
         lines.append(
             f"[debug] schema={schema}  len={len(data)}\n"
             f"[debug] hex: {data.hex()}\n"
@@ -214,7 +216,7 @@ def handle_packet(
     if ctx.cycle_tracker is not None:
         ctx.cycle_tracker.record(decoded["time_ms"], is_cq, decoded["new"], mode)
 
-    if not is_cq and not args.raw and not args.all_decodes:
+    if not is_cq and not cfg.show_all and not cfg.evaluate_all:
         return lines
 
     time_ms = decoded["time_ms"]
@@ -231,14 +233,14 @@ def handle_packet(
             gm = _GRID_RE.search(msg_text)
             if gm:
                 r.grid = gm.group(1).upper()
-    elif args.all_decodes:
+    elif cfg.evaluate_all:
         r.callsign = _directed_sender(msg_text, ctx.de_call)
     r.entity_info = _entity_info(ctx.cty, r.callsign)
 
     _classify(ctx, r)
 
-    # Non-CQ: only proceed to display if --raw or there is an actual hit.
-    if not is_cq and not args.raw and not (r.needed_flags or r.match_flags):
+    # Non-CQ: only proceed to display when showing all, or there is an actual hit.
+    if not is_cq and not cfg.show_all and not (r.needed_flags or r.match_flags):
         return lines
 
     is_new_alert = _maybe_alert(ctx, r)

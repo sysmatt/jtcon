@@ -179,7 +179,7 @@ jtcon --adif ~/wsjtx_log.adi --5bwas --all
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - `prompt-toolkit` >= 3.0 — installed automatically by pipx
 - `cty.dat` — downloaded automatically from country-files.com on first run and cached at
   `~/.jtcon_cty.dat`; re-downloaded at startup when the cached copy is more than 30 days

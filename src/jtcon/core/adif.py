@@ -1,6 +1,5 @@
 """ADIF log files: discovery, parsing, and the worked/confirmed index (AdifLog)."""
 
-import argparse
 import re
 import sys
 from datetime import datetime
@@ -198,42 +197,42 @@ class AdifLog:
                         if counts_as_worked:
                             self.worked_country.add(info["country"].upper())
 
-    def needed_flags(self, entity_info: dict, args: argparse.Namespace) -> list:
+    def needed_flags(self, entity_info: dict, cfg) -> list:
         flags = []
         prefix  = (entity_info.get("primary_prefix") or "").upper()
         cqz     = entity_info.get("cq_zone")
         country = (entity_info.get("entity") or "").upper()
-        if args.need_entity and prefix and prefix not in self.worked_dxcc:
+        if cfg.wants("dxcc") and prefix and prefix not in self.worked_dxcc:
             flags.append(f"NEW-DXCC({prefix})")
-        if args.need_cqz and isinstance(cqz, int) and cqz not in self.worked_cqz:
+        if cfg.wants("cqz") and isinstance(cqz, int) and cqz not in self.worked_cqz:
             flags.append(f"NEW-CQZ({cqz})")
-        if args.need_country and country and country not in self.worked_country:
+        if cfg.wants("country") and country and country not in self.worked_country:
             flags.append(f"NEW-CTRY({entity_info.get('entity', '?')})")
         return flags
 
-    def worked_flags(self, entity_info: dict, args: argparse.Namespace) -> list:
+    def worked_flags(self, entity_info: dict, cfg) -> list:
         flags = []
         prefix  = (entity_info.get("primary_prefix") or "").upper()
         cqz     = entity_info.get("cq_zone")
         country = (entity_info.get("entity") or "").upper()
-        if args.need_entity and prefix and prefix in self.worked_dxcc:
+        if cfg.wants("dxcc") and prefix and prefix in self.worked_dxcc:
             flags.append("dxcc")
-        if args.need_cqz and isinstance(cqz, int) and cqz in self.worked_cqz:
+        if cfg.wants("cqz") and isinstance(cqz, int) and cqz in self.worked_cqz:
             flags.append("cqz")
-        if args.need_country and country and country in self.worked_country:
+        if cfg.wants("country") and country and country in self.worked_country:
             flags.append("country")
         return flags
 
-    def worked_flags_all(self, entity_info: dict, args: argparse.Namespace) -> list:
+    def worked_flags_all(self, entity_info: dict, cfg) -> list:
         """Return which categories were worked in any QSO (ignores qsl_only filter)."""
         flags = []
         prefix  = (entity_info.get("primary_prefix") or "").upper()
         cqz     = entity_info.get("cq_zone")
         country = (entity_info.get("entity") or "").upper()
-        if args.need_entity and prefix and prefix in self.worked_dxcc_all:
+        if cfg.wants("dxcc") and prefix and prefix in self.worked_dxcc_all:
             flags.append("dxcc")
-        if args.need_cqz and isinstance(cqz, int) and cqz in self.worked_cqz_all:
+        if cfg.wants("cqz") and isinstance(cqz, int) and cqz in self.worked_cqz_all:
             flags.append("cqz")
-        if args.need_country and country and country in self.worked_country_all:
+        if cfg.wants("country") and country and country in self.worked_country_all:
             flags.append("country")
         return flags

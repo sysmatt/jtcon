@@ -58,6 +58,15 @@ def test_qsl_only_needs_unconfirmed(make_ctx):
         (["NEW-DXCC(JA)", "NEW-CQZ(25)", "NEW-CTRY(Japan)"], [])
 
 
+def test_v3_default_needs_lotw_confirmation(make_ctx):
+    # No config at all: dxcc/cqz/country count only LoTW-confirmed QSOs.
+    assert flags(make_ctx(config={}), "CQ JA1XYZ PM95") == \
+        (["NEW-DXCC(JA)", "NEW-CQZ(25)", "NEW-CTRY(Japan)"], [])
+    assert flags(make_ctx(config={}), "CQ DL1ABC JO62")[0] == []   # LoTW-confirmed
+    worked = {"wanted": [{"rule": r, "confirm": []} for r in ("dxcc", "cqz", "country")]}
+    assert flags(make_ctx(config=worked), "CQ JA1XYZ PM95") == ([], [])
+
+
 def test_need_checks_can_be_disabled(make_ctx):
     ctx = make_ctx("--no-need-cqz", "--no-need-country")
     assert flags(ctx, "CQ VK3XY QF22") == (["NEW-DXCC(VK)"], [])
