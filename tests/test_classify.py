@@ -339,6 +339,7 @@ def test_json_record(make_ctx):
         "wanted": [{"rule": "DXCC", "detail": "VK", "status": "new"},
                    {"rule": "CQZ", "detail": "30", "status": "new"},
                    {"rule": "CTRY", "detail": "Australia", "status": "new"}],
+        "ignored": False,
     }
 
 
@@ -347,3 +348,33 @@ def test_json_wanted_without_a_log_has_watchlist_hits_only(make_ctx):
     run(make_ctx(adif=False, json_fh=fh, call_patterns=watch_patterns("^VK")), "CQ VK3XY QF22")
     assert json.loads(fh.getvalue())["wanted"] == [
         {"rule": "CALLS", "detail": "^VK [watch.txt]", "status": None}]
+
+
+# ── Ignored calls ─────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("argv", [(), ("--all",), ("--raw",), ("--all", "--raw")])
+def test_ignored_calls_are_not_shown_or_alerted(make_ctx, argv):
+    log = []
+    ctx = make_ctx(*argv, ignored=["VK3XY", "W1ABC"], log=log.append,
+                   call_patterns=watch_patterns("^VK"))
+    for msg in ("CQ DX VK3XY QF22", "CQ VK3XY/P", "CQ VK9/VK3XY", "W1ABC VK3XY RR73",
+                "K2XYZ <W1ABC/P> R-12", "TU; K2XYZ W1ABC R 579 MA"):
+        assert run(ctx, msg) == ([], {}), msg
+    assert ctx.alerted == {} and log == []
+    lines, meta = run(ctx, "CQ ZL1AA RF70")                   # others are unaffected
+    assert lines and meta["callsign"] == "ZL1AA"
+
+
+def test_an_ignored_call_calling_me_is_still_shown(make_ctx):
+    ctx = make_ctx("--raw", ignored=["W9ZZZ"])
+    lines, _ = run(ctx, "N0CALL W9ZZZ -05")
+    assert "N0CALL W9ZZZ -05" in lines[0]
+    assert run(ctx, "W9ZZZ N0CALL R-05")[0]                   # me calling it, too
+
+
+def test_ignored_cqs_are_saved_marked_ignored(make_ctx):
+    fh = io.StringIO()
+    run(make_ctx(json_fh=fh, ignored=["VK3XY"]), "CQ DX VK3XY QF22")
+    record = json.loads(fh.getvalue())
+    assert record["ignored"] is True and record["wanted"] == []
+    assert record["callsign"] == "VK3XY" and record["entity"] == "Australia"

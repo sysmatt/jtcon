@@ -557,6 +557,25 @@ rule; add ituz and grid now; watchlist hits stay hidden for recently worked call
       "qrz"]` with the QRZ download; a station worked on one band still wanted for
       5BWAS on another
 
+#### Phase 5 follow-ups (Matt's requests after the live test)
+- [x] Fixed column header: a two-line window above the decode pane, redrawn each
+      frame (so it follows a log appearing on reload) and shifted when the pane
+      scrolls sideways.  No longer repeated every 15 spots, nor printed at startup
+      or after `clear`
+- [x] Ignore list (Matt chose all the recommendations):
+      - `i NN` / `i CALL` ignores a call for the session, `u CALL` undoes it, and
+        `i` lists them (from the config / this session); the status bar shows `ign:N`
+      - preloaded from `[filters] ignore = [...]`, plus repeatable `--ignore CALL`,
+        which adds to the configured list
+      - matched on the base call (`base_call()`): W1ABC covers W1ABC/P, VE3/W1ABC
+      - an ignored sender's decodes aren't shown (`show = "all"` too), and get no
+        rules, alerts or highlight; ignoring drops it from the buffer and clears
+        its highlight.  Messages addressed to us are always shown
+      - ignored CQs are still written to the JSON log, with `"ignored": true`
+        (every record now has `"ignored"`)
+      - plain calls only, no regex; nothing is written to disk
+- [x] Tests: 311 pass on Python 3.11, 3.12, 3.14
+
 ### Phase 6: actions
 - [ ] Action interface and routing from config (`on_wanted`, `on_qso_logged`, …)
 - [ ] Reply, Highlight Callsign (set and clear), script, ntfy, bell, JSON log, proxy

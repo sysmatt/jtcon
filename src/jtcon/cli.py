@@ -66,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
                           f"(rules: {', '.join(RULES)})")
     run.add_argument("--scope", choices=("cq", "all"),
                      help="Check CQ decodes only, or all decodes")
+    run.add_argument("--ignore", metavar="CALL", action="append",
+                     help="Never show or alert on CALL (and its portable forms) unless it "
+                          "calls you; repeatable, adds to [filters] ignore")
     run.add_argument("--port", type=int,
                      help="UDP port matching WSJT-X Settings → Reporting (default 2237)")
     run.add_argument("--save", metavar="FILE",
@@ -118,7 +121,8 @@ def main(argv: list | None = None) -> None:
         sys.exit(_init_config(path))
 
     try:
-        cfg = load_config(args.config, args.profile, cli_overrides(args), args.wanted)
+        cfg = load_config(args.config, args.profile, cli_overrides(args), args.wanted,
+                          ignore=args.ignore)
     except ConfigError as exc:
         print(f"jtcon: config error: {exc}", file=sys.stderr)
         sys.exit(2)

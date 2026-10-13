@@ -90,6 +90,11 @@ class StationTable:
         return sorted((s for s in self._by_idx.values() if s.is_hit),
                       key=lambda s: s.last_seen)
 
+    def remove(self, station: Station) -> None:
+        """Drop *station*; its index is free for the next new station."""
+        self._by_idx.pop(station.idx, None)
+        self._by_call.pop(station.callsign, None)
+
     def clear(self) -> int:
         """Empty the table; return how many stations were dropped."""
         n = len(self._by_idx)

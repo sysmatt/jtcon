@@ -538,3 +538,41 @@ def test_log_reload_unhighlights_a_station_now_worked(make_engine, tmp_path):
     _reload(e)
     assert e.stations.hits() == []
     assert sent(e) == [("highlight", "VK3XY", ORANGE), ("highlight", "VK3XY", (None, None))]
+
+
+# ── Ignore ────────────────────────────────────────────────────────────────────
+
+def test_ignore_drops_the_station_and_its_highlight(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY/P QF22"), ADDR)
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    e.ignore("vk3xy")
+    assert [s.callsign for s in e.stations.all()] == ["W1ABC"]
+    assert sent(e) == [("highlight", "VK3XY/P", ORANGE), ("highlight", "VK3XY/P", (None, None))]
+    assert logs(e)[-1] == "[ignore] VK3XY ignored for this session (1 ignored; u VK3XY to undo)."
+    n = len(spots(e))
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert len(spots(e)) == n and len(sent(e)) == 2 and len(e.stations) == 1
+    e.ignore("VK3XY/QRP")
+    assert logs(e)[-1] == "[ignore] VK3XY is already ignored."
+
+
+def test_unignore(make_engine):
+    e = make_engine(config={"filters": {"ignore": ["VK3XY"]}})
+    assert e.ignored == {"VK3XY": "config"}
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert spots(e) == []
+    e.unignore("VK3XY")
+    assert logs(e)[-1] == "[ignore] VK3XY is no longer ignored (0 ignored)."
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert len(spots(e)) == 1
+    e.unignore("ZL1AA")
+    assert logs(e)[-1] == "[ignore] ZL1AA is not ignored."
+
+
+def test_refresh_drops_stations_ignored_meanwhile(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    e.ignored["VK3XY"] = "session"           # not through ignore(): refresh catches it
+    e.refresh_stations()
+    assert len(e.stations) == 0 and sent(e)[-1] == ("highlight", "VK3XY", (None, None))

@@ -12,7 +12,7 @@ from jtcon.core.calls import CallIndex
 from jtcon.core.cty import CtyDat
 from jtcon.core.hamdat import HamdatLookup
 from jtcon.core.logbook import Logbook
-from jtcon.core.messages import _GRID_RE, _directed_sender, parse_cq_message
+from jtcon.core.messages import _GRID_RE, _directed_sender, base_call, parse_cq_message
 from jtcon.core.protocol import Decode, mode_name
 from jtcon.core.wanted import Spot, evaluate_rules
 
@@ -38,6 +38,7 @@ class DecodeContext:
     dial_freq:     int = 0       # Hz, from WSJT-X Status messages
     de_call:       str = ""      # operator callsign, from WSJT-X Status messages
     log:           object = None
+    ignored:       object = frozenset()   # base calls never shown (a set or dict)
 
     @property
     def band(self) -> str | None:
@@ -61,6 +62,7 @@ class DecodeResult:
     hits:          list = field(default_factory=list)   # every Hit, for status columns
     wanted:        list = field(default_factory=list)   # Hits that make it wanted
     new_alert:     bool = False   # first alert for this station (rings the bell)
+    ignored:       bool = False   # sent by an ignored call: not shown, no rules
 
     def hit(self, rule_label: str):
         """This decode's Hit from the rule labelled *rule_label*, or None."""
@@ -142,6 +144,7 @@ def _write_json(ctx: DecodeContext, r: DecodeResult) -> None:
         "itu_zone":       ei.get("itu_zone"),
         "continent":      ei.get("continent"),
         "wanted":         [h.as_dict() for h in r.wanted],
+        "ignored":        r.ignored,
     }
     ctx.json_fh.write(json.dumps(record) + "\n")
     ctx.json_fh.flush()
@@ -163,10 +166,15 @@ def debug_text(data: bytes, schema: int, d: Decode) -> str:
 def evaluate(decoded: Decode, ctx: DecodeContext) -> DecodeResult | None:
     """
     Judge one decode as it arrives, then fire alerts and the JSON log for it.
-    Returns None when the decode isn't shown (see judge()).
+    Returns None when the decode isn't shown (see judge()), or is from an
+    ignored call (still written to the JSON log, marked "ignored").
     """
     r = judge(decoded, ctx)
     if r is None:
+        return None
+    if r.ignored:
+        if ctx.json_fh and r.is_cq:
+            _write_json(ctx, r)
         return None
     r.new_alert = _maybe_alert(ctx, r)
     if ctx.json_fh and r.is_cq:
@@ -179,7 +187,8 @@ def judge(decoded: Decode, ctx: DecodeContext) -> DecodeResult | None:
     Identify and classify one decode, with no side effects, so a decode can be
     judged again when the logbook or a watchlist changes.  Returns None when the
     decode isn't shown: a non-CQ message, unless the config shows all decodes or
-    (with scope "all") the station is wanted.
+    (with scope "all") the station is wanted.  A decode sent by an ignored call
+    comes back with r.ignored set and no hits; one addressed to us never does.
     """
     cfg      = ctx.config
     msg_text = decoded.message.strip()
@@ -205,6 +214,11 @@ def judge(decoded: Decode, ctx: DecodeContext) -> DecodeResult | None:
     elif cfg.evaluate_all:
         r.callsign = _directed_sender(msg_text, ctx.de_call)
     r.entity_info = _entity_info(ctx.cty, r.callsign)
+    if ctx.ignored:
+        sender = r.callsign if is_cq else _directed_sender(msg_text, ctx.de_call)
+        if sender and base_call(sender) in ctx.ignored:
+            r.ignored = True
+            return r
 
     _classify(ctx, r)
 

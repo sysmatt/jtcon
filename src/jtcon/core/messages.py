@@ -46,6 +46,18 @@ def parse_cq_message(msg: str) -> tuple:
     return callsign or None, grid, modifier or None
 
 
+def base_call(call: str) -> str:
+    """The home call inside a portable or prefixed one: W1ABC/P, VE3/W1ABC and
+    <W1ABC/QRP> are all W1ABC.  A prefix (VE3, KH6) ends in a digit, a suffix (P,
+    QRP, 7) has no digit and a letter both, so the base call is the longest part
+    with a digit that ends in a letter."""
+    parts = [p for p in call.strip().strip("<>").upper().split("/") if p]
+    if not parts:
+        return ""
+    calls = [p for p in parts if p[-1].isalpha() and any(c.isdigit() for c in p)]
+    return max(calls or parts, key=len)
+
+
 def _directed_sender(msg_text: str, de_call: str) -> str | None:
     """
     Return the transmitting station of a directed message, or None.

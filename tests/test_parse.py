@@ -12,7 +12,7 @@ from jtcon.core.alerts import _build_alert_msg
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.cycle import CycleTracker
 from jtcon.core.hamdat import load_state_file
-from jtcon.core.messages import _directed_sender, parse_cq_message
+from jtcon.core.messages import _directed_sender, base_call, parse_cq_message
 from jtcon.core.patterns import _regex_matches, load_regex_patterns
 from jtcon.core.stations import fmt_age as _fmt_age
 from jtcon.core.wanted import NEW, WORKED, Hit
@@ -138,3 +138,12 @@ def test_build_alert_msg():
         "VK3XY | Australia CQ30 | WANTED: DXCC(VK) new · WAS-QRZ(MA) unconfirmed"
         " · CALLS(^VK [w.txt])")
     assert _build_alert_msg(None, {}, [Hit("POTA")]) == "? | WANTED: POTA"
+
+
+@pytest.mark.parametrize("call, base", [
+    ("W1ABC", "W1ABC"), ("w1abc/p", "W1ABC"), ("VE3/W1ABC", "W1ABC"), ("<W1ABC/QRP>", "W1ABC"),
+    ("W1ABC/7", "W1ABC"), ("KH6/W1XX", "W1XX"), ("DL/W1ABC/MM", "W1ABC"), ("VE3/W1A", "W1A"),
+    ("4U1UN", "4U1UN"), ("", ""),
+])
+def test_base_call(call, base):
+    assert base_call(call) == base

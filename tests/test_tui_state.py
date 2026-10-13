@@ -76,18 +76,26 @@ def test_raw_non_cq_is_indented(make_tui):
     assert t._lines[0].startswith("    123015z")
 
 
-def test_header_repeats_every_15_spots(tui):
-    for i in range(15):
-        tui.engine.datagram_received(pk.decode(f"CQ K{i}AA FN42"), ADDR)
-    tui._flush_output()
-    assert tui._lines[-2].startswith("##") and tui._lines[-1].startswith("─")
-
-
-def test_ready_prints_header_then_banner(tui):
+def test_header_stays_out_of_the_pane(tui):
     tui._on_event(Ready("[ready] Listening"))
     tui._on_event(LogLine("a\nb"))
+    for i in range(30):
+        tui.engine.datagram_received(pk.decode(f"CQ K{i}AA FN42"), ADDR)
     tui._flush_output()
-    assert tui._lines[0].startswith("##") and tui._lines[2:] == ["[ready] Listening", "a", "b"]
+    assert tui._lines[:3] == ["[ready] Listening", "a", "b"]
+    assert not any(line.startswith(("##", "─")) for line in tui._lines)
+
+
+def header_rows(tui):
+    text = "".join(t for _, t, *_ in tui._get_header_text())
+    return text.split("\n")
+
+
+def test_fixed_header_follows_sideways_scroll(tui):
+    rows = header_rows(tui)
+    assert rows == tui._header().split("\n") and rows[0].startswith("##  HHMMSSZ")
+    tui.output_area.window.horizontal_scroll = 4
+    assert header_rows(tui) == [row[4:] for row in rows]
 
 
 def test_fatal_event_exits(tui, monkeypatch):
@@ -134,7 +142,8 @@ def test_stale_reply_warns(tui, clock):
 def test_unknown_command(tui):
     assert command(tui, "foo bar")[-1] == (
         "[cmd] Unknown: 'foo bar'  "
-        "(commands: quit, clear, list; or enter index 00-99 / callsign to reply)")
+        "(commands: quit, clear, list, i NN|CALL to ignore, u CALL to un-ignore,"
+        " i to list ignored; or enter index 00-99 / callsign to reply)")
     n = len(tui._lines)
     assert len(command(tui, "   ")) == n      # blank input does nothing
 
@@ -178,7 +187,7 @@ def test_list_shows_a_station_redrawn_after_a_qso(tui):
 def test_clear_command(tui):
     tui._append_line("old output")
     tui._flush_output()
-    assert command(tui, "clear") == tui._header().split("\n")
+    assert command(tui, "clear") == []
 
 
 def test_quit_commands(tui, monkeypatch):
@@ -272,3 +281,24 @@ def test_header_columns(make_tui):
     # One status column per award rule, in config order; pota has none.
     assert re.search(r"days  ST  \| entity {24}  CQz   ITUz   ct  \| DXCC     WAS   WAS-QRZ"
                      r"  QRZ  LoW$", h.splitlines()[0])
+
+
+def test_ignore_commands(tui):
+    store(tui, "CQ W1ABC FN42")
+    store(tui, "CQ VK3XY QF22")
+    assert command(tui, "i")[-1] == "[ignore] Nothing ignored.  i NN or i CALL ignores a station."
+    assert command(tui, "i 01")[-1].startswith("[ignore] VK3XY ignored for this session")
+    assert command(tui, "i w1abc")[-1].startswith("[ignore] W1ABC ignored")
+    assert len(tui.engine.stations) == 0
+    assert command(tui, "i 05")[-1] == "[cmd] No station at index 05."
+    assert command(tui, "i hello")[-1] == "[cmd] 'hello' is not a callsign (usage: i NN or i CALL)."
+    assert command(tui, "u 3")[-1] == "[cmd] '3' is not a callsign (usage: u CALL)."
+    assert command(tui, "u W1ABC")[-1].startswith("[ignore] W1ABC is no longer ignored")
+    assert " ign:1 " in "".join(t for _, t in tui._get_status_text())
+
+
+def test_ignore_list_shows_where_each_came_from(make_tui):
+    t = make_tui(config={"filters": {"ignore": ["W1AW", "K1ABC"]}})
+    command(t, "i ZL1AA")
+    assert command(t, "i")[-3:] == ["[ignore] 3 ignored ——",
+                                    "  config:   W1AW K1ABC", "  session:  ZL1AA"]

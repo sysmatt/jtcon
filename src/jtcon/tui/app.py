@@ -14,6 +14,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.utils import explode_text_fragments
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
@@ -74,7 +75,6 @@ class JtconTUI:
         # Top line of the decode pane while scrolled back from the command line;
         # None means the pane follows new output.
         self._scroll_top: int | None = None
-        self._line_count: int = 0
 
         # ── Widgets ──────────────────────────────────────────────────────────
         self.output_area = TextArea(
@@ -100,6 +100,12 @@ class JtconTUI:
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build_app(self) -> Application:
+        # The column header stays put above the decode pane, which scrolls under it.
+        header_window = Window(
+            content=FormattedTextControl(self._get_header_text),
+            dont_extend_height=True,
+            wrap_lines=False,
+        )
         separator = Window(height=1, char="─", style="class:separator")
         status_window = Window(
             content=FormattedTextControl(self._get_status_text),
@@ -109,6 +115,7 @@ class JtconTUI:
 
         layout = Layout(
             HSplit([
+                header_window,
                 self.output_area,
                 separator,
                 self.cmd_area,
@@ -220,11 +227,12 @@ class JtconTUI:
             trx = ("class:status.rx", " RX ")
 
         de = f"  de={eng.de_call}" if eng.de_call else ""
+        ign = f"  ign:{len(eng.ignored)}" if eng.ignored else ""
         scroll = [("class:status.scroll", " SCROLL ")] if self._scroll_top is not None else []
         return [
             trx,
             *scroll,
-            ("class:status", f" [{bar}] {parity}{stats}{de} "),
+            ("class:status", f" [{bar}] {parity}{stats}{de}{ign} "),
         ]
 
     # ── Command handler ───────────────────────────────────────────────────────
@@ -246,11 +254,17 @@ class JtconTUI:
         elif cmd == "clear":
             with self._output_lock:
                 self._pending.clear()
-            self._lines = self._header().split("\n")
+            self._lines = []
             self._set_output(follow=True)
 
         elif cmd and "list".startswith(cmd):
             self._cmd_list()
+
+        elif cmd == "i":
+            self._cmd_ignored()
+
+        elif cmd.startswith("i ") or cmd.startswith("u "):
+            self._cmd_ignore(cmd[0], raw[2:].strip())
 
         elif re.match(r'^\d{1,2}$', raw):
             idx = int(raw)
@@ -270,8 +284,37 @@ class JtconTUI:
         else:
             self._append_line(
                 f"[cmd] Unknown: {raw!r}  "
-                "(commands: quit, clear, list; or enter index 00-99 / callsign to reply)"
+                "(commands: quit, clear, list, i NN|CALL to ignore, u CALL to un-ignore,"
+                " i to list ignored; or enter index 00-99 / callsign to reply)"
             )
+
+    def _cmd_ignore(self, verb: str, arg: str) -> None:
+        """i NN / i CALL: ignore for this session; u CALL: stop ignoring."""
+        if verb == "i" and re.fullmatch(r"\d{1,2}", arg):
+            station = self.engine.stations.get(int(arg))
+            if station is None:
+                self._append_line(f"[cmd] No station at index {int(arg):02d}.")
+                return
+            arg = station.callsign
+        if not _CALLSIGN_RE.match(arg.strip("<>")):
+            usage = "i NN or i CALL" if verb == "i" else "u CALL"
+            self._append_line(f"[cmd] {arg!r} is not a callsign (usage: {usage}).")
+            return
+        if verb == "i":
+            self.engine.ignore(arg)
+        else:
+            self.engine.unignore(arg)
+
+    def _cmd_ignored(self) -> None:
+        ignored = self.engine.ignored
+        if not ignored:
+            self._append_line("[ignore] Nothing ignored.  i NN or i CALL ignores a station.")
+            return
+        self._append_line(f"[ignore] {len(ignored)} ignored ——")
+        for source in ("config", "session"):
+            calls = [c for c, s in ignored.items() if s == source]
+            if calls:
+                self._append_line(f"  {source + ':':<9} {' '.join(calls)}")
 
     def _cmd_list(self) -> None:
         """Print the wanted stations in the rolling buffer, most recently heard last."""
@@ -399,6 +442,19 @@ class JtconTUI:
         return _header_line(self.config, has_log=self.engine.logbook is not None,
                             has_hamdat=self.engine.hamdat is not None)
 
+    def _get_header_text(self):
+        """The fixed header, shifted with the decode pane if it scrolls sideways."""
+        frags = explode_text_fragments(to_formatted_text(ANSI(self._header())))
+        skip = self.output_area.window.horizontal_scroll
+        if not skip:
+            return frags
+        out, col = [], 0
+        for style, text, *rest in frags:
+            col = 0 if text == "\n" else col + 1
+            if text == "\n" or col > skip:
+                out.append((style, text, *rest))
+        return out
+
     def _fatal(self, msg: str) -> None:
         """Log *msg*, stop, and close the TUI; *msg* is reprinted after exit."""
         self._append_line(msg)
@@ -423,7 +479,6 @@ class JtconTUI:
         elif isinstance(ev, StatusChanged):
             self._app.invalidate()
         elif isinstance(ev, Ready):
-            self._append_line(self._header())
             self._append_line(ev.text)
         elif isinstance(ev, UdpDown):
             self._append_line(ev.text)
@@ -443,9 +498,6 @@ class JtconTUI:
             lines = [f"    {lines[0]}"] + lines[1:]
         for line in lines:
             self._append_line(line)
-        self._line_count += 1
-        if self._line_count % 15 == 0:
-            self._append_line(self._header())
 
     # ── Entry point ───────────────────────────────────────────────────────────
 

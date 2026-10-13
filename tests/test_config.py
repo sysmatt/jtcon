@@ -226,6 +226,7 @@ def test_wanted_value_errors(wanted, error):
     ({"udp": 5}, r"udp must be a table \(\[udp\]\)"),
     ({"display": {"show": "some"}}, 'display.show must be "cq" or "all"'),
     ({"display": {"color": "no"}}, "display.color must be true or false"),
+    ({"filters": {"ignore": ["W1AW", "hello"]}}, "filters.ignore must be a callsign, not 'hello'"),
     ({"inputs": {"adif": [""]}}, "inputs.adif must be a path"),
     ({"actions": {"highlight": {"background": "orange"}}},
      'actions.highlight.background must be a colour like "#ffa500"'),
@@ -353,3 +354,18 @@ def test_v2_defaults_translate_to_worked_is_enough():
                                         for r in ("dxcc", "cqz", "country")]
     assert v2_to_config("--qsl-only")["wanted"] == [{"rule": r, "confirm": ["lotw"]}
                                                     for r in ("dxcc", "cqz", "country")]
+
+
+def test_ignore_list_from_the_config_and_the_command_line(tmp_path):
+    write(tmp_path / "config.toml", """
+        [filters]
+        ignore = ["w1aw", " K1ABC/P "]
+        """)
+    cfg = load_config(config_dir=tmp_path)
+    assert cfg.filters.ignore == ["W1AW", "K1ABC/P"]
+    args = build_parser().parse_args(["--ignore", "vk3xy", "--ignore", "ZL1AA"])
+    cfg = load_config(config_dir=tmp_path, ignore=args.ignore)
+    assert cfg.filters.ignore == ["W1AW", "K1ABC/P", "VK3XY", "ZL1AA"]     # adds, not replaces
+    with pytest.raises(ConfigError, match="--ignore must be a callsign, not 'RR'"):
+        load_config(config_dir=tmp_path, ignore=["RR"])
+    assert make_config({}).filters.ignore == []

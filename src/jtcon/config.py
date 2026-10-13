@@ -20,6 +20,7 @@ from pathlib import Path
 
 from jtcon.core.cty import CTY_DAT_DEFAULT
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT
+from jtcon.core.messages import _CALLSIGN_RE
 
 
 CONFIG_FILE  = "config.toml"
@@ -120,6 +121,8 @@ class FiltersConfig:
     # A station worked within this many days isn't wanted for what that QSO
     # covers (see core/wanted), nor for watchlists; 0 = today only; -1 = never
     suppress_worked_within_days: int = 5
+    # Calls never shown or alerted on; a base call covers its portable forms.
+    ignore: list = field(default_factory=list)
 
 
 @dataclass
@@ -195,6 +198,7 @@ def _settings_out(settings: dict) -> dict:
 
 _PATH  = "path"
 _COLOR = "color"
+_CALL  = "call"
 
 
 def _choice(*values):
@@ -207,7 +211,7 @@ _SCHEMA = {
                 "mouse": bool, "debug": bool},
     "scope":   {"decodes": _choice("cq", "all")},
     "inputs":  {"cty": _PATH, "adif": [_PATH], "hamdat": _PATH},
-    "filters": {"suppress_worked_within_days": int},
+    "filters": {"suppress_worked_within_days": int, "ignore": [_CALL]},
     "actions": {
         "highlight": {"enabled": bool, "background": _COLOR, "foreground": _COLOR},
         "ntfy":     {"topic": str},
@@ -230,7 +234,7 @@ def _type_name(kind) -> str:
     if isinstance(kind, tuple):
         return " or ".join(json.dumps(v) for v in kind[1])
     return {str: "a string", int: "an integer", bool: "true or false",
-            _PATH: "a path", _COLOR: 'a colour like "#ffa500"'}[kind]
+            _PATH: "a path", _COLOR: 'a colour like "#ffa500"', _CALL: "a callsign"}[kind]
 
 
 def _check_value(value, kind, where: str, base_dir: Path):
@@ -246,6 +250,10 @@ def _check_value(value, kind, where: str, base_dir: Path):
         if not (isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value)):
             raise ConfigError(f"{where} must be {_type_name(kind)}, not {value!r}")
         return value.lower()
+    if kind is _CALL:
+        if not (isinstance(value, str) and _CALLSIGN_RE.match(value.strip())):
+            raise ConfigError(f"{where} must be {_type_name(kind)}, not {value!r}")
+        return value.strip().upper()
     if kind is _PATH:
         if not isinstance(value, str) or not value:
             raise ConfigError(f"{where} must be a path")
@@ -356,11 +364,12 @@ def profile_path(profile: str, config_file: Path) -> Path:
 
 def load_config(config_file: str | Path | None = None, profile: str | None = None,
                 overrides: dict | None = None, wanted: str | None = None,
-                config_dir: Path | None = None) -> Config:
+                config_dir: Path | None = None, ignore: list | None = None) -> Config:
     """
     Build the effective Config.  *config_file* None means the default file, which
     may be absent.  *overrides* is a layer in config-file shape (from the CLI,
     paths relative to the current directory).  *wanted* is a --wanted list.
+    *ignore* (--ignore) adds to the configured filters.ignore list.
     """
     raw: dict = {}
     sources: list = []
@@ -379,6 +388,10 @@ def load_config(config_file: str | Path | None = None, profile: str | None = Non
         sources.append(ppath)
     if overrides:
         raw = merge(raw, check_layer(overrides, Path.cwd()))
+    if ignore:
+        extra = _check_value(ignore, [_CALL], "--ignore", Path.cwd())
+        filters = raw.setdefault("filters", {})
+        filters["ignore"] = [*filters.get("ignore", []), *extra]
     cfg = build_config(raw, wanted)
     cfg.sources = sources
     return cfg
@@ -657,6 +670,10 @@ CONFIG_TEMPLATE = """\
 # A station worked within this many days isn't wanted again for what that QSO
 # covers (a 20m QSO doesn't hide 5BWAS on 40m), nor for any watchlist.
 # suppress_worked_within_days = 5   # 0 = worked today only; -1 = never suppress
+#
+# Stations never shown or alerted on (W1ABC covers W1ABC/P too), unless they
+# call you.  In the TUI, "i NN" or "i CALL" adds one for the session.
+# ignore = ["W1AW", "K1ABC"]
 
 # ── Wanted rules ───────────────────────────────────────────────────────────────
 # Each [[wanted]] entry turns on one rule.  Without any, jtcon uses dxcc, cqz and

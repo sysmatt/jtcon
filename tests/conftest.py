@@ -131,7 +131,7 @@ def make_ctx(cty, load_log):
     adif=False / hamdat=None to drop them.
     """
     def _make(*argv, config=None, adif=True, hamdat=FakeHamdat(), dial_freq=14_074_000,
-              call_patterns=(), alerted=None, json_fh=None, log=None):
+              call_patterns=(), alerted=None, json_fh=None, log=None, ignored=()):
         cfg = make_config(config) if config is not None else v2_config(*argv)
         add_watchlist(cfg, call_patterns)
         logbook, calls = load_log(hamdat=hamdat) if adif else (None, None)
@@ -143,6 +143,7 @@ def make_ctx(cty, load_log):
             alerted={} if alerted is None else alerted,
             dial_freq=dial_freq, de_call=MY_CALL,
             log=log or (lambda m: None),
+            ignored={c: "config" for c in ignored},
         )
     return _make
 

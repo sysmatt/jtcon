@@ -22,6 +22,7 @@ from jtcon.core.events import (Fatal, InputReloaded, LogLine, Ready, SpotEvent,
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
 from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
 from jtcon.core.logbook import qso_from_logged
+from jtcon.core.messages import base_call
 from jtcon.core.protocol import (Close, Decode, LoggedAdif, QsoLogged, Status, encode_highlight,
                                  encode_reply, mode_name, parse_message)
 from jtcon.core.stations import StationTable, fmt_age
@@ -101,6 +102,8 @@ class Engine:
         self.cycle_tracker = CycleTracker()
         self.alerted: dict = {}       # alert key -> monotonic time last heard
         self.stations      = StationTable()
+        # Base call -> "config" or "session": never shown unless it calls us.
+        self.ignored: dict = {base_call(c): "config" for c in config.filters.ignore}
         self.highlights    = Highlights(self._send, _rgb(config.actions.highlight_background),
                                         _rgb(config.actions.highlight_foreground))
 
@@ -183,6 +186,8 @@ class Engine:
         for src in cfg.sources:
             log(f"[config] Loaded {src}")
         log(f"[config] Wanted rules: {', '.join(w.name for w in cfg.wanted) or 'none'}")
+        if self.ignored:
+            log(f"[ignore] {len(self.ignored)} call(s) ignored: {', '.join(self.ignored)}")
 
         # ── cty.dat ───────────────────────────────────────────────────────────
         cty_path = cfg.inputs.cty
@@ -483,7 +488,7 @@ class Engine:
         return DecodeContext(
             config=self.config, cty=self.cty, logbook=self.logbook, calls=self.calls,
             rules=self.rules, json_fh=self.json_fh, hamdat=self.hamdat, alerted=self.alerted, dial_freq=self.dial_freq,
-            de_call=self.de_call, log=self.log,
+            de_call=self.de_call, log=self.log, ignored=self.ignored,
         )
 
     def _on_decode(self, d: Decode, data: bytes, schema: int, addr) -> None:
@@ -517,6 +522,10 @@ class Engine:
         ctx = self.context()
         for station in self.stations.all():
             r = judge(station.decode, ctx)
+            if r is not None and r.ignored:
+                self.stations.remove(station)
+                self.highlights.clear(station.callsign)
+                continue
             station.wanted = r.wanted if r is not None else []   # None: was shown for its hit
             self._update_highlight(station)
             if r is not None:
@@ -541,6 +550,30 @@ class Engine:
         self.log(f"[cmd] ► Reply sent to {station.callsign} [{station.idx:02d}]"
                  f"  msg={station.decode.message!r}"
                  f"  → {station.addr[0]}:{station.addr[1]}")
+
+    def ignore(self, call: str) -> None:
+        """Ignore *call* (and its portable forms) for the rest of the session:
+        drop it from the buffer and WSJT-X's highlights."""
+        base = base_call(call)
+        if not base:
+            return
+        if base in self.ignored:
+            self.log(f"[ignore] {base} is already ignored.")
+            return
+        self.ignored[base] = "session"
+        for station in self.stations.all():
+            if base_call(station.callsign) == base:
+                self.stations.remove(station)
+                self.highlights.clear(station.callsign)
+        self.log(f"[ignore] {base} ignored for this session ({len(self.ignored)} ignored;"
+                 f" u {base} to undo).")
+
+    def unignore(self, call: str) -> None:
+        base = base_call(call)
+        if self.ignored.pop(base, None) is None:
+            self.log(f"[ignore] {base or call} is not ignored.")
+            return
+        self.log(f"[ignore] {base} is no longer ignored ({len(self.ignored)} ignored).")
 
     def clear_buffer(self) -> int:
         self.highlights.clear_all()
