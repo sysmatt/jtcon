@@ -11,11 +11,10 @@ import pytest
 
 import jtcon.core.adif
 from jtcon.config import merge
-from jtcon.core.adif import AdifLog
 from jtcon.core.engine import Engine
-from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StatusChanged
+from jtcon.core.events import Fatal, InputReloaded, LogLine, Ready, SpotEvent, StatusChanged
 import wsjtx_packets as pk
-from conftest import CTY_PATH, LOG_PATH, FakeSock, make_config
+from conftest import CTY_PATH, LOG_PATH, FakeSock, load_adif, make_config
 
 ADDR = ("127.0.0.1", 2237)
 ORANGE = ((255, 165, 0), (0, 0, 0))
@@ -215,12 +214,6 @@ def attach(engine):
     engine._loop_thread = threading.get_ident()
 
 
-def _watch_log(engine, path):
-    engine.adif_log = AdifLog([path], engine.cty, engine.hamdat,
-                              qsl_only=engine.config.entity_needs_lotw, log=engine.log)
-    engine._adif_mtimes = engine._mtimes([path])
-
-
 def _touch_later(path):
     st = path.stat()
     os.utime(path, (st.st_atime, st.st_mtime + 5))
@@ -234,7 +227,7 @@ def test_decodes_wait_for_a_reload(make_engine, tmp_path):
     script.write_text(f'#!/bin/sh\necho "uploading $1"\necho "$@" > {out}\n')
     script.chmod(0o755)
     e = make_engine(config={"actions": {"script": {"on_log_reload": str(script)}}})
-    _watch_log(e, log)
+    load_adif(e, [log])
 
     async def scenario():
         attach(e)
@@ -261,14 +254,15 @@ def test_qso_logged_checks_the_log_at_once(make_engine, tmp_path):
     log = tmp_path / "log.adi"
     shutil.copy(LOG_PATH, log)
     e = make_engine()
-    _watch_log(e, log)
+    load_adif(e, [log])
 
     async def scenario():
         attach(e)
         e.datagram_received(pk.qso_logged("VK3XY"), ADDR)          # file not written yet
         assert not e._reloading
         with log.open("a") as f:
-            f.write("<call:5>VK3XY <band:3>20m <qso_date:8>20261012 <EOR>\n")
+            f.write("<call:5>VK3XY <band:3>20m <mode:3>FT8 <qso_date:8>20261012"
+                    " <time_on:6>123000 <EOR>\n")
         _touch_later(log)
         e.datagram_received(pk.logged_adif("<call:5>VK3XY <eor>"), ADDR)
         assert e._reloading
@@ -276,30 +270,50 @@ def test_qso_logged_checks_the_log_at_once(make_engine, tmp_path):
             await asyncio.sleep(0.01)
 
     asyncio.run(scenario())
-    assert e.adif_log.total_qsos == 10 and "VK3XY" in e.adif_log.worked_calls
+    # The file's record and the one WSJT-X reported are the same QSO.
+    assert logs(e)[-1] == "[adif] Reloaded 10 QSOs from 1 file(s)."
+    assert len(e.logbook) == 10 and "VK3XY" in e.adif_log.worked_calls
+
+
+def test_qso_logged_marks_the_call_worked_at_once(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert spots(e)[-1].result.needed_flags                # wanted
+    e.datagram_received(pk.qso_logged("VK3XY"), ADDR)      # the file isn't written yet
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert spots(e)[-1].result.needed_flags == []          # worked today: suppressed
+    assert "VK" in e.adif_log.worked_dxcc and len(e.logbook) == 10
+    assert e.adif_log.worked_calls_by_band["20m"] >= {"VK3XY"}
+
+
+def test_qso_logged_without_any_log_is_just_reported(make_engine):
+    e = make_engine(adif=False)
+    e.datagram_received(pk.qso_logged("VK3XY"), ADDR)
+    assert logs(e) == ["[qso] Logged VK3XY"] and e.adif_log is None
 
 
 def test_unreadable_reload_is_reported_once(make_engine, tmp_path, monkeypatch):
     log = tmp_path / "log.adi"
     shutil.copy(LOG_PATH, log)
     e = make_engine()
-    _watch_log(e, log)
+    load_adif(e, [log])
 
     def broken(*a, **kw):
         raise ValueError("bad file")
 
     async def scenario():
         attach(e)
-        monkeypatch.setattr("jtcon.core.engine.AdifLog", broken)
+        monkeypatch.setattr(e.adif_input, "read", broken)
         _touch_later(log)
-        e.check_logs()
+        e.check_inputs()
         while e._reloading:
             await asyncio.sleep(0.01)
-        e.check_logs()                                   # same file: no retry
+        e.check_inputs()                                 # same file: no retry
         assert not e._reloading
 
     asyncio.run(scenario())
-    assert logs(e) == ["[adif] Reload failed: bad file"]
+    assert logs(e) == ["[adif] Reload failed: bad file — keeping the previous data"]
+    assert len(e.logbook) == 9
 
 
 # ── Startup and run() ─────────────────────────────────────────────────────────
@@ -399,3 +413,77 @@ def test_log_reload_script_failure_is_logged(make_engine, tmp_path):
     e._run_log_reload_script([LOG_PATH])
     assert logs(e)[0].startswith("[on_log_reload] [Errno 2]")
 
+
+
+# ── Watchlist reloads ─────────────────────────────────────────────────────────
+
+def _reload(e):
+    async def scenario():
+        attach(e)
+        e.check_inputs()
+        while e._reloading:
+            await asyncio.sleep(0.01)
+    asyncio.run(scenario())
+
+
+def _rewrite(path, text):
+    path.write_text(text)
+    _touch_later(path)
+
+
+def test_watchlists_reload_when_edited(tmp_path, no_wsjt_logs):
+    calls, msgs = tmp_path / "calls.txt", tmp_path / "msgs.txt"
+    calls.write_text("^VK\n")
+    msgs.write_text("DX\n")
+    e = _engine(tmp_path, {"wanted": [{"rule": "callsigns", "files": [str(calls)]},
+                                      {"rule": "message", "files": [str(msgs)]},
+                                      {"rule": "pota"}]})
+    assert e._load_inputs()
+    _rewrite(calls, "^VK\n^ZL\n")
+    _rewrite(msgs, "JA\n")
+    e.events.clear()
+    _reload(e)
+    assert logs(e) == [f"[callsigns] Reloaded 2 pattern(s) from {calls}",
+                       f"[message] Reloaded 1 pattern(s) from {msgs}"]
+    assert [ev.name for ev in e.events if isinstance(ev, InputReloaded)] == [
+        "callsigns", "message"]
+    assert [p.pattern for p, _ in e.call_patterns] == ["^VK", "^ZL"]
+    # The POTA keyword stays among the message patterns.
+    assert [p.pattern for p, _ in e.msg_patterns] == ["JA", r"\bPOTA\b"]
+    e.events.clear()
+    _reload(e)                                         # nothing changed
+    assert e.events == []
+
+
+def test_states_file_reloads(tmp_path, no_wsjt_logs, monkeypatch):
+    monkeypatch.setattr("jtcon.core.engine.HamdatLookup", lambda path: object())
+    states = tmp_path / "states.txt"
+    states.write_text("DE\n")
+    hamdat = tmp_path / "no-hamdat.db"
+    hamdat.write_text("")
+    e = _engine(tmp_path, {"wanted": [{"rule": "states", "states": ["AK"],
+                                       "file": str(states)}]})
+    assert e._load_inputs() and e.state_set == {"AK", "DE"}
+    _rewrite(states, "DE\nRI\n")
+    _reload(e)
+    assert e.state_set == {"AK", "DE", "RI"}
+    assert logs(e)[-1] == "[states] Reloaded 3 state(s): AK, DE, RI"
+
+
+def test_a_broken_watchlist_keeps_the_previous_one(tmp_path, no_wsjt_logs):
+    calls = tmp_path / "calls.txt"
+    calls.write_text("^VK\n")
+    e = _engine(tmp_path, {"wanted": [{"rule": "callsigns", "files": [str(calls)]}]})
+    assert e._load_inputs()
+    calls.unlink()
+    e.events.clear()
+    _reload(e)
+    assert logs(e)[0].startswith("[callsigns] Reload failed: [Errno 2]")
+    assert logs(e)[0].endswith("— keeping the previous data")
+    assert [p.pattern for p, _ in e.call_patterns] == ["^VK"]
+    e.events.clear()
+    _reload(e)                                         # still missing: not retried
+    assert e.events == []
+    calls.write_text("^ZL\n")                          # back again
+    _reload(e)
+    assert [p.pattern for p, _ in e.call_patterns] == ["^ZL"]

@@ -1,10 +1,11 @@
-"""ADIF parsing and the worked/confirmed index built from it (AdifLog)."""
+"""ADIF parsing, the ADIF input, and the worked/confirmed index built from it."""
 
 from datetime import date
 from pathlib import Path
 
-from jtcon.core.adif import WSJT_LOG_SEARCH_PATHS, AdifLog, parse_adif
+from jtcon.core.adif import WSJT_LOG_SEARCH_PATHS, parse_adif
 from jtcon.core.decode import _entity_info
+from jtcon.core.inputs import AdifInput
 from conftest import LOG_PATH, FakeHamdat, v2_config
 
 
@@ -39,7 +40,6 @@ def test_parse_adif_empty(tmp_path):
 
 def test_worked_index(make_adif):
     a = make_adif()
-    assert a.total_qsos == 9
     assert a.worked_calls == {"W1ABC", "K2XYZ", "JA1XYZ", "DL1ABC", "W9ZZZ",
                               "G4ABC", "EA8ABC", "K5TX"}
     assert a.worked_grids == {"FN42", "JO62"}          # 6-char grids cut to 4
@@ -102,9 +102,9 @@ def test_states_without_hamdat(make_adif):
 
 def test_unreadable_file_is_logged_and_skipped(cty, tmp_path):
     logged = []
-    a = AdifLog([tmp_path / "missing.adi", LOG_PATH], cty, FakeHamdat(),
-                      log=logged.append)
-    assert a.total_qsos == 9
+    logbook, _ = AdifInput([tmp_path / "missing.adi", LOG_PATH], cty, FakeHamdat(),
+                           log=logged.append).load()
+    assert len(logbook) == 9
     assert len(logged) == 1 and logged[0].startswith("[adif] Cannot read missing.adi")
 
 

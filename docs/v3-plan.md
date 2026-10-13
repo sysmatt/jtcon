@@ -426,7 +426,7 @@ jtcon --adif /home/k2tta/ham/data/qrzlog.adif /home/k2tta/.local/share/WS/wsjtx_
 
 as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 
-### Phase 3: events and engine ✅ (pending Matt's live check)
+### Phase 3: events and engine ✅
 - [x] **From Matt:** WS suite log auto-discovered.  WSJT-X and its forks keep
       `wsjtx_log.adi` in Qt's per-app data directory, named after the program, so
       the search covers `WSJT-X`, `WSJT-X Exp` and `WS` under `~/.local/share`
@@ -464,15 +464,42 @@ as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
       dial change, QSO Logged, reload holding, script, startup errors, a real UDP
       `run()`), `test_stations.py`; protocol tests cover every message type; the e2e
       session checks highlights set and cleared as WSJT-X would see them
-- [ ] **Checkpoint: Matt's live test**: same display as phase 2; wanted stations
-      highlighted in WSJT-X; logging a QSO reloads at once and runs `up.sh`
+- [x] **Checkpoint: Matt's live test**: same display as phase 2; wanted stations
+      highlighted in WSJT-X; logging a QSO reloads at once and runs `up.sh`.
+      Passed, no problems
 
-### Phase 4: inputs and logbook
-- [ ] Input interface with change detection and reload events
-- [ ] Logbook of normalized QSO records with confirmation sets, merging duplicates
-      across sources
-- [ ] Watchlist files reload on edit
-- [ ] QSO Logged (type 5) marks a call worked immediately
+### Phase 4: inputs and logbook ✅ (pending Matt's live check)
+- [x] Input interface (`core/inputs.py`): `changed()` by file mtimes, `load()` in a
+      worker thread, `skip()` after a failure so a broken file isn't retried until
+      it changes again.  `AdifInput`, `PatternInput` (callsigns, message),
+      `StatesInput`.  The engine checks every input as it did the ADIF logs (each
+      packet, every second, on QSO Logged), holds decodes during any reload, logs
+      `[name] Reloaded …` and emits `InputReloaded(name)`.  A failed reload keeps
+      the previous data
+- [x] Logbook (`core/logbook.py`): normalized `QSO` records (call, date, time, band,
+      mode, grid, dxcc, country, cqz, ituz, state, confirmations, sources).
+      Confirmations: `lotw`, `qrz`, `eqsl`, `card` (see Inputs above).  Records from
+      different sources are merged when call, band and mode agree and the start
+      times are within 15 minutes (or the same day when either has no time); one
+      source logging a call twice stays two QSOs.  Merging unions confirmations and
+      fills missing fields.  The startup summary reports merged duplicates
+- [x] `AdifLog` split: `core/adif.py` keeps discovery and parsing;
+      `core/worked.py` `WorkedIndex` is built from Logbook records with v2's sets,
+      so the display is unchanged.  Only LoTW counts as a confirmation until
+      phase 5 (Matt: wait for the new rules)
+- [x] `AdifInput` re-parses only the files that changed
+- [x] Watchlists and the states file reload on edit
+- [x] QSO Logged marks the call worked at once (worked index and logbook), before
+      the log file is written; the file's record is merged with it on reload.
+      Logged QSOs not yet in any file are counted separately in the reload line
+- [x] cty.dat prefix lookup by dictionary instead of a scan of every prefix
+      (same results, checked against the old lookup on 58,000 calls): a
+      30,000-QSO load went from 3.3 s to 0.6 s
+- [x] Tests: 275 pass; render snapshot unchanged.  New `test_logbook.py`;
+      engine tests for QSO Logged marking, watchlist/states reloads and broken
+      watchlists; the e2e writes the logged QSO to the file and checks the merge
+- [ ] **Checkpoint: Matt's live test**: same display; editing a watchlist reloads
+      it; logging a QSO shows `Reloaded N QSOs` with no double count
 
 ### Phase 5: wanted rules
 - [ ] Rule interface, registry, `--list-rules`

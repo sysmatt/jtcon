@@ -40,7 +40,8 @@ _PORTABLE_SUFFIXES = frozenset({"P", "M", "MM", "AM", "QRP", "QRPP", "A", "B"})
 class CtyDat:
     def __init__(self):
         self._exact:    dict = {}
-        self._prefixes: list = []
+        self._prefixes: list = []    # (prefix, entry), longest first
+        self._by_prefix: dict = {}   # prefix -> entry; the first listed wins
 
     def load(self, path: Path) -> None:
         self._parse(path.read_text(encoding="utf-8", errors="replace"))
@@ -80,6 +81,8 @@ class CtyDat:
                 else:
                     self._prefixes.append((clean.upper(), entry))
         self._prefixes.sort(key=lambda x: len(x[0]), reverse=True)
+        for prefix, entry in self._prefixes:
+            self._by_prefix.setdefault(prefix, entry)
 
     def lookup(self, callsign: str) -> dict | None:
         call = callsign.upper().strip()
@@ -99,8 +102,10 @@ class CtyDat:
         return self._prefix_match(prefix) or self._prefix_match(home)
 
     def _prefix_match(self, call: str) -> dict | None:
-        for prefix, entry in self._prefixes:
-            if call.startswith(prefix):
+        """The entry for the longest prefix of *call* that cty.dat lists."""
+        for n in range(len(call), 0, -1):
+            entry = self._by_prefix.get(call[:n])
+            if entry is not None:
                 return dict(entry)
         return None
 

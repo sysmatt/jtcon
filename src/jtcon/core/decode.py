@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from jtcon.config import Config
-from jtcon.core.adif import AdifLog
+from jtcon.core.worked import WorkedIndex
 from jtcon.core.alerts import _build_alert_msg, _send_alerts
 from jtcon.core.bands import _5BWAS_BANDS, _WAS_STATES, _freq_to_band
 from jtcon.core.cty import CtyDat
@@ -28,7 +28,7 @@ class DecodeContext:
     """Everything evaluate() needs besides the decode itself."""
     config:        Config
     cty:           CtyDat
-    adif_log:      AdifLog | None
+    adif_log:      WorkedIndex | None
     json_fh:       object
     call_patterns: list
     msg_patterns:  list

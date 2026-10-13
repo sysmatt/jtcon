@@ -46,3 +46,10 @@ class StatusChanged:
 class UdpDown:
     """The receive socket failed; no more decodes will arrive."""
     text: str
+
+
+@dataclass
+class InputReloaded:
+    """An input (*name*: "adif", "callsigns", "message", "states") changed on disk
+    and was loaded again."""
+    name: str

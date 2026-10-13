@@ -7,14 +7,13 @@ from pathlib import Path
 
 import pytest
 
-import jtcon.core.adif
 import jtcon.core.decode
 import jtcon.tui.render
 from jtcon.config import build_config, check_layer
-from jtcon.core.adif import AdifLog
 from jtcon.core.cty import CtyDat
 from jtcon.core.decode import DecodeContext, debug_text, evaluate
 from jtcon.core.engine import Engine
+from jtcon.core.inputs import AdifInput
 from jtcon.core.patterns import keyword_patterns
 from jtcon.core.protocol import Decode, parse_message
 from jtcon.tui.render import _render
@@ -44,7 +43,7 @@ class _FrozenDatetime(datetime):
 
 @pytest.fixture(autouse=True)
 def frozen_today(monkeypatch):
-    for mod in (jtcon.core.adif, jtcon.core.decode, jtcon.tui.render):
+    for mod in (jtcon.core.decode, jtcon.tui.render):
         monkeypatch.setattr(mod, "datetime", _FrozenDatetime)
 
 
@@ -80,11 +79,20 @@ def cty():
     return c
 
 
+def load_adif(engine, paths=(LOG_PATH,)) -> AdifInput:
+    """Load *paths* into *engine* as its startup would, and watch them."""
+    inp = AdifInput(paths, engine.cty, engine.hamdat,
+                    qsl_only=engine.config.entity_needs_lotw, log=engine.log)
+    engine.logbook, engine.adif_log = inp.load()
+    engine.adif_input, engine.inputs = inp, [inp]
+    return inp
+
+
 @pytest.fixture
 def make_adif(cty):
+    """The worked index for *paths*, as the decode context gets it."""
     def _make(paths=(LOG_PATH,), hamdat=FakeHamdat(), qsl_only=False):
-        return AdifLog([Path(p) for p in paths], cty, hamdat,
-                       qsl_only=qsl_only, log=lambda m: None)
+        return AdifInput(paths, cty, hamdat, qsl_only=qsl_only).load()[1]
     return _make
 
 
@@ -148,7 +156,8 @@ def make_engine(cty, make_adif):
         cfg = make_config(config) if config is not None else v2_config(*argv)
         engine = Engine(cfg, None, tx_sock or FakeSock())
         engine.cty, engine.hamdat = cty, hamdat
-        engine.adif_log = make_adif(hamdat=hamdat, qsl_only=cfg.entity_needs_lotw) if adif else None
+        if adif:
+            load_adif(engine)
         engine.call_patterns = list(call_patterns)
         engine.msg_patterns = keyword_patterns([w.rule for w in cfg.wanted])
         states = cfg.rule("states")

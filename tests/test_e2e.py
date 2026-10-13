@@ -255,13 +255,16 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     app.wait_for(r"\[list\] 4 NEEDED/MATCH entries \(last heard at bottom\)")
     app.wait_for(r"\(last heard \d+s ago, ×1\)")
 
-    # ── ADIF hot reload: a LoTW-confirmed VK3XY QSO, and it's no longer needed ──
+    # ── ADIF hot reload: WSJT-X writes K2XYZ's QSO (merged with the one it
+    #    reported), and a LoTW-confirmed VK3XY QSO arrives: no longer needed ──
     adif = home / ".local" / "share" / "WSJT-X" / "wsjtx_log.adi"
     with adif.open("a") as f:
+        f.write("<call:5>K2XYZ <band:3>20m <mode:3>FT8 <qso_date:8>20261012"
+                " <time_on:6>123000 <EOR>\n")
         f.write("<call:5>VK3XY <band:3>20m <mode:3>FT8 <qso_date:8>20240101"
                 " <lotw_qsl_rcvd:1>Y <EOR>\n")
     wsjtx.sendto(pk.decode("CQ VK3XY QF22", time_ms=45_030_000), jt)
-    app.wait_for(r"\[adif\] Reloaded 10 QSOs from 1 file\(s\)\.")
+    app.wait_for(r"\[adif\] Reloaded 11 QSOs from 1 file\(s\)\.")
     app.wait_for(r"00  123030z.{0,60}CQ VK3XY QF22")     # same station keeps index 00
 
     # ── Dial change clears the buffer ─────────────────────────────────────────

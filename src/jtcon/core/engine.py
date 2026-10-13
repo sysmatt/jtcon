@@ -13,20 +13,23 @@ import threading
 import time
 
 from jtcon.config import Config
-from jtcon.core.adif import AdifLog, _find_wsjt_logs
+from jtcon.core.adif import _find_wsjt_logs
 from jtcon.core.cty import CTY_DAT_URL, CTY_MAX_AGE_DAYS, CtyDat, download_cty
 from jtcon.core.cycle import CycleTracker
 from jtcon.core.decode import DecodeContext, debug_text, evaluate
-from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StatusChanged, UdpDown
-from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup, load_state_file
-from jtcon.core.patterns import ACTIVATION_KEYWORDS, keyword_patterns, load_regex_patterns
+from jtcon.core.events import (Fatal, InputReloaded, LogLine, Ready, SpotEvent,
+                               StatusChanged, UdpDown)
+from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
+from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
+from jtcon.core.logbook import qso_from_logged
+from jtcon.core.patterns import ACTIVATION_KEYWORDS, keyword_patterns
 from jtcon.core.protocol import (Close, Decode, LoggedAdif, QsoLogged, Status, encode_highlight,
                                  encode_reply, mode_name, parse_message)
 from jtcon.core.stations import StationTable, fmt_age
 
 
 STALE_REPLY_S  = 120   # warn when replying to a station last heard longer ago than this
-LOG_CHECK_S    = 1.0   # how often the ADIF files are checked for changes
+INPUT_CHECK_S  = 1.0   # how often logs and watchlists are checked for changes
 
 
 def _rgb(hex_color: str) -> tuple:
@@ -86,11 +89,15 @@ class Engine:
         self.tx_sock = tx_sock      # replies, highlights, proxy forwarding
 
         self.cty           = CtyDat()
-        self.adif_log      = None
+        self.logbook       = None     # Logbook: every QSO, merged across sources
+        self.adif_log      = None     # WorkedIndex built from the logbook
+        self.adif_input    = None
+        self.inputs: list  = []       # inputs watched for changes
         self.hamdat        = None
         self.json_fh       = None
         self.call_patterns = []
         self.msg_patterns  = []
+        self.keyword_patterns = []    # pota/sota/iota; always among msg_patterns
         self.state_set     = set()
         self.proxy_dests   = []
         self.cycle_tracker = CycleTracker()
@@ -109,7 +116,6 @@ class Engine:
         self._loop_thread = None
         self._transport   = None
         self._stopped     = None
-        self._adif_mtimes: dict = {}
         self._reloading   = False
         self._held        = collections.deque()   # datagrams waiting for a reload
 
@@ -145,7 +151,7 @@ class Engine:
         self._emit(Ready(f"[ready] Listening on {cfg.udp.host}:{cfg.udp.port}  ({scope})"))
         self._transport, _ = await self._loop.create_datagram_endpoint(
             lambda: _Protocol(self), sock=self.sock)
-        checker = asyncio.create_task(self._check_logs_periodically())
+        checker = asyncio.create_task(self._check_inputs_periodically())
         try:
             await self._stopped.wait()
         finally:
@@ -212,12 +218,13 @@ class Engine:
         if states_rule:
             self.state_set = set(states_rule.settings["states"])
             if states_rule.settings["file"]:
+                inp = StatesInput(self.state_set, states_rule.settings["file"])
                 try:
-                    self.state_set |= load_state_file(states_rule.settings["file"])
+                    self.state_set = inp.load()
                 except OSError as exc:
                     return self._fatal(f"[states] Cannot load state list: {exc}")
-            log(f"[states] {len(self.state_set)} state(s):"
-                f" {', '.join(sorted(self.state_set))}")
+                self.inputs.append(inp)
+            log(f"[states] {StatesInput.describe(self.state_set)}")
 
         db_path = cfg.inputs.hamdat
         if db_path.exists():
@@ -245,13 +252,14 @@ class Engine:
                 adif_paths.append(p)
 
         if adif_paths:
+            inp = AdifInput(adif_paths, self.cty, self.hamdat,
+                            qsl_only=cfg.entity_needs_lotw, log=log)
             try:
-                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat,
-                                        qsl_only=cfg.entity_needs_lotw, log=log)
+                self.logbook, self.adif_log = inp.load()
                 for p in adif_paths:
                     log(f"[adif] Loaded: {p.name}")
                 al = self.adif_log
-                summary = (f"[adif] {al.total_qsos} QSOs across {len(adif_paths)} file(s)"
+                summary = (f"[adif] {self._qso_count()} across {len(adif_paths)} file(s)"
                            f" — {len(al.worked_calls)} calls,"
                            f" {len(al.worked_dxcc_all)} DXCC,"
                            f" {len(al.worked_cqz_all)} CQ zones worked")
@@ -259,26 +267,28 @@ class Engine:
                     summary += (f"; {len(al.worked_dxcc)} DXCC,"
                                 f" {len(al.worked_cqz)} CQ zones LoTW-confirmed")
                 log(summary)
-                self._adif_mtimes = self._mtimes(adif_paths)
+                self.adif_input = inp
+                self.inputs.append(inp)
             except Exception as exc:
                 log(f"[adif] Failed to load: {exc}")
         else:
             log("[adif] No ADIF log found — NEEDED detection disabled")
 
         # ── Watchlists ────────────────────────────────────────────────────────
-        try:
-            for key, attr in (("callsigns", "call_patterns"), ("message", "msg_patterns")):
-                spec = cfg.rule(key)
-                if spec:
-                    files = spec.settings["files"]
-                    patterns = load_regex_patterns(files, log=log)
-                    setattr(self, attr, patterns)
-                    log(f"[{key}] {len(patterns)} pattern(s)"
-                        f" from {', '.join(str(f) for f in files)}")
-        except OSError as exc:
-            return self._fatal(f"[wanted] Cannot read pattern file: {exc}")
         rules = [w.rule for w in cfg.wanted]
-        self.msg_patterns.extend(keyword_patterns(rules))
+        self.keyword_patterns = keyword_patterns(rules)
+        self.msg_patterns = list(self.keyword_patterns)
+        for key in ("callsigns", "message"):
+            spec = cfg.rule(key)
+            if spec:
+                inp = PatternInput(key, spec.settings["files"], log=log)
+                try:
+                    patterns = inp.load()
+                except OSError as exc:
+                    return self._fatal(f"[wanted] Cannot read pattern file: {exc}")
+                self.inputs.append(inp)
+                self._set_patterns(key, patterns)
+                log(f"[{key}] {inp.describe(patterns)}")
         for key, word in ACTIVATION_KEYWORDS.items():
             if key in rules:
                 log(f"[{key}] {word} pattern active")
@@ -301,54 +311,66 @@ class Engine:
             log(f"[proxy] Forwarding all packets to: {targets}")
         return True
 
-    # ── ADIF change detection and reload ──────────────────────────────────────
+    # ── Input change detection and reload ─────────────────────────────────────
 
-    @staticmethod
-    def _mtimes(paths) -> dict:
-        out = {}
-        for p in paths:
-            try:
-                out[p] = p.stat().st_mtime
-            except OSError:
-                pass
-        return out
+    def _qso_count(self) -> str:
+        lb = self.logbook
+        text = f"{len(lb) - lb.unsaved} QSOs"
+        if lb.merged:
+            text += f" ({lb.merged} duplicates merged)"
+        return text
 
-    def _logs_changed(self) -> bool:
-        if not (self.adif_log and self._adif_mtimes):
-            return False
-        return self._mtimes(self.adif_log.paths) != self._adif_mtimes
+    def _set_patterns(self, key: str, patterns: list) -> None:
+        if key == "callsigns":
+            self.call_patterns = patterns
+        else:
+            self.msg_patterns = patterns + self.keyword_patterns
 
-    def check_logs(self) -> None:
-        """Start a reload if any ADIF file changed.  Decodes received meanwhile
-        are held and evaluated against the new log once it's loaded."""
-        if self._reloading or not self._logs_changed():
+    def check_inputs(self) -> None:
+        """Start a reload if any log or watchlist changed.  Decodes received
+        meanwhile are held and evaluated against the new data once it's loaded."""
+        if self._reloading:
             return
-        self._reloading = True
-        asyncio.ensure_future(self._reload())
+        changed = [inp for inp in self.inputs if inp.changed()]
+        if changed:
+            self._reloading = True
+            asyncio.ensure_future(self._reload(changed))
 
-    async def _reload(self) -> None:
-        paths = self.adif_log.paths
+    async def _reload(self, changed: list) -> None:
         try:
-            mtimes = self._mtimes(paths)
-            self.adif_log = await asyncio.to_thread(
-                AdifLog, paths, self.cty, self.hamdat,
-                qsl_only=self.config.entity_needs_lotw, log=self.log)
-            self._adif_mtimes = mtimes
-            self.log(f"[adif] Reloaded {self.adif_log.total_qsos} QSOs"
-                     f" from {len(paths)} file(s).")
-            self._run_log_reload_script(paths)
-        except Exception as exc:
-            self.log(f"[adif] Reload failed: {exc}")
-            self._adif_mtimes = self._mtimes(paths)   # don't retry a broken file forever
+            for inp in changed:
+                try:
+                    value = await asyncio.to_thread(inp.load)
+                except Exception as exc:
+                    inp.skip()            # don't retry a broken file forever
+                    self.log(f"[{inp.name}] Reload failed: {exc} — keeping the previous data")
+                    continue
+                self._apply_reload(inp, value)
+                self._emit(InputReloaded(inp.name))
         finally:
             self._reloading = False
             while self._held and not self._reloading:
                 self._handle_datagram(*self._held.popleft())
 
-    async def _check_logs_periodically(self) -> None:
+    def _apply_reload(self, inp, value) -> None:
+        if inp is self.adif_input:
+            self.logbook, self.adif_log = value
+            unsaved = (f", plus {self.logbook.unsaved} logged but not in the files yet"
+                       if self.logbook.unsaved else "")
+            self.log(f"[adif] Reloaded {self._qso_count()} from {len(inp.paths)} file(s)"
+                     f"{unsaved}.")
+            self._run_log_reload_script(inp.paths)
+        elif isinstance(inp, StatesInput):
+            self.state_set = value
+            self.log(f"[states] Reloaded {inp.describe(value)}")
+        else:
+            self._set_patterns(inp.name, value)
+            self.log(f"[{inp.name}] Reloaded {inp.describe(value)}")
+
+    async def _check_inputs_periodically(self) -> None:
         while True:
-            await asyncio.sleep(LOG_CHECK_S)
-            self.check_logs()
+            await asyncio.sleep(INPUT_CHECK_S)
+            self.check_inputs()
 
     def _run_log_reload_script(self, paths) -> None:
         script = self.config.actions.script_on_log_reload
@@ -391,7 +413,7 @@ class Engine:
                 self.tx_sock.sendto(data, dest)
             except OSError:
                 pass
-        self.check_logs()
+        self.check_inputs()
         if self._reloading:
             self._held.append((data, addr))
         else:
@@ -434,9 +456,15 @@ class Engine:
         if isinstance(msg, QsoLogged) and msg.dx_call:
             self.log(f"[qso] Logged {msg.dx_call}")
             self.highlights.clear(msg.dx_call.upper())
+            if self.adif_input:
+                # Worked from now on, even before the log file is written; the
+                # file's record is merged with this one when it's reloaded.
+                q = qso_from_logged(msg, self.cty, self.hamdat)
+                self.adif_input.extra.append(q)
+                self.adif_log.add(self.logbook.add(q))
         # Usually the log file is already written; if not, the periodic check
         # catches it.  Nothing is read until the file's mtime changes.
-        self.check_logs()
+        self.check_inputs()
 
     def context(self) -> DecodeContext:
         return DecodeContext(
