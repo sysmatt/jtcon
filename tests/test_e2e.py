@@ -321,6 +321,8 @@ def test_cli_help(home):
     for flag in ("--config", "--profile", "--wanted", "--scope", "--show-config",
                  "--init-config", "--list-rules", "--save", "--mouse", "--no-color"):
         assert flag in r.stdout
+    assert "jtcon --wanted dxcc,was,pota" in r.stdout
+    assert 'states = ["AK", "DE"]' in r.stdout
     for gone in ("--adif", "--qsl-only", "--alert-ntfy", "--5bwas"):
         assert gone not in r.stdout
 
@@ -335,6 +337,9 @@ def test_cli_list_rules(home):
     r = _run_cli("--list-rules", home=home)
     assert r.returncode == 0
     assert "5bwas" in r.stdout and "files: (required)" in r.stdout
+    assert 'files = ["~/ham/wanted.txt", "~/ham/club.txt"]' in r.stdout
+    assert r"\bPOTA\b     POTA as a word" in r.stdout
+    assert "jtcon --wanted dxcc,callsigns:~/ham/wanted.txt+~/ham/club.txt" in r.stdout
 
 
 def test_cli_init_config_then_show_config(home):

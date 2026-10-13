@@ -32,7 +32,7 @@ def test_defaults_without_a_config_file(tmp_path):
     assert (cfg.udp.host, cfg.udp.port, cfg.udp.proxy) == ("0.0.0.0", 2237, [])
     assert cfg.inputs.cty == CTY_DAT_DEFAULT and cfg.inputs.hamdat == HAMDAT_DB_DEFAULT
     assert not cfg.evaluate_all and not cfg.show_all
-    assert cfg.filters.suppress_worked_within_days == 0
+    assert cfg.filters.suppress_worked_within_days == 5
     # dxcc, cqz and country, counted by LoTW confirmation.
     assert rules(cfg) == [("dxcc", "dxcc", {"confirm": ["lotw"]}),
                           ("cqz", "cqz", {"confirm": ["lotw"]}),
@@ -165,6 +165,44 @@ def test_wanted_none_and_errors():
         make_config(BASE, wanted="bogus")
     with pytest.raises(ConfigError, match="'message' needs a 'files' setting"):
         make_config(BASE, wanted="message")
+
+
+def test_wanted_values_on_the_command_line(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", "/home/op")
+    cfg = make_config(BASE, wanted="callsigns:~/ham/a.txt+club.txt,message:m.txt,"
+                                   "states:ak+DE,dxcc:worked,pota")
+    assert rules(cfg) == [
+        ("callsigns", "callsigns", {"files": [Path("/home/op/ham/a.txt"), tmp_path / "club.txt"]}),
+        ("message", "message", {"files": [tmp_path / "m.txt"]}),
+        ("states", "states", {"states": ["AK", "DE"], "file": None}),
+        ("dxcc", "dxcc", {"confirm": []}),
+        ("pota", "pota", {})]
+
+
+def test_wanted_value_replaces_the_configured_one():
+    cfg = make_config(BASE, wanted="callsigns:/other.txt,WAS-ARRL:lotw")
+    assert cfg.rule("callsigns").settings["files"] == [Path("/other.txt")]
+    assert cfg.rule("was").name == "WAS-ARRL"           # name and settings kept
+
+
+def test_wanted_states_from_a_file(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    cfg = make_config({}, wanted="states:my.states.txt")
+    assert cfg.rule("states").settings == {"states": [], "file": tmp_path / "my.states.txt"}
+
+
+@pytest.mark.parametrize("wanted, error", [
+    ("pota:x", "rule 'pota' takes no value"),
+    ("callsigns:", "nothing after the ':'"),
+    ("states:AK+s.txt", "either state codes or one file"),
+    ("dxcc:paper", "confirm must be"),
+    ("dxcc:qrz", "not supported yet"),
+    ("dxcc:worked,cqz", "same confirm"),
+])
+def test_wanted_value_errors(wanted, error):
+    with pytest.raises(ConfigError, match=error):
+        make_config({}, wanted=wanted)
 
 
 # ── Validation ────────────────────────────────────────────────────────────────

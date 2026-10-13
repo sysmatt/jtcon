@@ -14,6 +14,26 @@ from jtcon.config import (CONFIG_FILE, CONFIG_TEMPLATE, RULES, ConfigError,
 #  Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
+_EPILOG = """\
+examples:
+  jtcon --wanted dxcc,was,pota        only these rules for this run
+  jtcon --wanted WAS-ARRL,callsigns   a [[wanted]] name works as well as a rule
+  jtcon --wanted none                 no rules: just show the decodes
+  jtcon --wanted pota,callsigns:~/ham/wanted.txt+~/ham/club.txt
+                                      RULE:VALUE gives a rule its files or list,
+  jtcon --wanted was,states:AK+DE     several values joined with +
+  jtcon --profile parks --scope all   profiles/parks.toml, checking every decode
+  jtcon --show-config --wanted was    see what a run would use, without running
+
+lists in the config file (TOML):
+  adif   = ["~/ham/qrzlog.adif", "/data/old.adi"]
+  states = ["AK", "DE"]
+  proxy  = [2238, 2239]
+
+jtcon --list-rules shows each rule's settings and the watchlist file format.
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jtcon",
@@ -21,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
                     f"from {default_config_dir() / CONFIG_FILE} (see --init-config); "
                     "the options below override it for one run.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_EPILOG,
     )
 
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -40,7 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = parser.add_argument_group("overrides for this run")
     run.add_argument("--wanted", metavar="RULES",
                      help="Comma-separated rules or [[wanted]] names to use instead of the "
-                          f"configured list, e.g. dxcc,was,pota; 'none' for no rules "
+                          "configured list, e.g. dxcc,was,pota; RULE:VALUE gives a rule its "
+                          "files or list (callsigns:a.txt+b.txt); 'none' for no rules "
                           f"(rules: {', '.join(RULES)})")
     run.add_argument("--scope", choices=("cq", "all"),
                      help="Check CQ decodes only, or all decodes")

@@ -241,7 +241,7 @@ hamdat = "~/.hamdat/hamdat.db"
 cty    = "~/.jtcon_cty.dat"
 
 [filters]
-suppress_worked_within_days = 0       # -1 = never suppress
+suppress_worked_within_days = 5       # 0 = today only; -1 = never suppress
 
 [[wanted]]
 rule = "dxcc"                 # confirm = ["lotw"] by default
@@ -275,6 +275,9 @@ CLI (the v2 flags are gone):
 ```
 jtcon [--config FILE] [--profile NAME]
       [--wanted dxcc,was,pota,...]       rules or [[wanted]] names for this run; "none"
+                                         RULE:VALUE sets the rule's files/list/confirm:
+                                         callsigns:a.txt+b.txt, states:AK+DE,
+                                         states:my.txt, dxcc:worked
       [--scope cq|all]
       [--port N] [--save FILE] [--mouse] [--no-color] [--debug]
 jtcon --list-rules                       available rules and their settings
@@ -300,7 +303,7 @@ v2 → v3 migration:
 | `--match-calls F...` | `[[wanted]] rule = "callsigns"`, `files = [...]` |
 | `--match-message F...` | `[[wanted]] rule = "message"`, `files = [...]` |
 | `--match-state AK,DE` | `[[wanted]] rule = "states"`, `states = [...]` or `file` |
-| `--worked-lag-days N` | `[filters] suppress_worked_within_days = N` |
+| `--worked-lag-days N` | `[filters] suppress_worked_within_days = N`; default now 5 (v2: 0) |
 | `--alert-command S` | `[actions.script] on_wanted` |
 | `--alert-ntfy T` | `[actions.ntfy] topic` |
 | `--adif-change-script S` | `[actions.script] on_log_reload` |
@@ -386,7 +389,7 @@ Each phase ends with the tests passing and jtcon runnable.
       `handle_packet` still renders.  Phase 3 removes it
 - [x] **Checkpoint: real-world test by Matt** on a live WSJT-X session; no issues found
 
-### Phase 2: configuration and new CLI ✅ (pending Matt's live check)
+### Phase 2: configuration and new CLI ✅
 - [x] `Config` dataclass (`config.py`) replaces `argparse.Namespace` everywhere; the
       core reads it through `cfg.wants(rule)`, `cfg.rule(rule)`, `cfg.evaluate_all`,
       `cfg.show_all` and `cfg.entity_needs_lotw` until phase 5 replaces the v2 checks
@@ -404,9 +407,12 @@ Each phase ends with the tests passing and jtcon runnable.
       `test_config.py`; end-to-end tests run from a config file in the temp HOME
 - [x] Matt's v2 command line translated (below); `test_config.py` checks the profile
       equals the v2 flags exactly
-- [ ] **Checkpoint: Matt runs the translated config live** and confirms the
+- [x] **Checkpoint: Matt runs the translated config live** and confirms the
       behaviour matches v2.  His line already used `--qsl-only`, so the new LoTW
       default changes nothing for him; only some startup log lines read differently
+- [x] After testing: `--wanted RULE:VALUE` (files/lists on the command line),
+      format examples in `--help` / `--list-rules`, and `suppress_worked_within_days`
+      defaults to 5
 
 Matt's v2 command line:
 
@@ -421,6 +427,10 @@ jtcon --adif /home/k2tta/ham/data/qrzlog.adif /home/k2tta/.local/share/WS/wsjtx_
 as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 
 ### Phase 3: events and engine
+- [ ] **First, from Matt:** auto-discover the WS suite log (WSJT-X Improved's fork,
+      https://sourceforge.net/projects/wsjt-x-improved/files/WS_v3.2.1/).  Linux:
+      `~/.local/share/WS/wsjtx_log.adi` (seen on Matt's machine); confirm the
+      macOS/Windows locations from the release docs/source before adding them
 - [ ] Typed events for all WSJT-X messages we use; encoders for Reply and Highlight
 - [ ] `Engine` extracted from `JtconTUI`: UDP, station table, dial-change clearing,
       input reload, alert state

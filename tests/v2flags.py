@@ -71,8 +71,8 @@ def v2_to_config(*argv: str) -> dict:
         put("inputs", "adif", a.adif)
     if a.hamdat:
         put("inputs", "hamdat", a.hamdat)
-    if a.worked_lag_days:
-        put("filters", "suppress_worked_within_days", a.worked_lag_days)
+    # v2 defaulted to 0 (today); v3 defaults to 5 days.
+    put("filters", "suppress_worked_within_days", a.worked_lag_days)
 
     actions: dict = {}
     if a.alert_ntfy:

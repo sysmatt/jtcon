@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from datetime import date
 
 import pytest
 
@@ -284,3 +285,12 @@ def test_json_needed_is_null_without_a_log(make_ctx):
     fh = io.StringIO()
     run(make_ctx(adif=False, json_fh=fh), "CQ VK3XY QF22")
     assert json.loads(fh.getvalue())["needed"] is None
+
+
+def test_default_suppresses_stations_worked_within_5_days(make_ctx):
+    ctx = make_ctx(config={})                       # v3 defaults; "today" is 2026-10-12
+    ctx.adif_log.last_worked["VK3XY"] = date(2026, 10, 7)    # 5 days ago
+    assert flags(ctx, "CQ VK3XY QF22") == ([], [])
+    ctx.adif_log.last_worked["VK3XY"] = date(2026, 10, 6)    # 6 days ago
+    assert flags(ctx, "CQ VK3XY QF22")[0] == ["NEW-DXCC(VK)", "NEW-CQZ(30)",
+                                              "NEW-CTRY(Australia)"]

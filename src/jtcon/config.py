@@ -115,8 +115,8 @@ class InputsConfig:
 
 @dataclass
 class FiltersConfig:
-    # 0 = suppress stations worked today; -1 = never suppress
-    suppress_worked_within_days: int = 0
+    # Stations worked within this many days aren't wanted; 0 = today only; -1 = never
+    suppress_worked_within_days: int = 5
 
 
 @dataclass
@@ -382,21 +382,57 @@ def load_config(config_file: str | Path | None = None, profile: str | None = Non
 #  Building the Config from a merged, validated layer
 # ══════════════════════════════════════════════════════════════════════════════
 
+# The setting a --wanted RULE:VALUE token sets, per rule.
+_CLI_SETTING = {"callsigns": "files", "message": "files", "states": "states",
+                **{k: "confirm" for k in ("dxcc", "cqz", "country", "was", "5bwas")}}
+
+
+def _cli_value(rule: str, value: str, tok: str) -> dict:
+    """Settings from the VALUE in --wanted RULE:VALUE; several values join with +."""
+    setting = _CLI_SETTING.get(rule)
+    if setting is None:
+        raise ConfigError(f"--wanted {tok!r}: rule {rule!r} takes no value")
+    parts = [v.strip() for v in value.split("+") if v.strip()]
+    if not parts:
+        raise ConfigError(f"--wanted {tok!r}: nothing after the ':'")
+    where = f"--wanted {tok!r}"
+    if setting == "confirm":
+        if parts == ["worked"]:
+            return {"confirm": []}
+        bad = [v for v in parts if v not in CONFIRM_SOURCES]
+        if bad:
+            raise ConfigError(f"{where}: confirm must be 'worked', or sources joined with +"
+                              f" ({'+'.join(CONFIRM_SOURCES)}); not {bad[0]!r}")
+    elif setting == "states" and any("/" in v or "." in v for v in parts):
+        if len(parts) > 1:
+            raise ConfigError(f"{where}: give either state codes or one file")
+        return {"file": _check_value(parts[0], _PATH, where, Path.cwd())}
+    return {setting: _check_value(parts, _RULE_SETTINGS[setting], where, Path.cwd())}
+
+
 def _select_wanted(entries: list, selection: str) -> list:
-    """Apply --wanted: rule keys or instance names, comma-separated; "none" for no rules."""
+    """
+    Apply --wanted: comma-separated rule keys or [[wanted]] names; "none" for no
+    rules.  RULE:VALUE sets the rule's main setting, e.g. callsigns:a.txt+b.txt,
+    states:AK+DE, dxcc:worked.
+    """
     tokens = [t.strip() for t in selection.split(",") if t.strip()]
     if tokens == ["none"]:
         return []
     out = []
     for tok in tokens:
-        low = tok.lower()
+        key, _, value = tok.partition(":")
+        low = key.strip().lower()
         match = (next((e for e in entries if e.get("name", "").lower() == low), None)
                  or next((e for e in entries if e["rule"] == low), None))
         if match is None:
             if low not in RULES:
-                raise ConfigError(f"--wanted: {tok!r} is not a rule ({', '.join(RULES)})"
+                raise ConfigError(f"--wanted: {key!r} is not a rule ({', '.join(RULES)})"
                                   " or the name of a [[wanted]] entry")
             match = {"rule": low}
+        if value or tok.endswith(":"):
+            match = {k: v for k, v in match.items() if k not in ("file", "states", "files")}
+            match.update(_cli_value(match["rule"], value, tok))
         out.append(match)
     return out
 
@@ -546,8 +582,42 @@ def list_rules() -> str:
             lines.append(f"  {'':<10} {'':<6}   {key}: {shown}")
     lines += ["", f"Default rules: {', '.join(DEFAULT_WANTED)}",
               f"confirm sources: {', '.join(CONFIRM_SOURCES)}"
-              "  (an empty list means worked is enough)"]
+              "  (an empty list means worked is enough)",
+              "", _RULE_EXAMPLES]
     return "\n".join(lines)
+
+
+_RULE_EXAMPLES = r"""Values on the command line: RULE:VALUE, several values joined with +
+
+  jtcon --wanted dxcc,callsigns:~/ham/wanted.txt+~/ham/club.txt
+  jtcon --wanted message:~/ham/msgs.txt,pota
+  jtcon --wanted 5bwas,states:AK+DE         (or states:~/ham/states.txt)
+  jtcon --wanted dxcc:worked,cqz:worked     (confirm: worked = any QSO counts)
+
+Examples (config.toml):
+
+  [[wanted]]
+  rule  = "callsigns"
+  files = ["~/ham/wanted.txt", "~/ham/club.txt"]   # one file is fine too: files = "x.txt"
+
+  [[wanted]]
+  rule   = "states"
+  states = ["AK", "DE"]           # or a file:  file = "~/ham/states.txt"
+
+  [[wanted]]
+  rule    = "dxcc"
+  confirm = []                    # worked is enough; default ["lotw"]
+
+Watchlist files: one entry per line; lines starting with # and blank lines
+are skipped.
+
+  callsigns  regex, searched in the callsign, upper/lower case alike
+               ^VK          any VK station
+               ^K1ABC$      exactly K1ABC
+               /P$          portable stations
+  message    regex, searched in the whole decoded message
+               \bPOTA\b     POTA as a word anywhere in the message
+  states     two-letter state codes, e.g.  AK"""
 
 
 CONFIG_TEMPLATE = """\
@@ -581,7 +651,7 @@ CONFIG_TEMPLATE = """\
 # cty    = "~/.jtcon_cty.dat"      # refreshed automatically when older than 30 days
 
 [filters]
-# suppress_worked_within_days = 0   # 0 = worked today; -1 = never suppress
+# suppress_worked_within_days = 5   # 0 = worked today only; -1 = never suppress
 
 # ── Wanted rules ───────────────────────────────────────────────────────────────
 # Each [[wanted]] entry turns on one rule.  Without any, jtcon uses dxcc, cqz and
