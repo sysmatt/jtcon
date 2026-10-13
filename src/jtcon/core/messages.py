@@ -24,7 +24,7 @@ _GRID_RE = re.compile(r"\b([A-R]{2}\d{2}(?:[A-X]{2})?)\b", re.IGNORECASE)
 _CQ_RE = re.compile(
     r"^CQ\s+"
     r"(?:(?P<modifier>[A-Z]{1,13})\s+)?"
-    r"(?P<callsign>(?=[A-Z0-9/]*\d)[A-Z0-9/]{3,})"
+    r"(?P<lt><)?(?P<callsign>(?=[A-Z0-9/]*\d)[A-Z0-9/]{3,})(?(lt)>)"
     r"(?:\s+(?P<grid>[A-R]{2}\d{2}(?:[A-X]{2})?))?\s*$",
     re.IGNORECASE,
 )
@@ -39,6 +39,9 @@ def parse_cq_message(msg: str) -> tuple:
         return None, None, None
     modifier = (m.group("modifier") or "").upper()
     callsign = (m.group("callsign") or "").upper()
+    # The longest part of a call ends in a letter; "CQ RR73" is not a CQ from "RR73".
+    if not max(callsign.split("/"), key=len)[-1:].isalpha():
+        return None, None, None
     grid     = (m.group("grid")     or "").upper() or None
     return callsign or None, grid, modifier or None
 

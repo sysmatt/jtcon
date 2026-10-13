@@ -274,17 +274,17 @@ class JtconTUI:
             )
 
     def _cmd_list(self) -> None:
-        """Print NEEDED/MATCH entries from the rolling buffer, most recently heard last."""
+        """Print the wanted stations in the rolling buffer, most recently heard last."""
         hits = self.engine.stations.hits()
         if not hits:
-            self._append_line("[list] No NEEDED/MATCH entries in rolling buffer.")
+            self._append_line("[list] No wanted stations in the rolling buffer.")
             return
         now = time.monotonic()
-        self._append_line(f"[list] {len(hits)} NEEDED/MATCH entries (last heard at bottom) ——")
+        self._append_line(f"[list] {len(hits)} wanted (last heard at bottom) ——")
         for st in hits:
             lines = st.display or [st.callsign]
             # Keep the decode row aligned with the column header; the heard
-            # stats go on the NEEDED/MATCH line below it.
+            # stats go on the WANTED line below it.
             seen = _col(
                 f"(last heard {fmt_age(now - st.last_seen)} ago, ×{st.count})",
                 _DIM, self.config.display.color,
@@ -396,7 +396,7 @@ class JtconTUI:
         control.mouse_handler = handler
 
     def _header(self) -> str:
-        return _header_line(self.config, has_adif=self.engine.adif_log is not None,
+        return _header_line(self.config, has_log=self.engine.logbook is not None,
                             has_hamdat=self.engine.hamdat is not None)
 
     def _fatal(self, msg: str) -> None:

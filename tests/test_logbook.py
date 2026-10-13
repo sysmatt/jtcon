@@ -88,11 +88,13 @@ def test_adif_input_merges_files_and_logged_qsos(cty, tmp_path):
     other = tmp_path / "qrz.adi"
     other.write_text("<call:6>JA1XYZ <band:3>20m <mode:3>FT8 <qso_date:8>20251010"
                      " <lotw_qsl_rcvd:1>Y <eor>\n")
-    inp = AdifInput([LOG_PATH, other], cty, FakeHamdat(), qsl_only=True)
+    inp = AdifInput([LOG_PATH, other], cty, FakeHamdat())
     inp.extra.append(qso("wsjt-x", call="ZL2AB"))
-    logbook, index = inp.load()
+    logbook, calls = inp.load()
     assert (len(logbook), logbook.merged, logbook.unsaved) == (10, 1, 1)
-    assert "JA" in index.worked_dxcc                   # confirmed only in qrz.adi
+    (ja,) = logbook.by_call["JA1XYZ"]
+    assert ja.confirmations == {"lotw"}                # confirmed only in qrz.adi
+    assert calls.confirmed("JA1XYZ", "lotw", "20m") and "ZL2AB" in calls.worked_calls
 
 
 def test_adif_input_parses_only_changed_files(cty, tmp_path, monkeypatch):

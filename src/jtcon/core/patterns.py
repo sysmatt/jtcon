@@ -32,11 +32,6 @@ def load_regex_patterns(file_paths: list, log=None) -> list:
 ACTIVATION_KEYWORDS = {"pota": "POTA", "sota": "SOTA", "iota": "IOTA"}
 
 
-def keyword_patterns(rules) -> list:
-    """Message patterns for the activation rules (pota/sota/iota) among *rules*."""
-    return [(re.compile(rf"\b{ACTIVATION_KEYWORDS[r]}\b", re.IGNORECASE), None)
-            for r in ACTIVATION_KEYWORDS if r in rules]
-
 
 def _regex_matches(value: str, patterns: list) -> list:
     """Return label strings for each (pattern, source) tuple that matches value."""

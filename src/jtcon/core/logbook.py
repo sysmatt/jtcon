@@ -158,6 +158,7 @@ class Logbook:
         self.qsos: list = []
         self.merged = 0           # records that turned out to be duplicates
         self.unsaved = 0          # logged in WSJT-X, not yet found in any file
+        self.by_call: dict = {}   # call -> [QSO]
         self._by_key: dict = {}   # (call, band, mode) -> [QSO]
         for q in qsos:
             self.add(q)
@@ -183,4 +184,5 @@ class Logbook:
         self.qsos.append(rec)
         if rec.call:
             self._by_key.setdefault((rec.call, rec.band, rec.mode), []).append(rec)
+            self.by_call.setdefault(rec.call, []).append(rec)
         return rec

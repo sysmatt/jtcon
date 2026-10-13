@@ -64,7 +64,7 @@ def test_spots_are_shown_with_their_index(tui):
     tui._flush_output()
     assert tui._lines[0].startswith("00  123015z") and "CQ W1ABC FN42" in tui._lines[0]
     assert tui._lines[1].startswith("01  123015z") and "CQ VK3XY QF22" in tui._lines[1]
-    assert tui._lines[2].startswith("  *** NEEDED: NEW-DXCC(VK)")
+    assert tui._lines[2].startswith("  *** WANTED: ❌DXCC(VK)")
     # The station keeps its rendering, without the index, for "list".
     assert tui.engine.stations.find("VK3XY").display == [tui._lines[1][4:], tui._lines[2]]
 
@@ -140,7 +140,7 @@ def test_unknown_command(tui):
 
 
 def test_list(tui, clock):
-    assert command(tui, "list")[-1] == "[list] No NEEDED/MATCH entries in rolling buffer."
+    assert command(tui, "list")[-1] == "[list] No wanted stations in the rolling buffer."
     store(tui, "CQ VK3XY QF22")         # 00, hit
     clock[0] += 10
     store(tui, "CQ W1ABC FN42")         # 01, no hit: not listed
@@ -151,15 +151,15 @@ def test_list(tui, clock):
     clock[0] += 5
     before = len(tui._lines)
     lines = command(tui, "l")[before:]
-    assert lines[0] == "[list] 2 NEEDED/MATCH entries (last heard at bottom) ——"
+    assert lines[0] == "[list] 2 wanted (last heard at bottom) ——"
     assert lines[1].startswith("02  123015z") and "CQ KH6/W1XX" in lines[1]
-    assert lines[2] == "  *** NEEDED: NEW-DXCC(KH6), NEW-CQZ(31), NEW-CTRY(Hawaii) ***" \
+    assert lines[2] == "  *** WANTED: ❌DXCC(KH6) · ❌CQZ(31) · ❌CTRY(Hawaii) ***" \
                        "  (last heard 15s ago, ×1)"
     assert lines[3].startswith("00  123015z") and "CQ VK3XY QF22" in lines[3]
     assert lines[4].endswith("  (last heard 5s ago, ×2)")
     assert len(lines) == 5
     for abbrev in ("li", "lis", "LIST"):
-        assert command(tui, abbrev)[-5].startswith("[list] 2 NEEDED/MATCH")
+        assert command(tui, abbrev)[-5].startswith("[list] 2 wanted")
 
 
 def test_list_shows_a_station_redrawn_after_a_qso(tui):
@@ -172,7 +172,7 @@ def test_list_shows_a_station_redrawn_after_a_qso(tui):
     assert len(vk.display) == 1 and re.search(r"VK3XY\s+QF22\s+0d", vk.display[0])
     before = len(tui._lines)
     lines = command(tui, "list")[before:]
-    assert lines[0].startswith("[list] 1 NEEDED/MATCH") and "ZL2AB" in lines[1]
+    assert lines[0].startswith("[list] 1 wanted") and "ZL2AB" in lines[1]
 
 
 def test_clear_command(tui):
@@ -262,8 +262,13 @@ def test_status_line(tui):
 
 
 def test_header_columns(make_tui):
-    t = make_tui("--was", adif=False, hamdat=None)
-    assert "ST" not in t._header()                  # no hamdat loaded
-    t.engine.adif_log, t.engine.hamdat = object(), object()
+    t = make_tui(config={"wanted": [{"rule": "dxcc"}, {"rule": "was"}, {"rule": "pota"},
+                                    {"rule": "was", "name": "WAS-QRZ", "confirm": ["qrz"]}]},
+                 adif=False, hamdat=None)
     h = t._header()
-    assert re.search(r"days\s+ST\s+\| entity", h) and "WAS" in h and "QRZ  LoW" in h
+    assert "ST" not in h and "days" not in h and "DXCC" not in h   # no hamdat, no log
+    t.engine.logbook, t.engine.hamdat = object(), object()
+    h = t._header()
+    # One status column per award rule, in config order; pota has none.
+    assert re.search(r"days  ST  \| entity {24}  CQz   ITUz   ct  \| DXCC     WAS   WAS-QRZ"
+                     r"  QRZ  LoW$", h.splitlines()[0])

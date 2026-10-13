@@ -15,6 +15,7 @@ from jtcon.core.hamdat import load_state_file
 from jtcon.core.messages import _directed_sender, parse_cq_message
 from jtcon.core.patterns import _regex_matches, load_regex_patterns
 from jtcon.core.stations import fmt_age as _fmt_age
+from jtcon.core.wanted import NEW, WORKED, Hit
 
 
 @pytest.mark.parametrize("msg, expected", [
@@ -38,11 +39,15 @@ def test_parse_cq_message(msg, expected):
     assert parse_cq_message(msg) == expected
 
 
-def test_parse_cq_v2_quirks():
-    # v2 quirk: "RR73" passes the callsign pattern (it contains a digit).
-    assert parse_cq_message("CQ RR73") == ("RR73", None, None)
-    # v2 quirk: a hashed (<...>) callsign in a CQ is not recognised.
-    assert parse_cq_message("CQ <W1ABC/P> FN42") == (None, None, None)
+def test_parse_cq_v2_quirks_fixed():
+    # v2 quirk Q1: "RR73" passed the callsign pattern (it contains a digit).
+    assert parse_cq_message("CQ RR73") == (None, None, None)
+    assert parse_cq_message("CQ DX 73") == (None, None, None)
+    assert parse_cq_message("CQ W1ABC/7") == ("W1ABC/7", None, None)
+    # v2 quirk Q2: a hashed (<...>) callsign in a CQ was not recognised.
+    assert parse_cq_message("CQ <W1ABC/P> FN42") == ("W1ABC/P", "FN42", None)
+    assert parse_cq_message("CQ POTA <W1ABC/P>") == ("W1ABC/P", None, "POTA")
+    assert parse_cq_message("CQ <W1ABC/P FN42") == (None, None, None)
 
 
 @pytest.mark.parametrize("msg, expected", [
@@ -128,6 +133,8 @@ def test_regex_matches_labels():
 
 def test_build_alert_msg():
     ei = {"entity": "Australia", "cq_zone": 30}
-    assert _build_alert_msg("VK3XY", ei, ["NEW-DXCC(VK)"], ["CALL:^VK [w.txt]"]) == \
-        "VK3XY | Australia CQ30 | NEEDED: NEW-DXCC(VK)  MATCH: CALL:^VK [w.txt]"
-    assert _build_alert_msg(None, {}, [], ["MSG:x"]) == "? | MATCH: MSG:x"
+    hits = [Hit("DXCC", "VK", NEW), Hit("WAS-QRZ", "MA", WORKED), Hit("CALLS", "^VK [w.txt]")]
+    assert _build_alert_msg("VK3XY", ei, hits) == (
+        "VK3XY | Australia CQ30 | WANTED: DXCC(VK) new · WAS-QRZ(MA) unconfirmed"
+        " · CALLS(^VK [w.txt])")
+    assert _build_alert_msg(None, {}, [Hit("POTA")]) == "? | WANTED: POTA"

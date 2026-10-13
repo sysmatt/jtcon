@@ -1,6 +1,10 @@
-"""NEEDED / MATCH classification, display filtering, alerts and the JSON record.
+"""Judging decodes: the wanted rules on real decodes, display filtering, the
+worked-recently filter, alerts and the JSON record.
 
-These pin the v2 rules that the v3 wanted-rule framework must reproduce.
+The test log (fixtures/log.adi) and FakeHamdat give: W1ABC MA (20m LoTW + QRZ
+confirmed), K2XYZ NJ (40m FT4, unconfirmed), JA1XYZ (unconfirmed, 367 days ago),
+DL1ABC (LoTW, worked today), W9ZZZ IL (15m LoTW), G4ABC (eQSL), EA8ABC (QRZ),
+K5TX TX (20m, 41 days ago, unconfirmed).  "Today" is 2026-10-12.
 """
 
 import io
@@ -13,12 +17,13 @@ from datetime import date
 
 import pytest
 
-from jtcon.tui.render import _BMAG
+from jtcon.core.logbook import QSO
+from jtcon.tui.render import _BMAG, _BRED, _BYEL
 import wsjtx_packets as pk
 from conftest import handle_packet, watch_patterns
 
 ADDR = ("127.0.0.1", 2237)
-ALL_NEW_VK = ["NEW-DXCC(VK)", "NEW-CQZ(30)", "NEW-CTRY(Australia)"]
+ALL_NEW_VK = ["❌DXCC(VK)", "❌CQZ(30)", "❌CTRY(Australia)"]
 
 
 def run(ctx, msg, mode="~"):
@@ -27,116 +32,174 @@ def run(ctx, msg, mode="~"):
     return lines, meta
 
 
-def flags(ctx, msg):
-    _, meta = run(ctx, msg)
-    return meta.get("needed_flags"), meta.get("match_flags")
+def wanted(ctx, msg):
+    return run(ctx, msg)[1].get("wanted")
 
 
-# ── DXCC / zone / country ─────────────────────────────────────────────────────
+def rules(*specs, **top):
+    """A config layer with these [[wanted]] entries (strings are bare rules)."""
+    entries = [{"rule": s} if isinstance(s, str) else s for s in specs]
+    return {"wanted": entries, **top}
 
-def test_new_entity_is_needed(make_ctx):
-    lines, meta = run(make_ctx(), "CQ DX VK3XY QF22")
-    assert meta["callsign"] == "VK3XY"
-    assert meta["is_cq"] is True
-    assert meta["needed_flags"] == ALL_NEW_VK
-    assert meta["is_needed"] is True
-    assert meta["match_flags"] == []
+
+def days(n):
+    return {"filters": {"suppress_worked_within_days": n}}
+
+
+# ── Award rules ───────────────────────────────────────────────────────────────
+
+def test_new_entity_is_wanted(make_ctx):
+    lines, meta = run(make_ctx(config={}), "CQ DX VK3XY QF22")
+    assert meta["callsign"] == "VK3XY" and meta["is_cq"] is True
+    assert meta["wanted"] == ALL_NEW_VK
     assert meta["bell"] is True
-    assert meta["wsjt_addr"] == ADDR
-    assert meta["decoded"].message == "CQ DX VK3XY QF22"
-    assert len(lines) == 2 and "*** NEEDED: NEW-DXCC(VK), NEW-CQZ(30)" in lines[1]
+    assert meta["wsjt_addr"] == ADDR and meta["decoded"].message == "CQ DX VK3XY QF22"
+    assert len(lines) == 2
+    assert "*** WANTED: ❌DXCC(VK) · ❌CQZ(30) · ❌CTRY(Australia) ***" in lines[1]
+    assert _BRED in lines[1]
 
 
-def test_worked_entity_is_not_needed(make_ctx):
-    assert flags(make_ctx(), "CQ W1ABC FN42") == ([], [])
+def test_confirmed_entity_is_not_wanted(make_ctx):
+    _, meta = run(make_ctx(config={}), "CQ W1ABC FN42")
+    assert meta["wanted"] == []
+    assert [(h.rule, h.status) for h in meta["hits"]] == [
+        ("DXCC", "confirmed"), ("CQZ", "confirmed"), ("CTRY", "confirmed")]
 
 
-def test_qsl_only_needs_unconfirmed(make_ctx):
-    assert flags(make_ctx(), "CQ JA1XYZ PM95") == ([], [])
-    assert flags(make_ctx("--qsl-only"), "CQ JA1XYZ PM95") == \
-        (["NEW-DXCC(JA)", "NEW-CQZ(25)", "NEW-CTRY(Japan)"], [])
+def test_worked_but_unconfirmed_is_wanted(make_ctx):
+    # The v3 default: dxcc, cqz and country count only LoTW confirmations.
+    assert wanted(make_ctx(config={}), "CQ JA1XYZ PM95") == \
+        ["❓DXCC(JA)", "❓CQZ(25)", "❓CTRY(Japan)"]
+    worked = rules(*({"rule": r, "confirm": []} for r in ("dxcc", "cqz", "country")))
+    assert wanted(make_ctx(config=worked), "CQ JA1XYZ PM95") == []
 
 
-def test_v3_default_needs_lotw_confirmation(make_ctx):
-    # No config at all: dxcc/cqz/country count only LoTW-confirmed QSOs.
-    assert flags(make_ctx(config={}), "CQ JA1XYZ PM95") == \
-        (["NEW-DXCC(JA)", "NEW-CQZ(25)", "NEW-CTRY(Japan)"], [])
-    assert flags(make_ctx(config={}), "CQ DL1ABC JO62")[0] == []   # LoTW-confirmed
-    worked = {"wanted": [{"rule": r, "confirm": []} for r in ("dxcc", "cqz", "country")]}
-    assert flags(make_ctx(config=worked), "CQ JA1XYZ PM95") == ([], [])
+@pytest.mark.parametrize("confirm, call, grid, status", [
+    (["lotw"], "EA8ABC", "IL18", "worked"),      # EA8ABC: QRZ-confirmed only
+    (["qrz"],  "EA8ABC", "IL18", "confirmed"),
+    (["eqsl"], "G4ABC",  "IO91", "confirmed"),   # G4ABC: eQSL only
+    (["lotw", "qrz"], "G4ABC", "IO91", "worked"),
+    (["card"], "W1ABC",  "FN42", "worked"),
+])
+def test_confirm_sources_per_rule(make_ctx, confirm, call, grid, status):
+    ctx = make_ctx(config=rules({"rule": "dxcc", "confirm": confirm}))
+    (hit,) = run(ctx, f"CQ {call} {grid}")[1]["hits"]
+    assert hit.status == status
 
 
-def test_need_checks_can_be_disabled(make_ctx):
-    ctx = make_ctx("--no-need-cqz", "--no-need-country")
-    assert flags(ctx, "CQ VK3XY QF22") == (["NEW-DXCC(VK)"], [])
-    ctx = make_ctx("--no-need-entity", "--no-need-country")
-    assert flags(ctx, "CQ VK3XY QF22") == (["NEW-CQZ(30)"], [])
+def test_rules_can_be_left_out(make_ctx):
+    assert wanted(make_ctx(config=rules("dxcc")), "CQ VK3XY QF22") == ["❌DXCC(VK)"]
+    assert wanted(make_ctx(config=rules("cqz")), "CQ VK3XY QF22") == ["❌CQZ(30)"]
 
 
-def test_without_a_log_nothing_is_needed(make_ctx):
-    lines, meta = run(make_ctx(adif=False), "CQ VK3XY QF22")
-    assert meta["needed_flags"] == []
+def test_ituz_and_grid(make_ctx):
+    ctx = make_ctx(config=rules("ituz", "grid"))
+    assert wanted(ctx, "CQ VK3XY QF22") == ["❌ITUZ(59)", "❌GRID(QF22)"]
+    # W1ABC: ITU 8 and FN42 confirmed by LoTW; no grid in the CQ, no grid hit.
+    assert wanted(ctx, "CQ W1ABC FN42") == []
+    assert wanted(ctx, "CQ KH6/W1XX") == ["❌ITUZ(61)"]
+
+
+def test_without_a_log_award_rules_are_off(make_ctx):
+    lines, meta = run(make_ctx(config={}, adif=False), "CQ VK3XY QF22")
+    assert meta["wanted"] == [] and meta["hits"] == []
     assert len(lines) == 1
 
 
 # ── WAS / 5BWAS ───────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("msg, needed", [
-    ("CQ N1NEW FN43", ["NEW-WAS(NH)"]),   # never worked
-    ("CQ K2XYZ FN20", ["NEW-WAS(NJ)"]),   # worked, not LoTW-confirmed
+@pytest.mark.parametrize("msg, want", [
+    ("CQ N1NEW FN43", ["❌WAS(NH)"]),      # never worked
+    ("CQ K2XYZ FN20", ["❓WAS(NJ)"]),      # worked, not LoTW-confirmed
     ("CQ W1ABC FN42", []),                # LoTW-confirmed
     ("CQ W9ZZZ EN52", []),                # confirmed; state came from hamdat
 ])
-def test_was(make_ctx, msg, needed):
-    assert flags(make_ctx("--was"), msg) == (needed, [])
+def test_was(make_ctx, msg, want):
+    assert wanted(make_ctx(config=rules("was")), msg) == want
 
 
-@pytest.mark.parametrize("dial, msg, needed", [
+@pytest.mark.parametrize("dial, msg, want", [
     (14_074_000, "CQ W1ABC FN42", []),                      # MA confirmed on 20m
-    (7_074_000,  "CQ W1ABC FN42", ["NEW-5BWAS(MA/40m)"]),   # but not on 40m
+    (7_074_000,  "CQ W1ABC FN42", ["❌5BWAS(MA/40m)"]),     # never on 40m
     (10_136_000, "CQ W1ABC FN42", []),                      # 30m is not a 5BWAS band
-    (14_074_000, "CQ K5TX EM12",  ["NEW-5BWAS(TX/20m)"]),   # worked 20m, unconfirmed
+    (14_074_000, "CQ K5TX EM12",  ["❓5BWAS(TX/20m)"]),     # worked 20m, unconfirmed
     (21_074_000, "CQ W9ZZZ EN52", []),                      # IL confirmed on 15m
 ])
-def test_5bwas(make_ctx, dial, msg, needed):
-    assert flags(make_ctx("--5bwas", dial_freq=dial), msg) == (needed, [])
+def test_5bwas(make_ctx, dial, msg, want):
+    assert wanted(make_ctx(config=rules("5bwas", **days(-1)), dial_freq=dial), msg) == want
+
+
+def test_was_and_5bwas_together_and_twice(make_ctx):
+    ctx = make_ctx(config=rules("was", {"rule": "was", "name": "WAS-QRZ", "confirm": ["qrz"]},
+                                "5bwas", **days(-1)), dial_freq=7_074_000)
+    assert wanted(ctx, "CQ W1ABC FN42") == ["❌5BWAS(MA/40m)"]   # WAS: LoTW and QRZ
+    assert wanted(ctx, "CQ K5TX EM12") == ["❓WAS(TX)", "❓WAS-QRZ(TX)", "❌5BWAS(TX/40m)"]
 
 
 def test_was_needs_hamdat(make_ctx):
-    assert flags(make_ctx("--was", hamdat=None), "CQ N1NEW FN43") == ([], [])
+    assert wanted(make_ctx(config=rules("was"), hamdat=None), "CQ N1NEW FN43") == []
 
 
-# ── MATCH patterns ────────────────────────────────────────────────────────────
+# ── Watch rules ───────────────────────────────────────────────────────────────
 
-def test_match_state(make_ctx):
-    assert flags(make_ctx("--match-state", "MA,NH"), "CQ W1ABC FN42") == ([], ["STATE:MA"])
-
-
-def test_match_callsign_pattern(make_ctx):
-    ctx = make_ctx(call_patterns=watch_patterns("^VK", "^ZL"))
-    assert flags(ctx, "CQ VK3XY QF22") == (ALL_NEW_VK, ["CALL:^VK [watch.txt]"])
+def test_states(make_ctx):
+    ctx = make_ctx(config=rules({"rule": "states", "states": ["MA", "NH"]}, **days(-1)))
+    assert wanted(ctx, "CQ W1ABC FN42") == ["STATE(MA)"]
+    assert wanted(ctx, "CQ K2XYZ FN20") == []
 
 
-def test_match_pota(make_ctx):
-    assert flags(make_ctx("--pota"), "CQ POTA K2XYZ FN20") == ([], [r"MSG:\bPOTA\b"])
-    assert flags(make_ctx("--sota"), "CQ POTA K2XYZ FN20") == ([], [])
+def test_callsign_watchlist(make_ctx):
+    ctx = make_ctx(config={}, call_patterns=watch_patterns("^VK", "^ZL"))
+    assert wanted(ctx, "CQ VK3XY QF22") == ALL_NEW_VK + ["CALLS(^VK [watch.txt])"]
 
 
-# ── Worked-recently suppression ───────────────────────────────────────────────
-
-def test_worked_today_is_suppressed(make_ctx):
-    # DL1ABC was worked "today"; the default --worked-lag-days 0 hides its hits.
-    ctx = make_ctx(call_patterns=watch_patterns("^DL"))
-    assert flags(ctx, "CQ DL1ABC JO62") == ([], [])
-    ctx = make_ctx("--worked-lag-days", "-1", call_patterns=watch_patterns("^DL"))
-    assert flags(ctx, "CQ DL1ABC JO62") == ([], ["CALL:^DL [watch.txt]"])
+def test_activation_keywords(make_ctx):
+    assert wanted(make_ctx(config=rules("pota", **days(-1))), "CQ POTA K2XYZ FN20") == ["POTA"]
+    assert wanted(make_ctx(config=rules("sota")), "CQ POTA K2XYZ FN20") == []
 
 
-def test_worked_lag_days_window(make_ctx):
-    # JA1XYZ last worked 2025-10-10: 367 days before the frozen today.
-    assert flags(make_ctx("--qsl-only", "--worked-lag-days", "400"), "CQ JA1XYZ PM95") == ([], [])
-    assert flags(make_ctx("--qsl-only", "--worked-lag-days", "300"), "CQ JA1XYZ PM95")[0] == \
-        ["NEW-DXCC(JA)", "NEW-CQZ(25)", "NEW-CTRY(Japan)"]
+def test_watch_only_hits_are_yellow(make_ctx):
+    lines, _ = run(make_ctx(config=rules("pota", **days(-1))), "CQ POTA K2XYZ FN20")
+    assert _BYEL in lines[1] and _BRED not in lines[1]
+
+
+# ── Worked-recently filter ────────────────────────────────────────────────────
+
+def test_worked_today_hides_watchlist_hits(make_ctx):
+    # DL1ABC was worked today.
+    ctx = make_ctx(config=days(0), call_patterns=watch_patterns("^DL"))
+    assert wanted(ctx, "CQ DL1ABC JO62") == []
+    ctx = make_ctx(config=days(-1), call_patterns=watch_patterns("^DL"))
+    assert wanted(ctx, "CQ DL1ABC JO62") == ["CALLS(^DL [watch.txt])"]
+
+
+def test_worked_recently_window(make_ctx):
+    # JA1XYZ, unconfirmed, last worked 2025-10-10: 367 days ago.
+    assert wanted(make_ctx(config=rules("dxcc", **days(400))), "CQ JA1XYZ PM95") == []
+    assert wanted(make_ctx(config=rules("dxcc", **days(300))), "CQ JA1XYZ PM95") == ["❓DXCC(JA)"]
+
+
+def test_worked_recently_follows_each_rule(make_ctx):
+    # K5TX: worked on 20m 41 days ago, TX unconfirmed.  That QSO accounts for
+    # 5BWAS TX/20m, but not TX/40m: the station is still wanted on 40m.
+    cfg = rules("5bwas", **days(50))
+    assert wanted(make_ctx(config=cfg, dial_freq=14_074_000), "CQ K5TX EM12") == []
+    assert wanted(make_ctx(config=cfg, dial_freq=7_074_000), "CQ K5TX EM12") == \
+        ["❌5BWAS(TX/40m)"]
+    # K2XYZ: NJ worked on 40m.  The recent QSO hides WAS(NJ) but not 5BWAS NJ/20m.
+    ctx = make_ctx(config=rules("was", "5bwas", **days(600)))
+    assert wanted(ctx, "CQ K2XYZ FN20") == ["❌5BWAS(NJ/20m)"]
+
+
+def test_default_hides_stations_worked_within_5_days(make_ctx):
+    ctx = make_ctx(config=rules("dxcc"))                      # v3 default: 5 days
+    vk = dict(call="VK3XY", band="20m", mode="FT8", dxcc="VK", sources={"x"})
+    ctx.logbook.add(QSO(date=date(2026, 10, 7), **vk))        # 5 days ago
+    for r in ctx.rules:
+        r.rebuild(ctx.logbook)
+    assert wanted(ctx, "CQ VK3XY QF22") == []
+    ctx.logbook.by_call["VK3XY"][0].date = date(2026, 10, 6)  # 6 days ago
+    assert wanted(ctx, "CQ VK3XY QF22") == ["❓DXCC(VK)"]
 
 
 # ── Which decodes are shown / checked ─────────────────────────────────────────
@@ -146,10 +209,9 @@ def test_non_cq_hidden_by_default(make_ctx):
 
 
 def test_all_checks_directed_messages(make_ctx):
-    lines, meta = run(make_ctx("--all"), "W1ABC VK3XY -12")
-    assert meta["callsign"] == "VK3XY"
-    assert meta["is_cq"] is False
-    assert meta["needed_flags"] == ALL_NEW_VK
+    lines, meta = run(make_ctx(config={"scope": {"decodes": "all"}}), "W1ABC VK3XY -12")
+    assert meta["callsign"] == "VK3XY" and meta["is_cq"] is False
+    assert meta["wanted"] == ALL_NEW_VK
     assert _BMAG in lines[0] and _BMAG in lines[1]   # magenta: non-CQ hit
 
 
@@ -161,14 +223,17 @@ def test_all_skips_my_own_qsos(make_ctx):
     assert run(make_ctx("--all"), "N0CALL VK3XY -05") == ([], {})
 
 
-def test_raw_shows_non_cq_without_checking(make_ctx):
+def test_show_all_shows_non_cq_without_checking(make_ctx):
     lines, meta = run(make_ctx("--raw"), "W1ABC VK3XY -12")
-    assert meta["callsign"] is None and meta["needed_flags"] == []
+    assert meta["callsign"] is None and meta["wanted"] == []
     assert len(lines) == 1 and "W1ABC VK3XY -12" in lines[0]
 
 
-def test_raw_applies_message_patterns_to_non_cq(make_ctx):
-    assert flags(make_ctx("--raw", "--pota"), "TNX POTA 73") == ([], [r"MSG:\bPOTA\b"])
+def test_rules_only_check_what_the_scope_says(make_ctx):
+    # v2 quirk Q5, fixed: show = "all" displays non-CQ decodes but no rule
+    # checks them (v2 applied the message patterns); scope = "all" checks them.
+    assert wanted(make_ctx("--raw", "--pota"), "TNX POTA 73") == []
+    assert wanted(make_ctx("--raw", "--all", "--pota"), "TNX POTA 73") == ["POTA"]
 
 
 def test_status_packet_is_not_a_decode(make_ctx):
@@ -204,6 +269,10 @@ def popen(monkeypatch):
     return calls
 
 
+ALERT_VK = ("VK3XY | Australia CQ30 | WANTED: DXCC(VK) new · CQZ(30) new"
+            " · CTRY(Australia) new")
+
+
 def test_alert_fires_once_then_after_an_hour_unheard(make_ctx, clock, popen):
     ctx = make_ctx("--alert-command", "/bin/alert")
     assert run(ctx, "CQ VK3XY QF22")[1]["bell"] is True
@@ -213,16 +282,15 @@ def test_alert_fires_once_then_after_an_hour_unheard(make_ctx, clock, popen):
     assert run(ctx, "CQ VK3XY QF22")[1]["bell"] is False
     clock[0] += 3601          # unheard for over an hour
     assert run(ctx, "CQ VK3XY QF22")[1]["bell"] is True
-    assert popen == [["/bin/alert", "VK3XY | Australia CQ30 | NEEDED: "
-                      "NEW-DXCC(VK), NEW-CQZ(30), NEW-CTRY(Australia)"]] * 2
+    assert popen == [["/bin/alert", ALERT_VK]] * 2
 
 
-def test_alert_fires_again_when_flags_change(make_ctx, clock, popen):
-    ctx = make_ctx("--alert-command", "/bin/alert")
+def test_alert_fires_again_when_the_reasons_change(make_ctx, clock, popen):
+    ctx = make_ctx("--alert-command", "/bin/alert", call_patterns=watch_patterns("^ZL"))
     run(ctx, "CQ VK3XY QF22")
-    ctx.call_patterns = watch_patterns("^VK")
+    next(r for r in ctx.rules if r.label == "CALLS").patterns = watch_patterns("^VK")
     assert run(ctx, "CQ VK3XY QF22")[1]["bell"] is True
-    assert len(popen) == 2
+    assert popen[1] == ["/bin/alert", ALERT_VK + " · CALLS(^VK [watch.txt])"]
 
 
 def test_no_alert_without_a_hit(make_ctx, popen):
@@ -250,7 +318,7 @@ def test_ntfy_alert(make_ctx, monkeypatch, clock):
     (req,) = sent
     assert req.full_url == "https://ntfy.sh/my-topic"
     assert req.get_method() == "POST"
-    assert req.data.decode().startswith("VK3XY | Australia CQ30 | NEEDED: NEW-DXCC(VK)")
+    assert req.data.decode() == ALERT_VK
     assert req.get_header("Title") == "jtcon"
 
 
@@ -267,20 +335,15 @@ def test_json_record(make_ctx):
         "snr_db": -7, "dt_s": 0.2, "df_hz": 1234, "mode": "FT8",
         "message": "CQ DX VK3XY QF22", "callsign": "VK3XY", "modifier": "DX",
         "gridsquare": "QF22", "primary_prefix": "VK", "entity": "Australia",
-        "cq_zone": 30, "itu_zone": 59, "continent": "OC", "needed": ALL_NEW_VK,
+        "cq_zone": 30, "itu_zone": 59, "continent": "OC",
+        "wanted": [{"rule": "DXCC", "detail": "VK", "status": "new"},
+                   {"rule": "CQZ", "detail": "30", "status": "new"},
+                   {"rule": "CTRY", "detail": "Australia", "status": "new"}],
     }
 
 
-def test_json_needed_is_null_without_a_log(make_ctx):
+def test_json_wanted_without_a_log_has_watchlist_hits_only(make_ctx):
     fh = io.StringIO()
-    run(make_ctx(adif=False, json_fh=fh), "CQ VK3XY QF22")
-    assert json.loads(fh.getvalue())["needed"] is None
-
-
-def test_default_suppresses_stations_worked_within_5_days(make_ctx):
-    ctx = make_ctx(config={})                       # v3 defaults; "today" is 2026-10-12
-    ctx.adif_log.last_worked["VK3XY"] = date(2026, 10, 7)    # 5 days ago
-    assert flags(ctx, "CQ VK3XY QF22") == ([], [])
-    ctx.adif_log.last_worked["VK3XY"] = date(2026, 10, 6)    # 6 days ago
-    assert flags(ctx, "CQ VK3XY QF22")[0] == ["NEW-DXCC(VK)", "NEW-CQZ(30)",
-                                              "NEW-CTRY(Australia)"]
+    run(make_ctx(adif=False, json_fh=fh, call_patterns=watch_patterns("^VK")), "CQ VK3XY QF22")
+    assert json.loads(fh.getvalue())["wanted"] == [
+        {"rule": "CALLS", "detail": "^VK [watch.txt]", "status": None}]

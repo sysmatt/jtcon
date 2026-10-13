@@ -37,12 +37,23 @@ def test_defaults_without_a_config_file(tmp_path):
     assert rules(cfg) == [("dxcc", "dxcc", {"confirm": ["lotw"]}),
                           ("cqz", "cqz", {"confirm": ["lotw"]}),
                           ("country", "country", {"confirm": ["lotw"]})]
-    assert cfg.entity_needs_lotw
 
 
-def test_worked_is_enough_with_an_empty_confirm():
-    cfg = make_config({"wanted": [{"rule": "dxcc", "confirm": []}]})
-    assert not cfg.entity_needs_lotw
+def test_a_rule_twice_with_its_own_settings():
+    cfg = make_config({"wanted": [{"rule": "was"},
+                                  {"rule": "was", "name": "WAS-QRZ", "confirm": ["qrz"]},
+                                  {"rule": "5bwas", "confirm": []},
+                                  {"rule": "dxcc", "confirm": ["lotw", "card"]},
+                                  {"rule": "ituz"}, {"rule": "grid"}]})
+    assert rules(cfg) == [("was", "was", {"confirm": ["lotw"]}),
+                          ("was", "WAS-QRZ", {"confirm": ["qrz"]}),
+                          ("5bwas", "5bwas", {"confirm": []}),
+                          ("dxcc", "dxcc", {"confirm": ["lotw", "card"]}),
+                          ("ituz", "ituz", {"confirm": ["lotw"]}),
+                          ("grid", "grid", {"confirm": ["lotw"]})]
+    cfg = make_config({}, wanted="dxcc:qrz+lotw,ituz:worked")
+    assert rules(cfg) == [("dxcc", "dxcc", {"confirm": ["qrz", "lotw"]}),
+                          ("ituz", "ituz", {"confirm": []})]
 
 
 # ── Layers ────────────────────────────────────────────────────────────────────
@@ -197,8 +208,6 @@ def test_wanted_states_from_a_file(monkeypatch, tmp_path):
     ("callsigns:", "nothing after the ':'"),
     ("states:AK+s.txt", "either state codes or one file"),
     ("dxcc:paper", "confirm must be"),
-    ("dxcc:qrz", "not supported yet"),
-    ("dxcc:worked,cqz", "same confirm"),
 ])
 def test_wanted_value_errors(wanted, error):
     with pytest.raises(ConfigError, match=error):
@@ -227,12 +236,9 @@ def test_wanted_value_errors(wanted, error):
     ({"wanted": [{"rule": "pota", "files": "x"}]}, "unknown setting 'files' .known: name."),
     ({"wanted": [{"rule": "dxcc", "confirm": ["paper"]}]}, "confirm must be"),
     ({"wanted": [{"rule": "states"}]}, "'states' needs 'states' or 'file'"),
-    ({"wanted": [{"rule": "dxcc"}, {"rule": "dxcc", "name": "d2"}]}, "appears twice"),
+    ({"wanted": [{"rule": "was"}, {"rule": "was", "confirm": ["qrz"]}]},
+     "rule 'was' is used twice; give each \\[\\[wanted\\]\\] entry its own name"),
     ({"wanted": [{"rule": "dxcc"}, {"rule": "pota", "name": "DXCC"}]}, "two .* named 'DXCC'"),
-    ({"wanted": [{"rule": "was"}, {"rule": "5bwas"}]}, "can't be used together"),
-    ({"wanted": [{"rule": "dxcc"}, {"rule": "cqz", "confirm": []}]}, "same confirm"),
-    ({"wanted": [{"rule": "dxcc", "confirm": ["qrz"]}]}, 'not supported yet; use \\[\\] or \\["lotw"\\]'),
-    ({"wanted": [{"rule": "was", "confirm": []}]}, 'not supported yet; use \\["lotw"\\]'),
 ])
 def test_invalid_settings(layer, error):
     with pytest.raises(ConfigError, match=error):
@@ -345,4 +351,5 @@ def test_k2tta_profile_matches_the_v2_command_line(tmp_path):
 def test_v2_defaults_translate_to_worked_is_enough():
     assert v2_to_config()["wanted"] == [{"rule": r, "confirm": []}
                                         for r in ("dxcc", "cqz", "country")]
-    assert not v2_config().entity_needs_lotw and v2_config("--qsl-only").entity_needs_lotw
+    assert v2_to_config("--qsl-only")["wanted"] == [{"rule": r, "confirm": ["lotw"]}
+                                                    for r in ("dxcc", "cqz", "country")]

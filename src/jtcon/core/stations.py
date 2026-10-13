@@ -26,13 +26,12 @@ class Station:
     count:        int   = 1
     decode:       object = None     # newest Decode, used for replies
     addr:         tuple | None = None   # WSJT-X address it came from
-    needed_flags: list  = field(default_factory=list)
-    match_flags:  list  = field(default_factory=list)
+    wanted:       list  = field(default_factory=list)   # Hits from its newest decode
     display:      object = None     # the front end's rendering of the newest decode
 
     @property
     def is_hit(self) -> bool:
-        return bool(self.needed_flags or self.match_flags)
+        return bool(self.wanted)
 
 
 class StationTable:
@@ -51,8 +50,7 @@ class StationTable:
     def __len__(self) -> int:
         return len(self._by_idx)
 
-    def store(self, callsign: str, decode, addr, needed_flags: list,
-              match_flags: list) -> Station:
+    def store(self, callsign: str, decode, addr, wanted: list) -> Station:
         now = time.monotonic()
         callsign = callsign.upper()
         st = self.find(callsign)
@@ -66,7 +64,7 @@ class StationTable:
             st = Station(idx, callsign, first_seen=now, last_seen=now)
             self._by_idx[idx] = self._by_call[callsign] = st
         st.decode, st.addr, st.last_seen = decode, addr, now
-        st.needed_flags, st.match_flags = list(needed_flags), list(match_flags)
+        st.wanted = list(wanted)
         return st
 
     def _alloc(self) -> int:
@@ -88,7 +86,7 @@ class StationTable:
         return [self._by_idx[i] for i in sorted(self._by_idx)]
 
     def hits(self) -> list:
-        """Stations with NEEDED/MATCH flags, most recently heard last."""
+        """Wanted stations, most recently heard last."""
         return sorted((s for s in self._by_idx.values() if s.is_hit),
                       key=lambda s: s.last_seen)
 

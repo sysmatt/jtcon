@@ -468,7 +468,7 @@ as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
       highlighted in WSJT-X; logging a QSO reloads at once and runs `up.sh`.
       Passed, no problems
 
-### Phase 4: inputs and logbook ✅ (pending Matt's live check)
+### Phase 4: inputs and logbook ✅
 - [x] Input interface (`core/inputs.py`): `changed()` by file mtimes, `load()` in a
       worker thread, `skip()` after a failure so a broken file isn't retried until
       it changes again.  `AdifInput`, `PatternInput` (callsigns, message),
@@ -508,25 +508,54 @@ as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 - [x] Tests: 279 pass; render snapshot unchanged.  New `test_logbook.py`;
       engine tests for QSO Logged marking, watchlist/states reloads and broken
       watchlists; the e2e writes the logged QSO to the file and checks the merge
-- [ ] **Checkpoint: Matt's live test**: same display; editing a watchlist reloads
-      it; logging a QSO shows `Reloaded N QSOs` with no double count
+- [x] **Checkpoint: Matt's live test**: same display; editing a watchlist reloads
+      it; logging a QSO shows `Reloaded N QSOs` with no double count.  Passed
+      ("immediately better than what we had before")
 
-### Phase 5: wanted rules
-- [ ] Rule interface, registry, `--list-rules`
-- [ ] Port dxcc, cqz, country, was, 5bwas, pota, sota, iota, callsigns, message, states
-- [ ] Per-rule `confirm`; multiple named instances of one rule
-- [ ] Unified WANTED display with sources; ✅❓❌ icons driven by Hit status
-- [ ] Filters: worked-recently suppression, alert dedupe, scope
-- [ ] **From Matt:** worked-recently suppression must follow each rule's own
-      context.  Today it hides *every* hit for a call worked in the last N days, on
-      any band, so a station worked on 20m is hidden on 40m even when 5BWAS still
-      needs that state on 40m.  In v3 a recent QSO suppresses a hit only if that
-      QSO would satisfy the same rule once confirmed (5BWAS: same state *and* band;
-      DXCC: same entity; a per-band rule: same band).  To decide in phase 5:
-      watchlist hits (callsigns, POTA…) are also hidden today for a call worked
-      recently; keep that, or make it a per-rule setting
-- [ ] Display columns built from the enabled rules
-- [ ] Snapshot tests updated deliberately for the new output
+### Phase 5: wanted rules ✅ (pending Matt's live check)
+Matt's choices: compact WANTED line with status marks; one status column per award
+rule; add ituz and grid now; watchlist hits stay hidden for recently worked calls.
+
+- [x] Rule interface (`core/wanted/`): `base.py` (`Spot`, `Hit`, `WantedRule`,
+      statuses NEW / WORKED / CONFIRMED, labels), `awards.py`, `watch.py`, and
+      `build_rules()` / `evaluate_rules()` in `__init__.py`.  Award rules map a spot
+      to one key and each QSO to the keys it counts toward, and keep `worked` /
+      `confirmed` sets built from the Logbook (`rebuild`, incremental `add` on QSO
+      Logged).  `--list-rules` lists ituz and grid
+- [x] Rules: dxcc, cqz, **ituz (new)**, country, was, 5bwas, **grid (new, 4
+      characters)**, pota, sota, iota, callsigns, message, states
+- [x] Per-rule `confirm` (any of lotw, qrz, eqsl, card; `[]` = worked is enough),
+      also on the CLI (`dxcc:lotw+qrz`).  A rule can be used several times; each
+      entry needs its own `name`, which is its label.  The phase 2 limits are
+      gone (was + 5bwas together, mixed confirm, …)
+- [x] One WANTED line: `*** WANTED: ❌DXCC(VK) · ❓WAS-QRZ(MA) · CALLS(^VK [watch.txt]) ***`;
+      ❌ new, ❓ worked but unconfirmed; red when an award rule wants the station,
+      yellow for watchlists only, magenta for non-CQ.  Alerts and scripts get the
+      words: `DXCC(VK) new · WAS-QRZ(MA) unconfirmed`
+- [x] Display: the entity block is plain text; after it, one status column per
+      award rule in config order, headed by its label (`✅K  ❓30  ❌MA`; country
+      and grid show the mark only).  The separate WAS column is gone
+- [x] Worked-recently filter per rule (`AwardRule.worked_recently`): a recent QSO
+      hides an award hit only when it counts toward the same key (5BWAS: state and
+      band; DXCC: entity).  Watchlist hits are hidden by any recent QSO with the
+      call (Matt: yes)
+- [x] Alert dedupe keyed on the set of hits; scope: rules run on CQs, or on every
+      decode with `scope = "all"`
+- [x] `WorkedIndex` replaced by `core/calls.py` `CallIndex` (per-call facts for the
+      display: days, band/mode colours, grid/state worked, QRZ/LoTW stars).
+      `DecodeResult` has `hits` (all, for the columns) and `wanted`; `Station.wanted`
+- [x] Reloads build fresh rule indexes in the worker thread and swap them in
+- [x] JSON log: `"needed"` replaced by `"wanted"`: a list of
+      `{"rule", "detail", "status"}`
+- [x] v2 quirks fixed: Q1, Q2, Q3, Q4, Q5 (see the table below)
+- [x] Tests: 288 pass on Python 3.11, 3.12, 3.14.  New `test_wanted.py` (rule
+      units); `test_classify.py` rewritten for hits; snapshot renamed `render.txt`,
+      regenerated and reviewed, with v3 sections (WAS by LoTW and QRZ, 5BWAS, ituz,
+      grid, mixed confirm).  Mutation checks: v2-style suppression fails 2 tests,
+      LoTW-only confirmation fails 5
+- [ ] **Checkpoint: Matt's live test**: the new display; `confirm = ["lotw",
+      "qrz"]` with the QRZ download; a station worked on one band still wanted for
+      5BWAS on another
 
 ### Phase 6: actions
 - [ ] Action interface and routing from config (`on_wanted`, `on_qso_logged`, …)
@@ -549,16 +578,16 @@ as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 
 ## v2 quirks found while writing tests
 
-Pinned by the Phase 0 tests so the refactor doesn't change them by accident.  Fix
-them deliberately (phase 5 for most), updating the tests as part of the fix.
+Pinned by the Phase 0 tests so the refactor doesn't change them by accident.  Fixed
+deliberately in phase 5 (Q1–Q5), with the tests updated as part of each fix.
 
 | # | Quirk | Where |
 |---|---|---|
-| Q1 | `CQ RR73` is parsed as a CQ from callsign "RR73" | `parse_cq_message` |
-| Q2 | A hashed callsign in a CQ (`CQ <W1ABC/P> FN42`) isn't recognised | `parse_cq_message` |
-| Q3 | The ✅❓❌ icons sit in front of the *next* label: the DXCC icon is printed before `CQ5`, the CQ-zone icon before `ITU8`, the country icon before the continent | `_render` |
-| Q4 | Only LoTW counts as a confirmation; QRZ, eQSL and card are ignored (v3 confirmation sources fix this) | `AdifLog` |
-| Q5 | `--raw` applies message patterns (POTA etc.) to non-CQ decodes, but not callsign or entity checks | `_classify` |
+| Q1 | `CQ RR73` is parsed as a CQ from callsign "RR73". **Fixed:** a call's longest part must end in a letter | `parse_cq_message` |
+| Q2 | A hashed callsign in a CQ (`CQ <W1ABC/P> FN42`) isn't recognised. **Fixed** | `parse_cq_message` |
+| Q3 | The ✅❓❌ icons sit in front of the *next* label: the DXCC icon is printed before `CQ5`, the CQ-zone icon before `ITU8`, the country icon before the continent. **Fixed:** status columns per rule | `_render` |
+| Q4 | Only LoTW counts as a confirmation; QRZ, eQSL and card are ignored. **Fixed:** per-rule `confirm` | `AdifLog` |
+| Q5 | `--raw` applies message patterns (POTA etc.) to non-CQ decodes, but not callsign or entity checks. **Fixed:** every rule follows `scope` | `_classify` |
 | Q6 | cty.dat's `=VERSION` marker line is loaded as an exact callsign (harmless) | `CtyDat._parse` |
 
 ## Open decisions

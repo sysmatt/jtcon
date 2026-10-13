@@ -9,13 +9,13 @@ import pytest
 
 import jtcon.core.decode
 import jtcon.tui.render
-from jtcon.config import build_config, check_layer
+from jtcon.config import WantedSpec, build_config, check_layer
 from jtcon.core.cty import CtyDat
 from jtcon.core.decode import DecodeContext, debug_text, evaluate
 from jtcon.core.engine import Engine
 from jtcon.core.inputs import AdifInput
-from jtcon.core.patterns import keyword_patterns
 from jtcon.core.protocol import Decode, parse_message
+from jtcon.core.wanted import build_rules
 from jtcon.tui.render import _render
 from v2flags import v2_to_config
 
@@ -81,19 +81,35 @@ def cty():
 
 def load_adif(engine, paths=(LOG_PATH,)) -> AdifInput:
     """Load *paths* into *engine* as its startup would, and watch them."""
-    inp = AdifInput(paths, engine.cty, engine.hamdat,
-                    qsl_only=engine.config.entity_needs_lotw, log=engine.log)
-    engine.logbook, engine.adif_log = inp.load()
+    inp = AdifInput(paths, engine.cty, engine.hamdat, log=engine.log)
+    engine.logbook, engine.calls = inp.load()
+    engine.rebuild_rules()
     engine.adif_input, engine.inputs = inp, [inp]
     return inp
 
 
 @pytest.fixture
-def make_adif(cty):
-    """The worked index for *paths*, as the decode context gets it."""
-    def _make(paths=(LOG_PATH,), hamdat=FakeHamdat(), qsl_only=False):
-        return AdifInput(paths, cty, hamdat, qsl_only=qsl_only).load()[1]
-    return _make
+def load_log(cty):
+    """(Logbook, CallIndex) for *paths*, as startup builds them."""
+    def _load(paths=(LOG_PATH,), hamdat=FakeHamdat()):
+        return AdifInput(paths, cty, hamdat).load()
+    return _load
+
+
+def add_watchlist(cfg, patterns) -> None:
+    """Tests pass watchlist patterns directly; make sure a callsigns rule is on."""
+    if patterns and not cfg.rule("callsigns"):
+        cfg.wanted.append(WantedSpec("callsigns", "callsigns", {"files": [Path("watch.txt")]}))
+
+
+def setup_rules(rules, logbook, call_patterns=(), states=None) -> list:
+    """Give *rules* what the engine's inputs would: patterns, and the logbook."""
+    for rule in rules:
+        if rule.spec.rule == "callsigns" and call_patterns:
+            rule.patterns = list(call_patterns)
+        if logbook is not None:
+            rule.rebuild(logbook)
+    return rules
 
 
 def make_config(layer: dict | None = None, wanted: str | None = None):
@@ -107,7 +123,7 @@ def v2_config(*argv: str):
 
 
 @pytest.fixture
-def make_ctx(cty, make_adif):
+def make_ctx(cty, load_log):
     """
     Build a DecodeContext the way startup does: adif, hamdat and patterns are
     derived from the config.  Positional arguments are a v2 command line; pass
@@ -117,14 +133,12 @@ def make_ctx(cty, make_adif):
     def _make(*argv, config=None, adif=True, hamdat=FakeHamdat(), dial_freq=14_074_000,
               call_patterns=(), alerted=None, json_fh=None, log=None):
         cfg = make_config(config) if config is not None else v2_config(*argv)
-        states = cfg.rule("states")
+        add_watchlist(cfg, call_patterns)
+        logbook, calls = load_log(hamdat=hamdat) if adif else (None, None)
         return DecodeContext(
-            config=cfg, cty=cty,
-            adif_log=make_adif(hamdat=hamdat, qsl_only=cfg.entity_needs_lotw) if adif else None,
+            config=cfg, cty=cty, logbook=logbook, calls=calls,
+            rules=setup_rules(build_rules(cfg.wanted), logbook, call_patterns),
             json_fh=json_fh,
-            call_patterns=list(call_patterns),
-            msg_patterns=keyword_patterns([w.rule for w in cfg.wanted]),
-            state_set=set(states.settings["states"]) if states else set(),
             hamdat=hamdat,
             alerted={} if alerted is None else alerted,
             dial_freq=dial_freq, de_call=MY_CALL,
@@ -145,7 +159,7 @@ class FakeSock:
 
 
 @pytest.fixture
-def make_engine(cty, make_adif):
+def make_engine(cty):
     """
     An Engine with the test inputs already loaded (as its startup would) and a
     FakeSock for sending.  Arguments as for make_ctx.  Its events are collected
@@ -154,14 +168,12 @@ def make_engine(cty, make_adif):
     def _make(*argv, config=None, adif=True, hamdat=FakeHamdat(), dial_freq=14_074_000,
               call_patterns=(), tx_sock=None):
         cfg = make_config(config) if config is not None else v2_config(*argv)
+        add_watchlist(cfg, call_patterns)
         engine = Engine(cfg, None, tx_sock or FakeSock())
         engine.cty, engine.hamdat = cty, hamdat
         if adif:
             load_adif(engine)
-        engine.call_patterns = list(call_patterns)
-        engine.msg_patterns = keyword_patterns([w.rule for w in cfg.wanted])
-        states = cfg.rule("states")
-        engine.state_set = set(states.settings["states"]) if states else set()
+        setup_rules(engine.rules, None, call_patterns)
         engine.dial_freq, engine.de_call = dial_freq, MY_CALL
         engine.events = []
         engine.subscribe(engine.events.append)
@@ -189,6 +201,6 @@ def handle_packet(data: bytes, ctx, addr, out_meta: dict | None = None) -> list:
     lines.extend(_render(ctx, r))
     if out_meta is not None:
         out_meta.update(decoded=d, callsign=r.callsign, is_cq=r.is_cq,
-                        needed_flags=r.needed_flags, match_flags=r.match_flags,
-                        is_needed=bool(r.needed_flags), wsjt_addr=addr, bell=r.new_alert)
+                        wanted=[h.mark() for h in r.wanted], hits=r.hits,
+                        wsjt_addr=addr, bell=r.new_alert)
     return lines

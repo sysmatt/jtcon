@@ -201,11 +201,12 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     assert f"[adif] Auto-discovered: {home}/.local/share/WSJT-X/wsjtx_log.adi" in s
     assert f"[config] Loaded {config}" in s
     assert "[config] Wanted rules: dxcc, cqz, country, was, pota, callsigns" in s
-    assert ("[adif] 9 QSOs across 1 file(s) — 8 calls, 5 DXCC, 4 CQ zones worked;"
-            " 2 DXCC, 2 CQ zones LoTW-confirmed") in s
+    assert "[adif] 9 QSOs across 1 file(s) — 8 calls" in s
+    assert "[dxcc] 5 worked, 2 confirmed (lotw)" in s
+    assert "[was] 4 worked, 2 confirmed (lotw)" in s
     assert f"[hamdat] Auto-detected: {home}/.hamdat/hamdat.db" in s
     assert f"[callsigns] 2 pattern(s) from {watch}" in s
-    assert "[pota] POTA pattern active" in s
+    assert "[pota] POTA in the message" in s
     assert f"[save] Appending JSON records to: {saved}" in s
     assert "downloading" not in s                      # fresh cty.dat: no refresh
 
@@ -218,11 +219,11 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     wsjtx.sendto(pk.decode("W1ABC ZL2AB RF70", time_ms=45_015_000), jt)   # --all: directed hit
     wsjtx.sendto(pk.decode("W1ABC W9ZZZ -05", time_ms=45_015_000), jt)    # --all: no hit, hidden
     app.wait_for(r"00  123015z.{0,60}CQ DX VK3XY QF22")
-    app.wait_for(r"\*\*\* NEEDED: NEW-DXCC\(VK\), NEW-CQZ\(30\), NEW-CTRY\(Australia\) \*\*\*"
-                 r"  \*\*\* MATCH: CALL:\^VK \[watch\.txt\] \*\*\*")
+    app.wait_for(r"\*\*\* WANTED: ❌DXCC\(VK\) · ❌CQZ\(30\) · ❌CTRY\(Australia\)"
+                 r" · CALLS\(\^VK \[watch\.txt\]\) \*\*\*")
     app.wait_for(r"01  123015z.{0,60}CQ W1ABC FN42")
-    app.wait_for(r"\*\*\* NEEDED: NEW-WAS\(NJ\) \*\*\*  \*\*\* MATCH: MSG:\\bPOTA\\b \*\*\*")
-    app.wait_for(r"\*\*\* NEEDED: NEW-WAS\(NH\) \*\*\*")
+    app.wait_for(r"\*\*\* WANTED: ❓WAS\(NJ\) · POTA \*\*\*")      # NJ worked, unconfirmed
+    app.wait_for(r"\*\*\* WANTED: ❌WAS\(NH\) \*\*\*")
     app.wait_for(r"04  123015z.{0,60}W1ABC ZL2AB RF70")
     assert "W1ABC W9ZZZ -05" not in app.screen()
 
@@ -252,7 +253,7 @@ def test_live_session(launch, home, wsjtx, tmp_path):
 
     # ── list: K2XYZ was just worked, so it's no longer listed ─────────────────
     app.type("list\r")
-    m = app.wait_for(r"\[list\] 3 NEEDED/MATCH entries \(last heard at bottom\)")
+    m = app.wait_for(r"\[list\] 3 wanted \(last heard at bottom\)")
     app.wait_for(r"\(last heard \d+s ago, ×1\)")
     time.sleep(0.2)
     listed = app.screen()[m.end():]
@@ -284,8 +285,10 @@ def test_live_session(launch, home, wsjtx, tmp_path):
 
     records = [json.loads(l) for l in saved.read_text().splitlines()]
     assert [r["callsign"] for r in records] == ["VK3XY", "W1ABC", "K2XYZ", "N1NEW", "VK3XY"]
-    assert records[0]["needed"] == ["NEW-DXCC(VK)", "NEW-CQZ(30)", "NEW-CTRY(Australia)"]
-    assert records[-1]["needed"] == []                 # worked after the reload
+    assert [(w["rule"], w["status"]) for w in records[0]["wanted"]] == [
+        ("DXCC", "new"), ("CQZ", "new"), ("CTRY", "new"), ("CALLS", None)]
+    # Confirmed after the reload: only the watchlist still wants it.
+    assert [w["rule"] for w in records[-1]["wanted"]] == ["CALLS"]
 
 
 def highlight(sock) -> tuple:
@@ -391,11 +394,11 @@ def test_cli_profile(home):
 
 
 def test_cli_config_error_exits_2(home):
-    path = write_config(home, '[[wanted]]\nrule = "was"\n[[wanted]]\nrule = "5bwas"\n')
+    path = write_config(home, '[[wanted]]\nrule = "was"\n[[wanted]]\nrule = "was"\n')
     r = _run_cli(home=home)
     assert r.returncode == 2
-    assert r.stderr == ("jtcon: config error: rules 'was' and '5bwas' can't be used"
-                        " together yet\n")
+    assert r.stderr == ("jtcon: config error: rule 'was' is used twice; give each [[wanted]]"
+                        ' entry its own name, e.g. name = "WAS-QRZ"\n')
     path.write_text("[udp]\nprot = 1\n")
     r = _run_cli(home=home)
     assert r.returncode == 2

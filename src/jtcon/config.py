@@ -55,10 +55,13 @@ class RuleInfo:
 RULES = {r.key: r for r in (
     RuleInfo("dxcc",      "award", "DXCC entity",                  {"confirm": ["lotw"]}),
     RuleInfo("cqz",       "award", "CQ zone (WAZ)",                {"confirm": ["lotw"]}),
+    RuleInfo("ituz",      "award", "ITU zone",                     {"confirm": ["lotw"]}),
     RuleInfo("country",   "award", "Country name",                 {"confirm": ["lotw"]}),
     RuleInfo("was",       "award", "Worked All States; needs hamdat",
              {"confirm": ["lotw"]}),
     RuleInfo("5bwas",     "award", "5-Band WAS on the current band; needs hamdat",
+             {"confirm": ["lotw"]}),
+    RuleInfo("grid",      "award", "4-character grid square (busy on FT8)",
              {"confirm": ["lotw"]}),
     RuleInfo("pota",      "watch", "POTA activators (POTA in the message)"),
     RuleInfo("sota",      "watch", "SOTA activators (SOTA in the message)"),
@@ -70,8 +73,6 @@ RULES = {r.key: r for r in (
 )}
 
 DEFAULT_WANTED = ("dxcc", "cqz", "country")
-
-_ENTITY_RULES = ("dxcc", "cqz", "country")
 
 
 @dataclass
@@ -116,7 +117,8 @@ class InputsConfig:
 
 @dataclass
 class FiltersConfig:
-    # Stations worked within this many days aren't wanted; 0 = today only; -1 = never
+    # A station worked within this many days isn't wanted for what that QSO
+    # covers (see core/wanted), nor for watchlists; 0 = today only; -1 = never
     suppress_worked_within_days: int = 5
 
 
@@ -146,9 +148,6 @@ class Config:
     def rule(self, key: str) -> WantedSpec | None:
         return next((w for w in self.wanted if w.rule == key), None)
 
-    def wants(self, key: str) -> bool:
-        return self.rule(key) is not None
-
     @property
     def evaluate_all(self) -> bool:
         return self.scope.decodes == "all"
@@ -156,12 +155,6 @@ class Config:
     @property
     def show_all(self) -> bool:
         return self.display.show == "all"
-
-    @property
-    def entity_needs_lotw(self) -> bool:
-        """DXCC/zone/country count only LoTW-confirmed QSOs (v2's --qsl-only)."""
-        specs = [w for w in self.wanted if w.rule in _ENTITY_RULES]
-        return not specs or specs[0].settings["confirm"] == ["lotw"]
 
     def as_dict(self) -> dict:
         """The effective settings in config-file shape (what --show-config prints)."""
@@ -397,7 +390,7 @@ def load_config(config_file: str | Path | None = None, profile: str | None = Non
 
 # The setting a --wanted RULE:VALUE token sets, per rule.
 _CLI_SETTING = {"callsigns": "files", "message": "files", "states": "states",
-                **{k: "confirm" for k in ("dxcc", "cqz", "country", "was", "5bwas")}}
+                **{k: "confirm" for k, r in RULES.items() if r.kind == "award"}}
 
 
 def _cli_value(rule: str, value: str, tok: str) -> dict:
@@ -472,32 +465,17 @@ def _wanted_spec(entry: dict) -> WantedSpec:
     return WantedSpec(info.key, name, settings)
 
 
-def _check_supported(specs: list) -> None:
-    """Refuse settings the v2 evaluation code can't honour yet (v3 phase 5 lifts these)."""
-    names: set = set()
-    rules: set = set()
+def _check_names(specs: list) -> None:
+    """Every rule instance needs its own name: it labels the hits and the columns."""
+    seen: dict = {}
     for w in specs:
-        if w.name.lower() in names:
+        other = seen.get(w.name.lower())
+        if other is not None:
+            if other.rule == w.rule and w.name == w.rule:
+                raise ConfigError(f"rule {w.rule!r} is used twice; give each [[wanted]]"
+                                  f" entry its own name, e.g. name = \"{w.rule.upper()}-QRZ\"")
             raise ConfigError(f"two [[wanted]] entries are named {w.name!r}")
-        names.add(w.name.lower())
-        if w.rule in rules:
-            raise ConfigError(f"rule {w.rule!r} appears twice; more than one instance"
-                              " of a rule is not supported yet")
-        rules.add(w.rule)
-    if "was" in rules and "5bwas" in rules:
-        raise ConfigError("rules 'was' and '5bwas' can't be used together yet")
-    confirms = {tuple(w.settings["confirm"]) for w in specs if w.rule in _ENTITY_RULES}
-    if len(confirms) > 1:
-        raise ConfigError("dxcc, cqz and country must use the same confirm setting for now")
-    for w in specs:
-        c = w.settings.get("confirm")
-        if c is None:
-            continue
-        ok = ([], ["lotw"]) if w.rule in _ENTITY_RULES else (["lotw"],)
-        if c not in ok:
-            allowed = " or ".join(json.dumps(o) for o in ok)
-            raise ConfigError(f"wanted rule {w.name!r}: confirm = {json.dumps(c)} is not"
-                              f" supported yet; use {allowed}")
+        seen[w.name.lower()] = w
 
 
 def build_config(raw: dict, wanted: str | None = None) -> Config:
@@ -505,7 +483,7 @@ def build_config(raw: dict, wanted: str | None = None) -> Config:
     if wanted is not None:
         entries = _select_wanted(entries, wanted)
     specs = [_wanted_spec(e) for e in entries]
-    _check_supported(specs)
+    _check_names(specs)
 
     udp, disp = raw.get("udp", {}), raw.get("display", {})
     inp, act  = raw.get("inputs", {}), raw.get("actions", {})
@@ -610,6 +588,7 @@ _RULE_EXAMPLES = r"""Values on the command line: RULE:VALUE, several values join
   jtcon --wanted message:~/ham/msgs.txt,pota
   jtcon --wanted 5bwas,states:AK+DE         (or states:~/ham/states.txt)
   jtcon --wanted dxcc:worked,cqz:worked     (confirm: worked = any QSO counts)
+  jtcon --wanted dxcc:lotw+qrz,was          (LoTW or QRZ confirmations count)
 
 Examples (config.toml):
 
@@ -620,6 +599,13 @@ Examples (config.toml):
   [[wanted]]
   rule   = "states"
   states = ["AK", "DE"]           # or a file:  file = "~/ham/states.txt"
+
+  [[wanted]]                      # the same rule twice: give each its own name
+  rule = "was"                    # shown as WAS, counted by LoTW
+  [[wanted]]
+  rule    = "was"
+  name    = "WAS-QRZ"             # shown as WAS-QRZ, counted by QRZ
+  confirm = ["qrz"]
 
   [[wanted]]
   rule    = "dxcc"
@@ -668,14 +654,19 @@ CONFIG_TEMPLATE = """\
 # cty    = "~/.jtcon_cty.dat"      # refreshed automatically when older than 30 days
 
 [filters]
+# A station worked within this many days isn't wanted again for what that QSO
+# covers (a 20m QSO doesn't hide 5BWAS on 40m), nor for any watchlist.
 # suppress_worked_within_days = 5   # 0 = worked today only; -1 = never suppress
 
 # ── Wanted rules ───────────────────────────────────────────────────────────────
 # Each [[wanted]] entry turns on one rule.  Without any, jtcon uses dxcc, cqz and
 # country.  See them all with:  jtcon --list-rules
 #
-# confirm lists the confirmations that count; an empty list means worked is
-# enough.  Default: ["lotw"].
+# Award rules (dxcc, cqz, ituz, country, was, 5bwas, grid) show ✅ confirmed,
+# ❓ worked but unconfirmed, ❌ new; ❓ and ❌ make the station WANTED.
+# confirm lists the confirmations that count (lotw, qrz, eqsl, card); an empty
+# list means worked is enough.  Default: ["lotw"].
+# A rule can be used twice with its own name, e.g. WAS by LoTW and by QRZ.
 
 [[wanted]]
 rule = "dxcc"
@@ -687,7 +678,15 @@ rule = "cqz"
 rule = "country"
 
 # [[wanted]]
-# rule = "was"            # or "5bwas" for 5-Band WAS on the current band
+# rule = "was"
+#
+# [[wanted]]
+# rule    = "was"
+# name    = "WAS-QRZ"
+# confirm = ["qrz"]
+#
+# [[wanted]]
+# rule = "5bwas"          # 5-Band WAS: the state on the current band
 
 # [[wanted]]
 # rule = "pota"

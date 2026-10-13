@@ -22,10 +22,11 @@ from jtcon.core.events import (Fatal, InputReloaded, LogLine, Ready, SpotEvent,
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
 from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
 from jtcon.core.logbook import qso_from_logged
-from jtcon.core.patterns import ACTIVATION_KEYWORDS, keyword_patterns
 from jtcon.core.protocol import (Close, Decode, LoggedAdif, QsoLogged, Status, encode_highlight,
                                  encode_reply, mode_name, parse_message)
 from jtcon.core.stations import StationTable, fmt_age
+from jtcon.core.wanted import AwardRule, build_rules
+from jtcon.core.wanted.watch import ActivationRule, CallsignsRule, StatesRule
 
 
 STALE_REPLY_S  = 120   # warn when replying to a station last heard longer ago than this
@@ -90,15 +91,12 @@ class Engine:
 
         self.cty           = CtyDat()
         self.logbook       = None     # Logbook: every QSO, merged across sources
-        self.adif_log      = None     # WorkedIndex built from the logbook
+        self.calls         = None     # CallIndex built from the logbook
+        self.rules         = build_rules(config.wanted)
         self.adif_input    = None
         self.inputs: list  = []       # inputs watched for changes
         self.hamdat        = None
         self.json_fh       = None
-        self.call_patterns = []
-        self.msg_patterns  = []
-        self.keyword_patterns = []    # pota/sota/iota; always among msg_patterns
-        self.state_set     = set()
         self.proxy_dests   = []
         self.cycle_tracker = CycleTracker()
         self.alerted: dict = {}       # alert key -> monotonic time last heard
@@ -213,18 +211,18 @@ class Engine:
         else:
             log("[cty.dat] File not found — entity lookup unavailable")
 
-        # ── hamdat and the states rule ────────────────────────────────────────
-        states_rule = cfg.rule("states")
-        if states_rule:
-            self.state_set = set(states_rule.settings["states"])
-            if states_rule.settings["file"]:
-                inp = StatesInput(self.state_set, states_rule.settings["file"])
+        # ── hamdat and the states rules ───────────────────────────────────────
+        states_rules = [r for r in self.rules if isinstance(r, StatesRule)]
+        for rule in states_rules:
+            file = rule.spec.settings["file"]
+            if file:
+                inp = StatesInput(rule.states, file, rule)
                 try:
-                    self.state_set = inp.load()
+                    rule.states = inp.load()
                 except OSError as exc:
-                    return self._fatal(f"[states] Cannot load state list: {exc}")
+                    return self._fatal(f"[{rule.name}] Cannot load state list: {exc}")
                 self.inputs.append(inp)
-            log(f"[states] {StatesInput.describe(self.state_set)}")
+            log(f"[{rule.name}] {StatesInput.describe(rule.states)}")
 
         db_path = cfg.inputs.hamdat
         if db_path.exists():
@@ -233,10 +231,10 @@ class Engine:
                 label = "Auto-detected" if db_path == HAMDAT_DB_DEFAULT else "Using"
                 log(f"[hamdat] {label}: {db_path}")
             except Exception as exc:
-                if states_rule:
+                if states_rules:
                     return self._fatal(f"[hamdat] Failed to open {db_path}: {exc}")
                 log(f"[hamdat] Warning: found but could not open {db_path}: {exc}")
-        elif states_rule:
+        elif states_rules:
             return self._fatal(f"[states] hamdat database not found: {db_path}")
 
         # ── ADIF ──────────────────────────────────────────────────────────────
@@ -252,46 +250,36 @@ class Engine:
                 adif_paths.append(p)
 
         if adif_paths:
-            inp = AdifInput(adif_paths, self.cty, self.hamdat,
-                            qsl_only=cfg.entity_needs_lotw, log=log)
+            inp = AdifInput(adif_paths, self.cty, self.hamdat, log=log)
             try:
-                self.logbook, self.adif_log = inp.load()
+                self.logbook, self.calls = inp.load()
+                self.rebuild_rules()
                 for p in adif_paths:
                     log(f"[adif] Loaded: {p.name}")
-                al = self.adif_log
-                summary = (f"[adif] {self._qso_count()} across {len(adif_paths)} file(s)"
-                           f" — {len(al.worked_calls)} calls,"
-                           f" {len(al.worked_dxcc_all)} DXCC,"
-                           f" {len(al.worked_cqz_all)} CQ zones worked")
-                if cfg.entity_needs_lotw:
-                    summary += (f"; {len(al.worked_dxcc)} DXCC,"
-                                f" {len(al.worked_cqz)} CQ zones LoTW-confirmed")
-                log(summary)
+                log(f"[adif] {self._qso_count()} across {len(adif_paths)} file(s)"
+                    f" — {len(self.calls.worked_calls)} calls")
+                for rule in self.rules:
+                    if isinstance(rule, AwardRule):
+                        log(f"[{rule.name}] {self._award_summary(rule)}")
                 self.adif_input = inp
                 self.inputs.append(inp)
             except Exception as exc:
                 log(f"[adif] Failed to load: {exc}")
         else:
-            log("[adif] No ADIF log found — NEEDED detection disabled")
+            log("[adif] No ADIF log found — award rules (dxcc, was, …) are off")
 
         # ── Watchlists ────────────────────────────────────────────────────────
-        rules = [w.rule for w in cfg.wanted]
-        self.keyword_patterns = keyword_patterns(rules)
-        self.msg_patterns = list(self.keyword_patterns)
-        for key in ("callsigns", "message"):
-            spec = cfg.rule(key)
-            if spec:
-                inp = PatternInput(key, spec.settings["files"], log=log)
+        for rule in self.rules:
+            if isinstance(rule, CallsignsRule):        # and MessageRule
+                inp = PatternInput(rule.name, rule.spec.settings["files"], rule, log=log)
                 try:
-                    patterns = inp.load()
+                    rule.patterns = inp.load()
                 except OSError as exc:
                     return self._fatal(f"[wanted] Cannot read pattern file: {exc}")
                 self.inputs.append(inp)
-                self._set_patterns(key, patterns)
-                log(f"[{key}] {inp.describe(patterns)}")
-        for key, word in ACTIVATION_KEYWORDS.items():
-            if key in rules:
-                log(f"[{key}] {word} pattern active")
+                log(f"[{rule.name}] {inp.describe(rule.patterns)}")
+            elif isinstance(rule, ActivationRule):
+                log(f"[{rule.name}] {rule.word} in the message")
 
         # ── Actions ───────────────────────────────────────────────────────────
         json_log = cfg.actions.json_log
@@ -320,11 +308,16 @@ class Engine:
             text += f" ({lb.merged} duplicates merged)"
         return text
 
-    def _set_patterns(self, key: str, patterns: list) -> None:
-        if key == "callsigns":
-            self.call_patterns = patterns
-        else:
-            self.msg_patterns = patterns + self.keyword_patterns
+    @staticmethod
+    def _award_summary(rule) -> str:
+        how = "+".join(sorted(rule.confirm)) if rule.confirm else "any QSO"
+        return f"{len(rule.worked)} worked, {len(rule.confirmed)} confirmed ({how})"
+
+    def rebuild_rules(self) -> None:
+        """Rebuild the award rules' indexes from the logbook (a worker thread may
+        call this: decodes are held meanwhile)."""
+        for rule in self.rules:
+            rule.rebuild(self.logbook)
 
     def check_inputs(self) -> None:
         """Start a reload if any log or watchlist changed.  Decodes received
@@ -340,7 +333,7 @@ class Engine:
         try:
             for inp in changed:
                 try:
-                    value = await asyncio.to_thread(inp.load)
+                    value = await asyncio.to_thread(self._load_input, inp)
                 except Exception as exc:
                     inp.skip()            # don't retry a broken file forever
                     self.log(f"[{inp.name}] Reload failed: {exc} — keeping the previous data")
@@ -353,19 +346,34 @@ class Engine:
             while self._held and not self._reloading:
                 self._handle_datagram(*self._held.popleft())
 
+    def _load_input(self, inp):
+        """Worker thread: load *inp*; for the logs, also rebuild the rules from
+        the new logbook, so the swap on the loop thread is instant."""
+        value = inp.load()
+        if inp is self.adif_input:
+            logbook, _ = value
+            rules = build_rules(self.config.wanted)
+            for rule in rules:
+                rule.rebuild(logbook)
+            value = (*value, rules)
+        return value
+
     def _apply_reload(self, inp, value) -> None:
         if inp is self.adif_input:
-            self.logbook, self.adif_log = value
+            self.logbook, self.calls, rebuilt = value
+            for rule, new in zip(self.rules, rebuilt):
+                if isinstance(rule, AwardRule):
+                    rule.worked, rule.confirmed = new.worked, new.confirmed
             unsaved = (f", plus {self.logbook.unsaved} logged but not in the files yet"
                        if self.logbook.unsaved else "")
             self.log(f"[adif] Reloaded {self._qso_count()} from {len(inp.paths)} file(s)"
                      f"{unsaved}.")
             self._run_log_reload_script(inp.paths)
         elif isinstance(inp, StatesInput):
-            self.state_set = value
-            self.log(f"[states] Reloaded {inp.describe(value)}")
+            inp.rule.states = value
+            self.log(f"[{inp.name}] Reloaded {inp.describe(value)}")
         else:
-            self._set_patterns(inp.name, value)
+            inp.rule.patterns = value
             self.log(f"[{inp.name}] Reloaded {inp.describe(value)}")
 
     async def _check_inputs_periodically(self) -> None:
@@ -462,7 +470,10 @@ class Engine:
                 # file's record is merged with this one when it's reloaded.
                 q = qso_from_logged(msg, self.cty, self.hamdat)
                 self.adif_input.extra.append(q)
-                self.adif_log.add(self.logbook.add(q))
+                rec = self.logbook.add(q)
+                self.calls.add(rec)
+                for rule in self.rules:
+                    rule.add(rec)
                 self.refresh_stations()
         # Usually the log file is already written; if not, the periodic check
         # catches it.  Nothing is read until the file's mtime changes.
@@ -470,10 +481,8 @@ class Engine:
 
     def context(self) -> DecodeContext:
         return DecodeContext(
-            config=self.config, cty=self.cty, adif_log=self.adif_log,
-            json_fh=self.json_fh, call_patterns=self.call_patterns,
-            msg_patterns=self.msg_patterns, state_set=self.state_set,
-            hamdat=self.hamdat, alerted=self.alerted, dial_freq=self.dial_freq,
+            config=self.config, cty=self.cty, logbook=self.logbook, calls=self.calls,
+            rules=self.rules, json_fh=self.json_fh, hamdat=self.hamdat, alerted=self.alerted, dial_freq=self.dial_freq,
             de_call=self.de_call, log=self.log,
         )
 
@@ -487,8 +496,8 @@ class Engine:
         if r is None:
             return
         station = None
-        if r.callsign and (r.is_cq or r.needed_flags or r.match_flags):
-            station = self.stations.store(r.callsign, d, addr, r.needed_flags, r.match_flags)
+        if r.callsign and (r.is_cq or r.wanted):
+            station = self.stations.store(r.callsign, d, addr, r.wanted)
             self._update_highlight(station)
         self._emit(SpotEvent(r, ctx, station))
 
@@ -508,10 +517,7 @@ class Engine:
         ctx = self.context()
         for station in self.stations.all():
             r = judge(station.decode, ctx)
-            if r is None:          # a non-CQ decode that was shown only for its hit
-                station.needed_flags, station.match_flags = [], []
-            else:
-                station.needed_flags, station.match_flags = r.needed_flags, r.match_flags
+            station.wanted = r.wanted if r is not None else []   # None: was shown for its hit
             self._update_highlight(station)
             if r is not None:
                 self._emit(StationUpdated(r, ctx, station))

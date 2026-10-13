@@ -125,9 +125,8 @@ def test_wanted_station_is_highlighted_once(make_engine):
 def test_highlight_cleared_when_no_longer_wanted(make_engine):
     e = make_engine()
     e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
-    e.adif_log.worked_dxcc.add("VK")                     # as if confirmed meanwhile
-    e.adif_log.worked_cqz.add(30)
-    e.adif_log.worked_country.add("AUSTRALIA")
+    for rule in e.rules:                                 # as if confirmed meanwhile
+        rule.confirmed |= {"VK", 30, "AUSTRALIA"}
     e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
     assert sent(e) == [("highlight", "VK3XY", ORANGE), ("highlight", "VK3XY", (None, None))]
 
@@ -247,7 +246,7 @@ def test_decodes_wait_for_a_reload(make_engine, tmp_path):
     asyncio.run(scenario())
     assert "[adif] Reloaded 10 QSOs from 1 file(s)." in logs(e)
     (ev,) = spots(e)
-    assert ev.result.needed_flags == []                  # judged against the new log
+    assert ev.result.wanted == []                        # judged against the new log
     assert f"[on_log_reload] uploading {log}" in logs(e)
     assert out.read_text() == f"{log}\n"
 
@@ -274,18 +273,18 @@ def test_qso_logged_checks_the_log_at_once(make_engine, tmp_path):
     asyncio.run(scenario())
     # The file's record and the one WSJT-X reported are the same QSO.
     assert logs(e)[-1] == "[adif] Reloaded 10 QSOs from 1 file(s)."
-    assert len(e.logbook) == 10 and "VK3XY" in e.adif_log.worked_calls
+    assert len(e.logbook) == 10 and "VK3XY" in e.calls.worked_calls
 
 
 def test_qso_logged_marks_the_call_worked_at_once(make_engine):
     e = make_engine()
     e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
-    assert spots(e)[-1].result.needed_flags                # wanted
+    assert spots(e)[-1].result.wanted                      # wanted
     e.datagram_received(pk.qso_logged("VK3XY"), ADDR)      # the file isn't written yet
     e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
-    assert spots(e)[-1].result.needed_flags == []          # worked today: suppressed
-    assert "VK" in e.adif_log.worked_dxcc and len(e.logbook) == 10
-    assert e.adif_log.worked_calls_by_band["20m"] >= {"VK3XY"}
+    assert spots(e)[-1].result.wanted == []                # worked today: suppressed
+    assert "VK" in e.rules[0].worked and len(e.logbook) == 10
+    assert e.calls.worked_calls_by_band["20m"] >= {"VK3XY"}
 
 
 def test_qso_logged_updates_the_buffered_station(make_engine):
@@ -296,7 +295,7 @@ def test_qso_logged_updates_the_buffered_station(make_engine):
     e.datagram_received(pk.qso_logged("VK3XY"), ADDR)
     assert [s.callsign for s in e.stations.hits()] == ["ZL2AB"]
     updated = {ev.station.callsign: ev for ev in e.events if isinstance(ev, StationUpdated)}
-    assert updated["VK3XY"].result.needed_flags == [] and updated["ZL2AB"].result.needed_flags
+    assert updated["VK3XY"].result.wanted == [] and updated["ZL2AB"].result.wanted
     assert len(spots(e)) == 2 and e.alerted == alerted     # nothing new heard, no alerts
     assert sent(e).count(("highlight", "VK3XY", (None, None))) == 1
 
@@ -304,7 +303,7 @@ def test_qso_logged_updates_the_buffered_station(make_engine):
 def test_qso_logged_without_any_log_is_just_reported(make_engine):
     e = make_engine(adif=False)
     e.datagram_received(pk.qso_logged("VK3XY"), ADDR)
-    assert logs(e) == ["[qso] Logged VK3XY"] and e.adif_log is None
+    assert logs(e) == ["[qso] Logged VK3XY"] and e.logbook is None
 
 
 def test_unreadable_reload_is_reported_once(make_engine, tmp_path, monkeypatch):
@@ -348,15 +347,19 @@ def _engine(tmp_path, layer: dict, sock=None) -> Engine:
 
 def test_startup_loads_inputs(tmp_path, no_wsjt_logs):
     e = _engine(tmp_path, {"inputs": {"adif": [str(LOG_PATH)]},
-                           "wanted": [{"rule": "pota"}]})
+                           "wanted": [{"rule": "dxcc"}, {"rule": "pota"},
+                                      {"rule": "was", "name": "WAS-QRZ", "confirm": ["qrz"]},
+                                      {"rule": "cqz", "confirm": []}]})
     assert e._load_inputs()
     assert logs(e) == [
-        "[config] Wanted rules: pota",
+        "[config] Wanted rules: dxcc, pota, WAS-QRZ, cqz",
         "[cty.dat] Loaded 4798 prefixes + 2708 exact callsigns",
         "[adif] Loaded: log.adi",
-        "[adif] 9 QSOs across 1 file(s) — 8 calls, 5 DXCC, 4 CQ zones worked;"
-        " 2 DXCC, 2 CQ zones LoTW-confirmed",
-        "[pota] POTA pattern active",
+        "[adif] 9 QSOs across 1 file(s) — 8 calls",
+        "[dxcc] 5 worked, 2 confirmed (lotw)",
+        "[WAS-QRZ] 3 worked, 1 confirmed (qrz)",      # no hamdat: states as logged
+        "[cqz] 4 worked, 4 confirmed (any QSO)",
+        "[pota] POTA in the message",
         "[highlight] Wanted stations are highlighted in WSJT-X (#ffa500 on #000000)",
     ]
 
@@ -462,9 +465,9 @@ def test_watchlists_reload_when_edited(tmp_path, no_wsjt_logs):
                        f"[message] Reloaded 1 pattern(s) from {msgs}"]
     assert [ev.name for ev in e.events if isinstance(ev, InputReloaded)] == [
         "callsigns", "message"]
-    assert [p.pattern for p, _ in e.call_patterns] == ["^VK", "^ZL"]
-    # The POTA keyword stays among the message patterns.
-    assert [p.pattern for p, _ in e.msg_patterns] == ["JA", r"\bPOTA\b"]
+    calls_rule, msg_rule, pota = e.rules
+    assert [p.pattern for p, _ in calls_rule.patterns] == ["^VK", "^ZL"]
+    assert [p.pattern for p, _ in msg_rule.patterns] == ["JA"]
     e.events.clear()
     _reload(e)                                         # nothing changed
     assert e.events == []
@@ -478,10 +481,10 @@ def test_states_file_reloads(tmp_path, no_wsjt_logs, monkeypatch):
     hamdat.write_text("")
     e = _engine(tmp_path, {"wanted": [{"rule": "states", "states": ["AK"],
                                        "file": str(states)}]})
-    assert e._load_inputs() and e.state_set == {"AK", "DE"}
+    assert e._load_inputs() and e.rules[0].states == {"AK", "DE"}
     _rewrite(states, "DE\nRI\n")
     _reload(e)
-    assert e.state_set == {"AK", "DE", "RI"}
+    assert e.rules[0].states == {"AK", "DE", "RI"}
     assert logs(e)[-1] == "[states] Reloaded 3 state(s): AK, DE, RI"
 
 
@@ -495,28 +498,29 @@ def test_a_broken_watchlist_keeps_the_previous_one(tmp_path, no_wsjt_logs):
     _reload(e)
     assert logs(e)[0].startswith("[callsigns] Reload failed: [Errno 2]")
     assert logs(e)[0].endswith("— keeping the previous data")
-    assert [p.pattern for p, _ in e.call_patterns] == ["^VK"]
+    assert [p.pattern for p, _ in e.rules[0].patterns] == ["^VK"]
     e.events.clear()
     _reload(e)                                         # still missing: not retried
     assert e.events == []
     calls.write_text("^ZL\n")                          # back again
     _reload(e)
-    assert [p.pattern for p, _ in e.call_patterns] == ["^ZL"]
+    assert [p.pattern for p, _ in e.rules[0].patterns] == ["^ZL"]
 
 
 def test_watchlist_edit_rejudges_buffered_stations(make_engine, tmp_path):
     calls = tmp_path / "calls.txt"
     calls.write_text("^ZZ\n")
     e = make_engine(config={"wanted": [{"rule": "callsigns", "files": [str(calls)]}]})
-    inp = jtcon.core.inputs.PatternInput("callsigns", [calls])
-    e.call_patterns = inp.load()
+    rule = e.rules[0]
+    inp = jtcon.core.inputs.PatternInput("callsigns", [calls], rule)
+    rule.patterns = inp.load()
     e.inputs.append(inp)
     e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
     assert e.stations.hits() == [] and sent(e) == []
     _rewrite(calls, "^W1\n")
     _reload(e)
     (st,) = e.stations.hits()
-    assert st.match_flags == ["CALL:^W1 [calls.txt]"]
+    assert [h.mark() for h in st.wanted] == ["CALLS(^W1 [calls.txt])"]
     assert sent(e) == [("highlight", "W1ABC", ORANGE)]     # highlighted, not alerted
     assert e.alerted == {} and len(spots(e)) == 1
 

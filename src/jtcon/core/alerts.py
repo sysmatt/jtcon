@@ -10,18 +10,13 @@ import urllib.request
 #  Alert helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_alert_msg(callsign, entity_info: dict,
-                     needed_flags: list, match_flags: list) -> str:
+def _build_alert_msg(callsign, entity_info: dict, wanted: list) -> str:
+    """"VK3XY | Australia CQ30 | WANTED: DXCC(VK) new · CALLS(^VK [watch.txt])"."""
     segments = [callsign or "?"]
     if entity_info:
         segments.append(f"{entity_info['entity']} CQ{entity_info['cq_zone']}")
-    flag_parts = []
-    if needed_flags:
-        flag_parts.append("NEEDED: " + ", ".join(needed_flags))
-    if match_flags:
-        flag_parts.append("MATCH: " + ", ".join(match_flags))
-    if flag_parts:
-        segments.append("  ".join(flag_parts))
+    if wanted:
+        segments.append("WANTED: " + " · ".join(h.text() for h in wanted))
     return " | ".join(segments)
 
 

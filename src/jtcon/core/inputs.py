@@ -8,10 +8,10 @@ raises and leaves the caller with the previous one.
 from pathlib import Path
 
 from jtcon.core.adif import parse_adif
+from jtcon.core.calls import CallIndex
 from jtcon.core.hamdat import load_state_file
 from jtcon.core.logbook import Logbook, qso_from_adif
 from jtcon.core.patterns import load_regex_patterns
-from jtcon.core.worked import WorkedIndex
 
 
 def mtimes(paths) -> dict:
@@ -49,7 +49,7 @@ class Input:
 
 
 class AdifInput(Input):
-    """ADIF logs, read into a Logbook plus the worked index the rules use.
+    """ADIF logs, read into a Logbook plus its per-call index (CallIndex).
 
     Only files that changed are parsed again.  QSOs that WSJT-X reported as
     logged (*extra*) are merged in on every load, so they stay worked until the
@@ -57,9 +57,9 @@ class AdifInput(Input):
     """
     name = "adif"
 
-    def __init__(self, paths, cty, hamdat, qsl_only: bool = False, log=None):
+    def __init__(self, paths, cty, hamdat, log=None):
         super().__init__(paths)
-        self.cty, self.hamdat, self.qsl_only = cty, hamdat, qsl_only
+        self.cty, self.hamdat = cty, hamdat
         self.log = log or (lambda m: None)
         self.extra: list = []
         self._cache: dict = {}              # path -> (mtime, [QSO])
@@ -90,15 +90,15 @@ class AdifInput(Input):
             if logbook.add(q).sources == {"wsjt-x"}:
                 logbook.unsaved += 1
         logbook.merged = duplicates   # a logged QSO meeting its file record isn't one
-        return logbook, WorkedIndex(logbook.qsos, qsl_only=self.qsl_only)
+        return logbook, CallIndex(logbook.qsos)
 
 
 class PatternInput(Input):
-    """A watchlist: regex files for the callsigns or message rule."""
+    """A watchlist: regex files for a callsigns or message rule (*rule*)."""
 
-    def __init__(self, name: str, files, log=None):
+    def __init__(self, name: str, files, rule=None, log=None):
         super().__init__(files)
-        self.name = name
+        self.name, self.rule = name, rule
         self.log = log or (lambda m: None)
 
     def read(self) -> list:
@@ -109,12 +109,13 @@ class PatternInput(Input):
 
 
 class StatesInput(Input):
-    """The states rule: states listed in the config plus those in its file."""
-    name = "states"
+    """A states rule (*rule*): states listed in the config plus those in its file."""
 
-    def __init__(self, states, file):
+    def __init__(self, states, file, rule=None):
         super().__init__([file])
         self.states = set(states)
+        self.rule = rule
+        self.name = rule.name if rule else "states"
 
     def read(self) -> set:
         return self.states | load_state_file(self.paths[0])

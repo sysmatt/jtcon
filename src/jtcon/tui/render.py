@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from jtcon.core.bands import _5BWAS_BANDS, _WAS_STATES
+from jtcon.core.wanted import MARKS, RULE_CLASSES, AwardRule, rule_label
 
 if TYPE_CHECKING:
     from jtcon.config import Config
@@ -17,7 +17,6 @@ _W_MSG  = 24
 _W_CALL = 12
 _W_GRID = 6
 _W_DAYS = 5    # days-since-last-worked column width
-_W_WAS  = 4   # WAS / 5BWAS column: emoji(2) + state(2)
 
 
 # ANSI colour codes used in the decode output pane.
@@ -27,9 +26,9 @@ _BOLD = "\033[1m"
 _GRN  = "\033[32m"    # green      — worked grid/entity
 _BGRN = "\033[1;32m"  # bold green  — worked callsign (same band + mode)
 _CYN  = "\033[36m"    # cyan       — entity block
-_BRED = "\033[1;31m"  # bold red    — NEEDED alert (CQ)
-_BYEL = "\033[1;33m"  # bold yellow — MATCH alert / callsign worked on another band or mode
-_BMAG = "\033[1;35m"  # bold magenta — NEEDED/MATCH alert (non-CQ, --all)
+_BRED = "\033[1;31m"  # bold red    — WANTED by an award rule (CQ)
+_BYEL = "\033[1;33m"  # bold yellow — WANTED by watchlists only / call worked on another band or mode
+_BMAG = "\033[1;35m"  # bold magenta — WANTED, non-CQ (scope all)
 
 
 def _col(text: str, code: str, on: bool) -> str:
@@ -39,12 +38,28 @@ def _col(text: str, code: str, on: bool) -> str:
 _BAR_WIDTH = 14   # characters wide for the cycle bargraph
 
 
+def _status_columns(cfg: Config) -> list:
+    """(label, value width, column width) for each award rule, in config order."""
+    cols = []
+    for spec in cfg.wanted:
+        cls = RULE_CLASSES[spec.rule]
+        if issubclass(cls, AwardRule):
+            label = rule_label(spec)
+            cols.append((label, cls.value_width, max(len(label), 2 + cls.value_width)))
+    return cols
+
+
+def _status_cell(hit, value_width: int, width: int) -> str:
+    """✅VK / ❓30 / ❌ — the mark is two cells wide on screen."""
+    if hit is None:
+        return " " * width
+    return f"{MARKS[hit.status]}{hit.value:<{value_width}}" + " " * (width - 2 - value_width)
+
+
 def _render(ctx: DecodeContext, r: DecodeResult) -> list:
-    """Return the fixed-width display line plus any NEEDED/MATCH alert line."""
-    cfg, adif_log, color = ctx.config, ctx.adif_log, ctx.config.display.color
+    """Return the fixed-width display line plus a WANTED line when wanted."""
+    cfg, calls, color = ctx.config, ctx.calls, ctx.config.display.color
     decoded   = r.decoded
-    checkable = r.is_cq or cfg.evaluate_all
-    is_hit    = bool(r.needed_flags or r.match_flags)
     band      = ctx.band
     cols: list = []
 
@@ -58,16 +73,16 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
     cols.append(_col(f"{r.mode:<4}",            _DIM, color))
 
     msg_col = f"{r.msg_text:<{_W_MSG}}"
-    cols.append(_col(msg_col, _BMAG, color) if (not r.is_cq and is_hit) else msg_col)
+    cols.append(_col(msg_col, _BMAG, color) if (not r.is_cq and r.wanted) else msg_col)
 
     call     = r.callsign or ""
     call_str = f"{call:<{_W_CALL}}"
-    if call and adif_log:
-        band_match = call in adif_log.worked_calls_by_band.get(band or "", set())
-        mode_match = call in adif_log.worked_calls_by_mode.get(r.mode, set())
+    if call and calls:
+        band_match = call in calls.worked_calls_by_band.get(band or "", set())
+        mode_match = call in calls.worked_calls_by_mode.get(r.mode, set())
         if band_match and mode_match:
             call_color = _BGRN       # worked on this band and mode
-        elif call in adif_log.worked_calls:
+        elif call in calls.worked_calls:
             call_color = _BYEL       # worked, but different band or mode
         else:
             call_color = _BOLD
@@ -77,84 +92,51 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
 
     grid        = r.grid or ""
     grid_str    = f"{grid:<{_W_GRID}}"
-    grid_worked = bool(adif_log and grid and grid[:4] in adif_log.worked_grids)
+    grid_worked = bool(calls and grid and grid[:4] in calls.worked_grids)
     cols.append(_col(grid_str, _GRN, color) if grid_worked else grid_str)
 
-    if adif_log:
+    if calls:
         days_str = " " * _W_DAYS
-        if call in adif_log.last_worked:
-            delta    = (datetime.now(timezone.utc).date() - adif_log.last_worked[call]).days
+        if call in calls.last_worked:
+            delta    = (datetime.now(timezone.utc).date() - calls.last_worked[call]).days
             days_str = f"{delta:>4d}d"
         cols.append(days_str)
 
     if ctx.hamdat:
-        st_val    = (r.station_state or "") if checkable else ""
+        st_val    = (r.station_state or "") if r.checked else ""
         st_str    = f"{st_val:<2}"
-        st_worked = bool(adif_log and st_val and st_val in adif_log.worked_states_all)
+        st_worked = bool(calls and st_val and st_val in calls.worked_states)
         cols.append(_col(st_str, _GRN, color) if st_worked else st_str)
 
-    # Status icons are 2 cells wide; reserve the space even when blank so the
-    # columns after the entity block stay aligned with the header.
-    icon_on = [bool(adif_log) and on
-               for on in (cfg.wants("dxcc"), cfg.wants("cqz"), cfg.wants("country"))]
     ei = r.entity_info
     if ei:
-        icons = ["", "", ""]
-        if adif_log and checkable:
-            wf     = set(adif_log.worked_flags(ei, cfg))
-            wf_all = set(adif_log.worked_flags_all(ei, cfg))
-            for i, kind in enumerate(("dxcc", "cqz", "country")):
-                if icon_on[i]:
-                    icons[i] = "✅" if kind in wf else ("❓" if kind in wf_all else "❌")
-        entity_str = (
-            f"| {ei['entity']:<30}"
-            f"  {icons[0]}CQ{ei['cq_zone']:<3}"
-            f" {icons[1]}ITU{ei['itu_zone']:<3}"
-            f" {icons[2]}{ei['continent']:<2}"
-        )
+        entity_str = (f"| {ei['entity']:<30}  CQ{ei['cq_zone']:<3} ITU{ei['itu_zone']:<3}"
+                      f" {ei['continent']:<2}")
         cols.append(_col(entity_str, _CYN, color))
     else:
-        pad = ["  " if on else "" for on in icon_on]
-        cols.append(f"| {'':<30}  {pad[0]}{'':5} {pad[1]}{'':6} {pad[2]}{'':2}")
+        cols.append(f"| {'':<30}  {'':5} {'':6} {'':2}")
 
-    st = r.station_state
-    need_was, need_5bwas = cfg.wants("was"), cfg.wants("5bwas")
-    if adif_log and (need_was or need_5bwas):
-        was_em = ""
-        if checkable and st in _WAS_STATES:
-            if need_was:
-                if   st in adif_log.worked_states_lotw: was_em = "✅"
-                elif st in adif_log.worked_states_all:  was_em = "❓"
-                else:                                   was_em = "❌"
-            elif band in _5BWAS_BANDS:
-                confirmed = adif_log.worked_states_bands_lotw.get(st, set())
-                worked    = adif_log.worked_states_bands_all.get(st, set())
-                if   band in confirmed: was_em = "✅"
-                elif band in worked:    was_em = "❓"
-                else:                   was_em = "❌"
-        cols.append(f"{was_em}{st:<2}" if was_em else " " * _W_WAS)
-
-    if adif_log:
-        if need_5bwas:
-            qrz  = adif_log.qrz_confirmed_by_band.get(band or "", set())
-            lotw = adif_log.lotw_rcvd_by_band.get(band or "", set())
-        else:
-            qrz  = adif_log.qrz_confirmed_calls
-            lotw = adif_log.lotw_qsl_rcvd_calls
-        cols.append("⭐" if call in qrz  else "  ")
-        cols.append("🌎" if call in lotw else "  ")
+    if calls:
+        status = _status_columns(cfg)
+        if status:
+            cells = [_status_cell(r.hit(label) if r.checked else None, vw, w)
+                     for label, vw, w in status]
+            cols.append("| " + "  ".join(cells))
+        # Per call: has this station confirmed with us via QRZ / LoTW (on this
+        # band, when 5-Band WAS is on)?
+        per_band = band if any(w.rule == "5bwas" for w in cfg.wanted) else None
+        cols.append("⭐" if calls.confirmed(call, "qrz", per_band) else "  ")
+        cols.append("🌎" if calls.confirmed(call, "lotw", per_band) else "  ")
 
     lines = ["  ".join(cols)]
 
-    alert_parts: list = []
-    if adif_log and r.needed_flags:
-        alert_color = _BRED if r.is_cq else _BMAG
-        alert_parts.append(_col(f"*** NEEDED: {', '.join(r.needed_flags)} ***", alert_color, color))
-    if r.match_flags:
-        match_color = _BYEL if r.is_cq else _BMAG
-        alert_parts.append(_col(f"*** MATCH: {', '.join(r.match_flags)} ***", match_color, color))
-    if alert_parts:
-        lines.append("  " + "  ".join(alert_parts))
+    if r.wanted:
+        if not r.is_cq:
+            code = _BMAG
+        else:   # red when an award rule wants it; yellow for watchlists alone
+            code = _BRED if any(h.status for h in r.wanted) else _BYEL
+        text = " · ".join(h.mark() for h in r.wanted)
+        lines.append("  " + _col(f"*** WANTED: {text} ***", code, color))
     return lines
 
 
@@ -162,7 +144,7 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
 #  Column header line
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _header_line(cfg: Config, has_adif: bool = False,
+def _header_line(cfg: Config, has_log: bool = False,
                  has_hamdat: bool = False) -> str:
     parts = ["##"]
     if cfg.display.show_time:
@@ -175,18 +157,15 @@ def _header_line(cfg: Config, has_adif: bool = False,
     parts.append(f"{'message':<{_W_MSG}}")
     parts.append(f"{'callsign':<{_W_CALL}}")
     parts.append(f"{'grid':<{_W_GRID}}")
-    if has_adif:
+    if has_log:
         parts.append(f"{'days':>{_W_DAYS}}")
     if has_hamdat:
         parts.append(f"{'ST':<2}")
-    w = 2 if has_adif and cfg.wants("dxcc")    else 0
-    x = 2 if has_adif and cfg.wants("cqz")     else 0
-    y = 2 if has_adif and cfg.wants("country") else 0
-    parts.append(f"| {'entity':<30}  {'':{w}}CQz   {'':{x}}ITUz   {'':{y}}ct")
-    if has_adif and (cfg.wants("was") or cfg.wants("5bwas")):
-        label = "WAS " if cfg.wants("was") else "5BW "
-        parts.append(f"{label:<{_W_WAS}}")
-    if has_adif:
+    parts.append(f"| {'entity':<30}  CQz   ITUz   ct")
+    if has_log:
+        status = _status_columns(cfg)
+        if status:
+            parts.append("| " + "  ".join(f"{label:<{w}}" for label, _, w in status))
         parts.append("QRZ")
         parts.append("LoW")
     header = "  ".join(parts)

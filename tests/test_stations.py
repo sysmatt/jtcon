@@ -5,6 +5,9 @@ import time
 import pytest
 
 from jtcon.core.stations import BUF_SIZE, StationTable
+from jtcon.core.wanted import NEW, Hit
+
+DXCC_VK = Hit("DXCC", "VK", NEW)
 
 
 @pytest.fixture
@@ -14,8 +17,8 @@ def clock(monkeypatch):
     return now
 
 
-def store(table, call, needed=(), match=(), decode="d"):
-    return table.store(call, decode, ("127.0.0.1", 2237), list(needed), list(match))
+def store(table, call, wanted=(), decode="d"):
+    return table.store(call, decode, ("127.0.0.1", 2237), list(wanted))
 
 
 def test_each_station_keeps_its_index(clock):
@@ -53,13 +56,13 @@ def test_freed_slots_are_reused_in_order():
 
 def test_hits_most_recent_last(clock):
     t = StationTable()
-    store(t, "VK3XY", needed=["NEW-DXCC(VK)"])
+    store(t, "VK3XY", wanted=[DXCC_VK])
     clock[0] += 1
     store(t, "W1ABC")
     clock[0] += 1
-    store(t, "K2XYZ", match=["MSG:POTA"])
+    store(t, "K2XYZ", wanted=[Hit("POTA")])
     clock[0] += 1
-    store(t, "VK3XY", needed=["NEW-DXCC(VK)"])
+    store(t, "VK3XY", wanted=[DXCC_VK])
     assert [s.callsign for s in t.hits()] == ["K2XYZ", "VK3XY"]
     store(t, "VK3XY")                                 # no longer a hit
     assert [s.callsign for s in t.hits()] == ["K2XYZ"]

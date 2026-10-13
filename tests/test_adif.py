@@ -1,12 +1,11 @@
-"""ADIF parsing, the ADIF input, and the worked/confirmed index built from it."""
+"""ADIF parsing, the ADIF input, and the per-call index built from it."""
 
 from datetime import date
 from pathlib import Path
 
 from jtcon.core.adif import WSJT_LOG_SEARCH_PATHS, parse_adif
-from jtcon.core.decode import _entity_info
 from jtcon.core.inputs import AdifInput
-from conftest import LOG_PATH, FakeHamdat, v2_config
+from conftest import LOG_PATH, FakeHamdat
 
 
 def test_parse_adif_records():
@@ -38,19 +37,15 @@ def test_parse_adif_empty(tmp_path):
     assert parse_adif(f) == []
 
 
-def test_worked_index(make_adif):
-    a = make_adif()
+def test_call_index(load_log):
+    _, a = load_log()
     assert a.worked_calls == {"W1ABC", "K2XYZ", "JA1XYZ", "DL1ABC", "W9ZZZ",
                               "G4ABC", "EA8ABC", "K5TX"}
     assert a.worked_grids == {"FN42", "JO62"}          # 6-char grids cut to 4
-    assert a.worked_dxcc == {"K", "JA", "DL", "G", "EA8"}
-    assert a.worked_cqz == {5, 25, 14, 33}
-    assert a.worked_country == {"UNITED STATES", "JAPAN", "FED. REP. OF GERMANY",
-                                "ENGLAND", "CANARY ISLANDS"}
 
 
-def test_band_and_mode_index(make_adif):
-    a = make_adif()
+def test_band_and_mode_index(load_log):
+    _, a = load_log()
     assert a.worked_calls_by_band["20m"] == {"W1ABC", "JA1XYZ", "DL1ABC", "K5TX"}
     assert a.worked_calls_by_band["30m"] == {"W1ABC"}
     # FT4 is logged as MODE=MFSK SUBMODE=FT4; the submode wins.
@@ -58,46 +53,25 @@ def test_band_and_mode_index(make_adif):
     assert "MFSK" not in a.worked_calls_by_mode
 
 
-def test_last_worked_keeps_newest_date(make_adif):
-    a = make_adif()
+def test_last_worked_keeps_newest_date(load_log):
+    _, a = load_log()
     assert a.last_worked["W1ABC"] == date(2025, 3, 1)   # two QSOs; newest wins
     assert a.last_worked["DL1ABC"] == date(2026, 10, 12)
 
 
-def test_confirmation_sets(make_adif):
-    a = make_adif()
-    assert a.lotw_qsl_rcvd_calls == {"W1ABC", "DL1ABC", "W9ZZZ"}
-    assert a.qrz_confirmed_calls == {"W1ABC", "EA8ABC"}
-    assert a.lotw_rcvd_by_band == {"20m": {"W1ABC", "DL1ABC"}, "15m": {"W9ZZZ"}}
-    assert a.qrz_confirmed_by_band == {"20m": {"W1ABC"}, "10m": {"EA8ABC"}}
+def test_confirmed_calls(load_log):
+    _, a = load_log()
+    assert a.confirmed_calls["lotw"] == {"W1ABC", "DL1ABC", "W9ZZZ"}
+    assert a.confirmed_calls["qrz"] == {"W1ABC", "EA8ABC"}
+    assert a.confirmed_calls["eqsl"] == {"G4ABC"}
+    assert a.confirmed("W1ABC", "lotw", "20m") and not a.confirmed("W1ABC", "lotw", "30m")
+    assert a.confirmed("EA8ABC", "qrz") and not a.confirmed("EA8ABC", "lotw")
 
 
-def test_qsl_only_counts_only_lotw(make_adif):
-    a = make_adif(qsl_only=True)
-    assert a.worked_dxcc == {"K", "DL"}
-    assert a.worked_cqz == {5, 14}
-    assert a.worked_country == {"UNITED STATES", "FED. REP. OF GERMANY"}
-    # The *_all sets ignore --qsl-only.
-    assert a.worked_dxcc_all == {"K", "JA", "DL", "G", "EA8"}
-    assert a.worked_cqz_all == {5, 25, 14, 33}
-    # v2: QRZ and eQSL confirmations do not count (EA8ABC is QRZ-confirmed,
-    # G4ABC eQSL-confirmed).  v3 makes the confirmation sources per rule.
-    assert "EA8" not in a.worked_dxcc and "G" not in a.worked_dxcc
-
-
-def test_states_from_adif_and_hamdat(make_adif):
-    a = make_adif()
+def test_states_from_adif_and_hamdat(load_log):
     # MA, NJ, TX come from the ADIF state field; IL (W9ZZZ) from hamdat.
-    assert a.worked_states_all == {"MA", "NJ", "TX", "IL"}
-    assert a.worked_states_lotw == {"MA", "IL"}
-    assert a.worked_states_bands_all == {"MA": {"20m"}, "NJ": {"40m"}, "TX": {"20m"},
-                                         "IL": {"15m"}}
-    assert a.worked_states_bands_lotw == {"MA": {"20m"}, "IL": {"15m"}}
-
-
-def test_states_without_hamdat(make_adif):
-    a = make_adif(hamdat=None)
-    assert a.worked_states_all == {"MA", "NJ", "TX"}
+    assert load_log()[1].worked_states == {"MA", "NJ", "TX", "IL"}
+    assert load_log(hamdat=None)[1].worked_states == {"MA", "NJ", "TX"}
 
 
 def test_unreadable_file_is_logged_and_skipped(cty, tmp_path):
@@ -106,24 +80,6 @@ def test_unreadable_file_is_logged_and_skipped(cty, tmp_path):
                            log=logged.append).load()
     assert len(logbook) == 9
     assert len(logged) == 1 and logged[0].startswith("[adif] Cannot read missing.adi")
-
-
-def test_needed_and_worked_flags(make_adif, cty):
-    a = make_adif(qsl_only=True)
-    args = v2_config("--qsl-only")
-    ja = _entity_info(cty, "JA1XYZ")    # worked, not LoTW-confirmed
-    vk = _entity_info(cty, "VK3XY")     # never worked
-    dl = _entity_info(cty, "DL1ABC")    # LoTW-confirmed
-    assert a.needed_flags(ja, args) == ["NEW-DXCC(JA)", "NEW-CQZ(25)", "NEW-CTRY(Japan)"]
-    assert a.worked_flags(ja, args) == []
-    assert a.worked_flags_all(ja, args) == ["dxcc", "cqz", "country"]
-    assert a.needed_flags(vk, args) == ["NEW-DXCC(VK)", "NEW-CQZ(30)", "NEW-CTRY(Australia)"]
-    assert a.worked_flags_all(vk, args) == []
-    assert a.needed_flags(dl, args) == []
-    assert a.worked_flags(dl, args) == ["dxcc", "cqz", "country"]
-
-    only_dxcc = v2_config("--no-need-cqz", "--no-need-country")
-    assert a.needed_flags(vk, only_dxcc) == ["NEW-DXCC(VK)"]
 
 
 def test_log_search_covers_wsjtx_and_ws_suite():
