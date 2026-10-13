@@ -10,9 +10,11 @@ import threading
 import pytest
 
 import jtcon.core.adif
+import jtcon.core.inputs
 from jtcon.config import merge
 from jtcon.core.engine import Engine
-from jtcon.core.events import Fatal, InputReloaded, LogLine, Ready, SpotEvent, StatusChanged
+from jtcon.core.events import (Fatal, InputReloaded, LogLine, Ready, SpotEvent, StationUpdated,
+                               StatusChanged)
 import wsjtx_packets as pk
 from conftest import CTY_PATH, LOG_PATH, FakeSock, load_adif, make_config
 
@@ -286,6 +288,19 @@ def test_qso_logged_marks_the_call_worked_at_once(make_engine):
     assert e.adif_log.worked_calls_by_band["20m"] >= {"VK3XY"}
 
 
+def test_qso_logged_updates_the_buffered_station(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    e.datagram_received(pk.decode("CQ ZL2AB RF70"), ADDR)
+    alerted = dict(e.alerted)
+    e.datagram_received(pk.qso_logged("VK3XY"), ADDR)
+    assert [s.callsign for s in e.stations.hits()] == ["ZL2AB"]
+    updated = {ev.station.callsign: ev for ev in e.events if isinstance(ev, StationUpdated)}
+    assert updated["VK3XY"].result.needed_flags == [] and updated["ZL2AB"].result.needed_flags
+    assert len(spots(e)) == 2 and e.alerted == alerted     # nothing new heard, no alerts
+    assert sent(e).count(("highlight", "VK3XY", (None, None))) == 1
+
+
 def test_qso_logged_without_any_log_is_just_reported(make_engine):
     e = make_engine(adif=False)
     e.datagram_received(pk.qso_logged("VK3XY"), ADDR)
@@ -487,3 +502,35 @@ def test_a_broken_watchlist_keeps_the_previous_one(tmp_path, no_wsjt_logs):
     calls.write_text("^ZL\n")                          # back again
     _reload(e)
     assert [p.pattern for p, _ in e.call_patterns] == ["^ZL"]
+
+
+def test_watchlist_edit_rejudges_buffered_stations(make_engine, tmp_path):
+    calls = tmp_path / "calls.txt"
+    calls.write_text("^ZZ\n")
+    e = make_engine(config={"wanted": [{"rule": "callsigns", "files": [str(calls)]}]})
+    inp = jtcon.core.inputs.PatternInput("callsigns", [calls])
+    e.call_patterns = inp.load()
+    e.inputs.append(inp)
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    assert e.stations.hits() == [] and sent(e) == []
+    _rewrite(calls, "^W1\n")
+    _reload(e)
+    (st,) = e.stations.hits()
+    assert st.match_flags == ["CALL:^W1 [calls.txt]"]
+    assert sent(e) == [("highlight", "W1ABC", ORANGE)]     # highlighted, not alerted
+    assert e.alerted == {} and len(spots(e)) == 1
+
+
+def test_log_reload_unhighlights_a_station_now_worked(make_engine, tmp_path):
+    log = tmp_path / "log.adi"
+    shutil.copy(LOG_PATH, log)
+    e = make_engine()
+    load_adif(e, [log])
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    with log.open("a") as f:
+        f.write("<call:5>VK3XY <band:3>20m <mode:3>FT8 <qso_date:8>20240101"
+                " <lotw_qsl_rcvd:1>Y <EOR>\n")
+    _touch_later(log)
+    _reload(e)
+    assert e.stations.hits() == []
+    assert sent(e) == [("highlight", "VK3XY", ORANGE), ("highlight", "VK3XY", (None, None))]

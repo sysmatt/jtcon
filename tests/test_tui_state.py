@@ -162,6 +162,19 @@ def test_list(tui, clock):
         assert command(tui, abbrev)[-5].startswith("[list] 2 NEEDED/MATCH")
 
 
+def test_list_shows_a_station_redrawn_after_a_qso(tui):
+    store(tui, "CQ VK3XY QF22")
+    store(tui, "CQ ZL2AB RF70")
+    assert "VK3XY" in tui.engine.stations.find("VK3XY").display[0]
+    tui.engine.datagram_received(pk.qso_logged("VK3XY"), ADDR)
+    tui._flush_output()
+    vk = tui.engine.stations.find("VK3XY")
+    assert len(vk.display) == 1 and re.search(r"VK3XY\s+QF22\s+0d", vk.display[0])
+    before = len(tui._lines)
+    lines = command(tui, "list")[before:]
+    assert lines[0].startswith("[list] 1 NEEDED/MATCH") and "ZL2AB" in lines[1]
+
+
 def test_clear_command(tui):
     tui._append_line("old output")
     tui._flush_output()

@@ -250,10 +250,13 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     app.wait_for(r"\[qso\] Logged K2XYZ")
     assert highlight(wsjtx) == ("K2XYZ", None, None)
 
-    # ── list ──────────────────────────────────────────────────────────────────
+    # ── list: K2XYZ was just worked, so it's no longer listed ─────────────────
     app.type("list\r")
-    app.wait_for(r"\[list\] 4 NEEDED/MATCH entries \(last heard at bottom\)")
+    m = app.wait_for(r"\[list\] 3 NEEDED/MATCH entries \(last heard at bottom\)")
     app.wait_for(r"\(last heard \d+s ago, ×1\)")
+    time.sleep(0.2)
+    listed = app.screen()[m.end():]
+    assert "VK3XY" in listed and "K2XYZ" not in listed
 
     # ── ADIF hot reload: WSJT-X writes K2XYZ's QSO (merged with the one it
     #    reported), and a LoTW-confirmed VK3XY QSO arrives: no longer needed ──

@@ -37,6 +37,17 @@ class SpotEvent:
 
 
 @dataclass
+class StationUpdated:
+    """A station in the rolling buffer was judged again, against a changed
+    logbook or watchlist, from its newest decode.  Like SpotEvent, but nothing
+    is new: no alert, and the front end updates the station rather than showing
+    a new line."""
+    result:  object     # DecodeResult
+    ctx:     object     # DecodeContext
+    station: object     # Station
+
+
+@dataclass
 class StatusChanged:
     """WSJT-X Status: TX/RX, dial frequency, operator call."""
     status: Status

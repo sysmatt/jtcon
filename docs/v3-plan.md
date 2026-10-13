@@ -492,10 +492,20 @@ as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 - [x] QSO Logged marks the call worked at once (worked index and logbook), before
       the log file is written; the file's record is merged with it on reload.
       Logged QSOs not yet in any file are counted separately in the reload line
+- [x] **From Matt's live test:** after a QSO the station stayed in `list` with its
+      old days column, because buffered stations were judged only when heard.  Now
+      `decode.judge()` (identify and classify, no side effects) is split from
+      `evaluate()` (judge, then alerts and JSON log), and the engine re-judges every
+      buffered station from its newest decode after a QSO Logged or any input
+      reload (`refresh_stations()`, `StationUpdated` event).  Flags, the `list`
+      display and highlights follow; alerts don't fire until the station is heard
+      again
+- [x] Python 3.11/3.12 import crash fixed (a `QSO` field named `date` shadowed its
+      type; only 3.14 tolerates it).  The suite now runs on 3.11, 3.12 and 3.14
 - [x] cty.dat prefix lookup by dictionary instead of a scan of every prefix
       (same results, checked against the old lookup on 58,000 calls): a
       30,000-QSO load went from 3.3 s to 0.6 s
-- [x] Tests: 275 pass; render snapshot unchanged.  New `test_logbook.py`;
+- [x] Tests: 279 pass; render snapshot unchanged.  New `test_logbook.py`;
       engine tests for QSO Logged marking, watchlist/states reloads and broken
       watchlists; the e2e writes the logged QSO to the file and checks the merge
 - [ ] **Checkpoint: Matt's live test**: same display; editing a watchlist reloads
@@ -507,6 +517,14 @@ as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 - [ ] Per-rule `confirm`; multiple named instances of one rule
 - [ ] Unified WANTED display with sources; ✅❓❌ icons driven by Hit status
 - [ ] Filters: worked-recently suppression, alert dedupe, scope
+- [ ] **From Matt:** worked-recently suppression must follow each rule's own
+      context.  Today it hides *every* hit for a call worked in the last N days, on
+      any band, so a station worked on 20m is hidden on 40m even when 5BWAS still
+      needs that state on 40m.  In v3 a recent QSO suppresses a hit only if that
+      QSO would satisfy the same rule once confirmed (5BWAS: same state *and* band;
+      DXCC: same entity; a per-band rule: same band).  To decide in phase 5:
+      watchlist hits (callsigns, POTA…) are also hidden today for a call worked
+      recently; keep that, or make it a per-rule setting
 - [ ] Display columns built from the enabled rules
 - [ ] Snapshot tests updated deliberately for the new output
 

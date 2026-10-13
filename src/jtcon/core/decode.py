@@ -184,9 +184,24 @@ def debug_text(data: bytes, schema: int, d: Decode) -> str:
 
 def evaluate(decoded: Decode, ctx: DecodeContext) -> DecodeResult | None:
     """
-    Identify and classify one decode, fire alerts and the JSON log.  Returns
-    None when the decode isn't shown: a non-CQ message, unless the config shows
-    all decodes or (with scope "all") it has a hit.
+    Judge one decode as it arrives, then fire alerts and the JSON log for it.
+    Returns None when the decode isn't shown (see judge()).
+    """
+    r = judge(decoded, ctx)
+    if r is None:
+        return None
+    r.new_alert = _maybe_alert(ctx, r)
+    if ctx.json_fh and r.is_cq:
+        _write_json(ctx, r)
+    return r
+
+
+def judge(decoded: Decode, ctx: DecodeContext) -> DecodeResult | None:
+    """
+    Identify and classify one decode, with no side effects, so a decode can be
+    judged again when the logbook or a watchlist changes.  Returns None when the
+    decode isn't shown: a non-CQ message, unless the config shows all decodes or
+    (with scope "all") it has a hit.
     """
     cfg      = ctx.config
     msg_text = decoded.message.strip()
@@ -218,8 +233,4 @@ def evaluate(decoded: Decode, ctx: DecodeContext) -> DecodeResult | None:
     # Non-CQ: only shown when showing all, or there is an actual hit.
     if not is_cq and not cfg.show_all and not (r.needed_flags or r.match_flags):
         return None
-
-    r.new_alert = _maybe_alert(ctx, r)
-    if ctx.json_fh and is_cq:
-        _write_json(ctx, r)
     return r

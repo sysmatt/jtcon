@@ -83,6 +83,10 @@ class StationTable:
     def find(self, callsign: str) -> Station | None:
         return self._by_call.get(callsign.upper())
 
+    def all(self) -> list:
+        """Every station, in index order."""
+        return [self._by_idx[i] for i in sorted(self._by_idx)]
+
     def hits(self) -> list:
         """Stations with NEEDED/MATCH flags, most recently heard last."""
         return sorted((s for s in self._by_idx.values() if s.is_hit),

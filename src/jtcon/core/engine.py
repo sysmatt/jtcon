@@ -16,9 +16,9 @@ from jtcon.config import Config
 from jtcon.core.adif import _find_wsjt_logs
 from jtcon.core.cty import CTY_DAT_URL, CTY_MAX_AGE_DAYS, CtyDat, download_cty
 from jtcon.core.cycle import CycleTracker
-from jtcon.core.decode import DecodeContext, debug_text, evaluate
+from jtcon.core.decode import DecodeContext, debug_text, evaluate, judge
 from jtcon.core.events import (Fatal, InputReloaded, LogLine, Ready, SpotEvent,
-                               StatusChanged, UdpDown)
+                               StationUpdated, StatusChanged, UdpDown)
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
 from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
 from jtcon.core.logbook import qso_from_logged
@@ -347,6 +347,7 @@ class Engine:
                     continue
                 self._apply_reload(inp, value)
                 self._emit(InputReloaded(inp.name))
+            self.refresh_stations()
         finally:
             self._reloading = False
             while self._held and not self._reloading:
@@ -462,6 +463,7 @@ class Engine:
                 q = qso_from_logged(msg, self.cty, self.hamdat)
                 self.adif_input.extra.append(q)
                 self.adif_log.add(self.logbook.add(q))
+                self.refresh_stations()
         # Usually the log file is already written; if not, the periodic check
         # catches it.  Nothing is read until the file's mtime changes.
         self.check_inputs()
@@ -484,16 +486,35 @@ class Engine:
         r = evaluate(d, ctx)
         if r is None:
             return
-        is_hit = bool(r.needed_flags or r.match_flags)
         station = None
-        if r.callsign and (r.is_cq or is_hit):
+        if r.callsign and (r.is_cq or r.needed_flags or r.match_flags):
             station = self.stations.store(r.callsign, d, addr, r.needed_flags, r.match_flags)
-            if self.config.actions.highlight:
-                if is_hit:
-                    self.highlights.set(station.callsign, d.id, addr)
-                else:
-                    self.highlights.clear(station.callsign)
+            self._update_highlight(station)
         self._emit(SpotEvent(r, ctx, station))
+
+    def _update_highlight(self, station) -> None:
+        if not self.config.actions.highlight:
+            return
+        if station.is_hit:
+            self.highlights.set(station.callsign, station.decode.id, station.addr)
+        else:
+            self.highlights.clear(station.callsign)
+
+    def refresh_stations(self) -> None:
+        """Judge every buffered station again from its newest decode, after the
+        logbook or a watchlist changed: a station just worked stops being wanted,
+        one that now matches a watchlist becomes wanted.  Highlights follow; no
+        alerts fire (those wait until the station is heard again)."""
+        ctx = self.context()
+        for station in self.stations.all():
+            r = judge(station.decode, ctx)
+            if r is None:          # a non-CQ decode that was shown only for its hit
+                station.needed_flags, station.match_flags = [], []
+            else:
+                station.needed_flags, station.match_flags = r.needed_flags, r.match_flags
+            self._update_highlight(station)
+            if r is not None:
+                self._emit(StationUpdated(r, ctx, station))
 
     # ── Commands ──────────────────────────────────────────────────────────────
 

@@ -20,7 +20,8 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
 from jtcon.core.engine import Engine
-from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StatusChanged, UdpDown
+from jtcon.core.events import (Fatal, LogLine, Ready, SpotEvent, StationUpdated, StatusChanged,
+                               UdpDown)
 from jtcon.core.messages import _CALLSIGN_RE
 from jtcon.core.stations import fmt_age
 from jtcon.tui.render import _DIM, _bargraph, _col, _header_line, _render
@@ -415,6 +416,8 @@ class JtconTUI:
     def _on_event(self, ev) -> None:
         if isinstance(ev, SpotEvent):
             self._show_spot(ev)
+        elif isinstance(ev, StationUpdated):
+            ev.station.display = _render(ev.ctx, ev.result)     # for "list"
         elif isinstance(ev, LogLine):
             self._append_line(ev.text)
         elif isinstance(ev, StatusChanged):
