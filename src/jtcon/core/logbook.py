@@ -11,6 +11,8 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from jtcon.core.bands import _freq_to_band
 
+_Date, _Time = date, time
+
 
 # Confirmation source -> (ADIF field, value meaning confirmed).
 CONFIRMATIONS = {
@@ -28,8 +30,10 @@ MATCH_WINDOW = timedelta(minutes=15)
 @dataclass
 class QSO:
     call:          str
-    date:          date | None = None   # UTC
-    time:          time | None = None   # UTC, time on
+    # "date" and "time" name both a field and its type: a field's default is
+    # assigned before its annotation is evaluated, so the types need other names.
+    date:          _Date | None = None   # UTC
+    time:          _Time | None = None   # UTC, time on
     band:          str = ""             # ADIF band, lower case: "20m"
     mode:          str = ""             # submode if logged, else mode: "FT4", "FT8"
     grid:          str = ""             # 4 characters
