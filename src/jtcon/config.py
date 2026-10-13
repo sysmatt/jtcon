@@ -13,6 +13,7 @@ below it.  So a profile with [[wanted]] entries replaces the whole rule list.
 
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,6 +122,10 @@ class FiltersConfig:
 
 @dataclass
 class ActionsConfig:
+    # Colour wanted stations in WSJT-X's Band Activity window (Highlight Callsign).
+    highlight:            bool        = True
+    highlight_background: str         = "#ffa500"
+    highlight_foreground: str         = "#000000"
     ntfy_topic:           str | None  = None
     script_on_wanted:     Path | None = None
     script_on_log_reload: Path | None = None
@@ -161,7 +166,9 @@ class Config:
     def as_dict(self) -> dict:
         """The effective settings in config-file shape (what --show-config prints)."""
         a = self.actions
-        actions: dict = {}
+        actions: dict = {"highlight": {"enabled": a.highlight,
+                                       "background": a.highlight_background,
+                                       "foreground": a.highlight_foreground}}
         if a.ntfy_topic:
             actions["ntfy"] = {"topic": a.ntfy_topic}
         script = {k: str(v) for k, v in (("on_wanted", a.script_on_wanted),
@@ -193,7 +200,8 @@ def _settings_out(settings: dict) -> dict:
 #  Validation of one layer (a file or the CLI), before merging
 # ══════════════════════════════════════════════════════════════════════════════
 
-_PATH = "path"
+_PATH  = "path"
+_COLOR = "color"
 
 
 def _choice(*values):
@@ -208,6 +216,7 @@ _SCHEMA = {
     "inputs":  {"cty": _PATH, "adif": [_PATH], "hamdat": _PATH},
     "filters": {"suppress_worked_within_days": int},
     "actions": {
+        "highlight": {"enabled": bool, "background": _COLOR, "foreground": _COLOR},
         "ntfy":     {"topic": str},
         "script":   {"on_wanted": _PATH, "on_log_reload": _PATH},
         "json_log": {"file": _PATH},
@@ -228,7 +237,7 @@ def _type_name(kind) -> str:
     if isinstance(kind, tuple):
         return " or ".join(json.dumps(v) for v in kind[1])
     return {str: "a string", int: "an integer", bool: "true or false",
-            _PATH: "a path"}[kind]
+            _PATH: "a path", _COLOR: 'a colour like "#ffa500"'}[kind]
 
 
 def _check_value(value, kind, where: str, base_dir: Path):
@@ -240,6 +249,10 @@ def _check_value(value, kind, where: str, base_dir: Path):
         if value not in kind[1]:
             raise ConfigError(f"{where} must be {_type_name(kind)}, not {value!r}")
         return value
+    if kind is _COLOR:
+        if not (isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value)):
+            raise ConfigError(f"{where} must be {_type_name(kind)}, not {value!r}")
+        return value.lower()
     if kind is _PATH:
         if not isinstance(value, str) or not value:
             raise ConfigError(f"{where} must be a path")
@@ -497,6 +510,7 @@ def build_config(raw: dict, wanted: str | None = None) -> Config:
     udp, disp = raw.get("udp", {}), raw.get("display", {})
     inp, act  = raw.get("inputs", {}), raw.get("actions", {})
     script    = act.get("script", {})
+    hl        = act.get("highlight", {})
 
     def path(v):
         return Path(v) if v else None
@@ -516,7 +530,10 @@ def build_config(raw: dict, wanted: str | None = None) -> Config:
                             hamdat=path(inp.get("hamdat")) or HAMDAT_DB_DEFAULT),
         wanted=specs,
         filters=FiltersConfig(**raw.get("filters", {})),
-        actions=ActionsConfig(ntfy_topic=act.get("ntfy", {}).get("topic"),
+        actions=ActionsConfig(highlight=hl.get("enabled", True),
+                              highlight_background=hl.get("background", "#ffa500"),
+                              highlight_foreground=hl.get("foreground", "#000000"),
+                              ntfy_topic=act.get("ntfy", {}).get("topic"),
                               script_on_wanted=path(script.get("on_wanted")),
                               script_on_log_reload=path(script.get("on_log_reload")),
                               json_log=path(act.get("json_log", {}).get("file"))),
@@ -684,6 +701,11 @@ rule = "country"
 # states = ["AK", "DE"]
 
 # ── Actions ────────────────────────────────────────────────────────────────────
+
+# [actions.highlight]             # colour wanted stations in WSJT-X's Band Activity
+# enabled    = true
+# background = "#ffa500"
+# foreground = "#000000"
 
 # [actions.ntfy]
 # topic = "my-topic"              # push wanted alerts to ntfy.sh/my-topic

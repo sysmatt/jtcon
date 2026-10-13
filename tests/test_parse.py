@@ -14,7 +14,7 @@ from jtcon.core.cycle import CycleTracker
 from jtcon.core.hamdat import load_state_file
 from jtcon.core.messages import _directed_sender, parse_cq_message
 from jtcon.core.patterns import _regex_matches, load_regex_patterns
-from jtcon.tui.render import _fmt_age
+from jtcon.core.stations import fmt_age as _fmt_age
 
 
 @pytest.mark.parametrize("msg, expected", [

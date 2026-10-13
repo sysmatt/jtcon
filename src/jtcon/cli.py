@@ -126,6 +126,7 @@ def main(argv: list | None = None) -> None:
         print(show_config(cfg), end="")
         sys.exit(0)
 
+    from jtcon.core.engine import Engine
     from jtcon.tui.app import JtconTUI   # prompt_toolkit only when the TUI runs
 
     # ── UDP sockets (must bind before TUI starts so the port is held) ─────────
@@ -139,7 +140,7 @@ def main(argv: list | None = None) -> None:
     tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
     # ── Launch TUI — all remaining startup happens inside, logged to the pane ─
-    tui = JtconTUI(cfg, sock, tx_sock)
+    tui = JtconTUI(Engine(cfg, sock, tx_sock))
     try:
         status = tui.run()
     finally:

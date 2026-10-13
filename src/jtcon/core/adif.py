@@ -9,15 +9,24 @@ from jtcon.core.bands import _5BWAS_BANDS, _WAS_STATES
 from jtcon.core.cty import CtyDat
 
 
-# Candidate locations searched in order when no --adif flag is given.
+# WSJT-X and its forks keep wsjtx_log.adi in Qt's per-application data directory,
+# named after the program: ~/.local/share/<app> on Linux, AppData/Local/<app> on
+# Windows, ~/Library/Application Support/<app> on macOS.
+_WSJT_APPS = (
+    "WSJT-X",        # WSJT-X 2.x
+    "WSJT-X Exp",    # experimental / nightly builds
+    "WS",            # WS suite (WSJT-X Improved's successor, DG2YCB)
+)
+_APP_DATA_DIRS = (
+    Path.home() / ".local" / "share",
+    Path.home() / "AppData" / "Local",
+    Path.home() / "Library" / "Application Support",
+)
+
+# Candidate locations, all loaded if they exist (besides any configured adif files).
 WSJT_LOG_SEARCH_PATHS: list[Path] = [
-    # Linux — XDG standard (WSJT-X 2.x)
-    Path.home() / ".local" / "share" / "WSJT-X" / "wsjtx_log.adi",
-    # Linux — XDG experimental / nightly builds
-    Path.home() / ".local" / "share" / "WSJT-X Exp" / "wsjtx_log.adi",
-    # macOS
-    Path.home() / "Library" / "Application Support" / "WSJT-X" / "wsjtx_log.adi",
-    # Windows default AppData\Roaming path
+    *(base / app / "wsjtx_log.adi" for app in _WSJT_APPS for base in _APP_DATA_DIRS),
+    # v2 looked in AppData/Roaming on Windows; kept in case a log was put there
     Path.home() / "AppData" / "Roaming" / "WSJT-X" / "wsjtx_log.adi",
     # Older Linux installs / portable installs
     Path.home() / "WSJT-X" / "wsjtx_log.adi",

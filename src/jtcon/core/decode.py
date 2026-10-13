@@ -1,4 +1,4 @@
-"""Turn one Decode packet into a classified, rendered result."""
+"""Evaluate one Decode: who is calling, and is the station NEEDED or a MATCH?"""
 
 import json
 import time
@@ -10,25 +10,22 @@ from jtcon.core.adif import AdifLog
 from jtcon.core.alerts import _build_alert_msg, _send_alerts
 from jtcon.core.bands import _5BWAS_BANDS, _WAS_STATES, _freq_to_band
 from jtcon.core.cty import CtyDat
-from jtcon.core.cycle import CycleTracker
 from jtcon.core.hamdat import HamdatLookup
 from jtcon.core.messages import _GRID_RE, _directed_sender, parse_cq_message
 from jtcon.core.patterns import _regex_matches
-from jtcon.core.protocol import _MODE_NAMES, _parse_decode_packet
-# v3 phase 3 moves rendering out of the core; until then handle_packet renders.
-from jtcon.tui.render import _render
+from jtcon.core.protocol import Decode, mode_name
 
 
 _ALERT_REPEAT_S = 3600  # re-alert a station after it has gone unheard this long
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Packet handler — returns list of display lines (no printing)
+#  Evaluation
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class DecodeContext:
-    """Everything handle_packet needs besides the packet itself."""
+    """Everything evaluate() needs besides the decode itself."""
     config:        Config
     cty:           CtyDat
     adif_log:      AdifLog | None
@@ -37,7 +34,6 @@ class DecodeContext:
     msg_patterns:  list
     state_set:     set
     hamdat:        HamdatLookup | None
-    cycle_tracker: CycleTracker | None
     alerted:       dict          # alert key -> monotonic time last heard
     dial_freq:     int = 0       # Hz, from WSJT-X Status messages
     de_call:       str = ""      # operator callsign, from WSJT-X Status messages
@@ -51,7 +47,7 @@ class DecodeContext:
 @dataclass
 class DecodeResult:
     """One decoded message after station lookup and NEEDED/MATCH checks."""
-    decoded:       dict
+    decoded:       Decode
     mode:          str
     msg_text:      str
     is_cq:         bool
@@ -63,6 +59,7 @@ class DecodeResult:
     station_state: str | None = None
     needed_flags:  list = field(default_factory=list)
     match_flags:   list = field(default_factory=list)
+    new_alert:     bool = False   # first alert for this station (rings the bell)
 
 
 def _entity_info(cty: CtyDat, callsign: str | None) -> dict:
@@ -153,9 +150,9 @@ def _write_json(ctx: DecodeContext, r: DecodeResult) -> None:
     record = {
         "wall_utc":       datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "period_utc":     r.period_utc,
-        "snr_db":         decoded["snr"],
-        "dt_s":           round(decoded["dt"], 2),
-        "df_hz":          decoded["df"],
+        "snr_db":         decoded.snr,
+        "dt_s":           round(decoded.dt, 2),
+        "df_hz":          decoded.df,
         "mode":           r.mode,
         "message":        r.msg_text,
         "callsign":       r.callsign,
@@ -172,59 +169,38 @@ def _write_json(ctx: DecodeContext, r: DecodeResult) -> None:
     ctx.json_fh.flush()
 
 
-def handle_packet(
-    data:      bytes,
-    ctx:       DecodeContext,
-    wsjt_addr: tuple,
-    out_meta:  dict | None = None,
-) -> list:
+def debug_text(data: bytes, schema: int, d: Decode) -> str:
+    """The display.debug dump of one Decode datagram."""
+    return (
+        f"[debug] schema={schema}  len={len(data)}\n"
+        f"[debug] hex: {data.hex()}\n"
+        f"[debug] id={d.id!r}  new={d.new}  "
+        f"time_ms={d.time_ms}  snr={d.snr}\n"
+        f"[debug] dt={d.dt:.3f}  df={d.df}  "
+        f"mode={d.mode!r}  message={d.message!r}\n"
+        f"[debug] low_conf={d.low_conf}  off_air={d.off_air}"
+    )
+
+
+def evaluate(decoded: Decode, ctx: DecodeContext) -> DecodeResult | None:
     """
-    Decode one UDP datagram and return a list of formatted display strings.
-    Never prints directly; caller appends lines to the TUI output pane.
-
-    If *out_meta* is provided it is populated with:
-      'decoded'      — raw parsed decode dict (for sending replies)
-      'callsign'     — resolved station callsign or None
-      'is_cq'        — True for CQ messages
-      'needed_flags' / 'match_flags' — NEEDED / MATCH hits
-      'is_needed'    — True when the contact is flagged NEEDED
-      'wsjt_addr'    — source address of the packet
-      'bell'         — True on the first alert for this station
+    Identify and classify one decode, fire alerts and the JSON log.  Returns
+    None when the decode isn't shown: a non-CQ message, unless the config shows
+    all decodes or (with scope "all") it has a hit.
     """
-    parsed = _parse_decode_packet(data)
-    if parsed is None:
-        return []
-    schema, decoded = parsed
-    cfg   = ctx.config
-    lines = []
-
-    if cfg.display.debug:
-        lines.append(
-            f"[debug] schema={schema}  len={len(data)}\n"
-            f"[debug] hex: {data.hex()}\n"
-            f"[debug] id={decoded['id']!r}  new={decoded['new']}  "
-            f"time_ms={decoded['time_ms']}  snr={decoded['snr']}\n"
-            f"[debug] dt={decoded['dt']:.3f}  df={decoded['df']}  "
-            f"mode={decoded['mode']!r}  message={decoded['message']!r}\n"
-            f"[debug] low_conf={decoded['low_conf']}  off_air={decoded['off_air']}"
-        )
-
-    msg_text = decoded.get("message", "").strip()
+    cfg      = ctx.config
+    msg_text = decoded.message.strip()
     is_cq    = msg_text.upper().startswith("CQ")
-    mode     = _MODE_NAMES.get(decoded["mode"], decoded["mode"]) or "?"
-
-    if ctx.cycle_tracker is not None:
-        ctx.cycle_tracker.record(decoded["time_ms"], is_cq, decoded["new"], mode)
 
     if not is_cq and not cfg.show_all and not cfg.evaluate_all:
-        return lines
+        return None
 
-    time_ms = decoded["time_ms"]
+    time_ms = decoded.time_ms
     hh = (time_ms // 3_600_000) % 24
     mm = (time_ms %  3_600_000) // 60_000
     ss = (time_ms %     60_000) //  1_000
-    r = DecodeResult(decoded=decoded, mode=mode, msg_text=msg_text, is_cq=is_cq,
-                     period_utc=f"{hh:02d}{mm:02d}{ss:02d}z")
+    r = DecodeResult(decoded=decoded, mode=mode_name(decoded), msg_text=msg_text,
+                     is_cq=is_cq, period_utc=f"{hh:02d}{mm:02d}{ss:02d}z")
 
     # ── Identify the station ──────────────────────────────────────────────────
     if is_cq:
@@ -239,24 +215,11 @@ def handle_packet(
 
     _classify(ctx, r)
 
-    # Non-CQ: only proceed to display when showing all, or there is an actual hit.
+    # Non-CQ: only shown when showing all, or there is an actual hit.
     if not is_cq and not cfg.show_all and not (r.needed_flags or r.match_flags):
-        return lines
+        return None
 
-    is_new_alert = _maybe_alert(ctx, r)
-    lines.extend(_render(ctx, r))
-
+    r.new_alert = _maybe_alert(ctx, r)
     if ctx.json_fh and is_cq:
         _write_json(ctx, r)
-
-    if out_meta is not None:
-        out_meta['decoded']      = decoded
-        out_meta['callsign']     = r.callsign
-        out_meta['is_cq']        = is_cq
-        out_meta['needed_flags'] = r.needed_flags
-        out_meta['match_flags']  = r.match_flags
-        out_meta['is_needed']    = bool(r.needed_flags)
-        out_meta['wsjt_addr']    = wsjt_addr
-        out_meta['bell']         = is_new_alert
-
-    return lines
+    return r

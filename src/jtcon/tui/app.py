@@ -1,12 +1,10 @@
 """The prompt_toolkit full-screen application."""
 
+import asyncio
 import re
-import select
-import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 from prompt_toolkit import Application
 from prompt_toolkit.document import Document
@@ -21,22 +19,15 @@ from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
-from jtcon.core.adif import AdifLog, _find_wsjt_logs
-from jtcon.core.cty import CTY_DAT_URL, CTY_MAX_AGE_DAYS, CtyDat, download_cty
-from jtcon.core.cycle import CycleTracker
-from jtcon.core.decode import DecodeContext, handle_packet
-from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup, load_state_file
+from jtcon.core.engine import Engine
+from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StatusChanged, UdpDown
 from jtcon.core.messages import _CALLSIGN_RE
-from jtcon.core.patterns import ACTIVATION_KEYWORDS, keyword_patterns, load_regex_patterns
-from jtcon.core.protocol import _send_reply, try_parse_status
-from jtcon.tui.render import _DIM, _bargraph, _col, _fmt_age, _header_line
+from jtcon.core.stations import fmt_age
+from jtcon.tui.render import _DIM, _bargraph, _col, _header_line, _render
 
-
-_BUF_SIZE      = 100   # rolling buffer slots (two-digit index 00-99)
 _MAX_OUTPUT_LINES = 5000   # output pane is trimmed when it grows past this…
 _TRIM_OUTPUT_TO   = 4000   # …down to this many lines
 _WHEEL_LINES      = 3      # lines per mouse-wheel notch (--mouse)
-_STALE_REPLY_S = 120   # warn when replying to an entry last heard longer ago than this
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -67,45 +58,22 @@ class AnsiLexer(Lexer):
 class JtconTUI:
     """prompt_toolkit full-screen TUI for jtcon."""
 
-    def __init__(self, config, sock, tx_sock):
-        self.config = config
-        self.sock = sock
-        self.tx_sock = tx_sock
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        self.config = engine.config
+        engine.subscribe(self._on_event)
 
-        # Data objects — all set to empty defaults; populated by _startup_then_udp().
-        self.cty           = CtyDat()
-        self.adif_log      = None
-        self.json_fh       = None
-        self.call_patterns = []
-        self.msg_patterns  = []
-        self.state_set     = set()
-        self.hamdat        = None
-        self.cycle_tracker = CycleTracker()
-        self.alerted: dict = {}   # alert key -> monotonic time last heard
-
-        self._running      = True
         self._fatal_msg    = None   # set by _fatal(); the app exits on next render
         self._exiting      = False
-        self._udp_down     = False
-        # Output pane: background threads queue lines in _pending; the UI thread
-        # moves them into _lines (and the TextArea) just before each render.
+        # Output pane: lines are queued in _pending (from any thread) and moved
+        # into _lines (and the TextArea) by the UI thread just before each render.
         self._output_lock  = threading.Lock()
         self._pending: list = []
         self._lines:   list = []
         # Top line of the decode pane while scrolled back from the command line;
         # None means the pane follows new output.
         self._scroll_top: int | None = None
-        self._transmitting = False
-        self._dial_freq    = 0   # Hz; updated from WSJT-X Status messages
-        self._de_call      = ""  # operator callsign; updated from WSJT-X Status messages
-
-        self._adif_mtimes: dict  = {}
-        self._line_count:  int   = 0
-        self.proxy_dests:  list  = []
-        self._cq_buffer:   dict  = {}   # idx (0-99) -> entry dict
-        self._call_idx:    dict  = {}   # callsign -> idx; one slot per station
-        self._next_idx:    int   = 0    # where to start looking for a free slot
-        self._buf_lock           = threading.Lock()
+        self._line_count: int = 0
 
         # ── Widgets ──────────────────────────────────────────────────────────
         self.output_area = TextArea(
@@ -216,8 +184,9 @@ class JtconTUI:
     # ── Status line ───────────────────────────────────────────────────────────
 
     def _get_status_text(self):
-        bar = _bargraph(self.cycle_tracker)
-        ct  = self.cycle_tracker
+        eng = self.engine
+        bar = _bargraph(eng.cycle_tracker)
+        ct  = eng.cycle_tracker
 
         if ct and ct.current_time_ms is not None:
             parity = ct._parity
@@ -242,14 +211,14 @@ class JtconTUI:
             stats  = "  (waiting for decodes…)"
 
         # Return a list of (style, text) tuples so the TX badge can be coloured.
-        if self._udp_down:
+        if eng.udp_down:
             trx = ("class:status.tx", " UDP DOWN ")
-        elif self._transmitting:
+        elif eng.transmitting:
             trx = ("class:status.tx", " TX ")
         else:
             trx = ("class:status.rx", " RX ")
 
-        de = f"  de={self._de_call}" if self._de_call else ""
+        de = f"  de={eng.de_call}" if eng.de_call else ""
         scroll = [("class:status.scroll", " SCROLL ")] if self._scroll_top is not None else []
         return [
             trx,
@@ -284,17 +253,16 @@ class JtconTUI:
 
         elif re.match(r'^\d{1,2}$', raw):
             idx = int(raw)
-            with self._buf_lock:
-                entry = self._cq_buffer.get(idx)
-            if entry:
-                self._reply_to_entry(entry)
+            station = self.engine.stations.get(idx)
+            if station:
+                self.engine.reply(station)
             else:
                 self._append_line(f"[cmd] No CQ at index {idx:02d}.")
 
         elif _CALLSIGN_RE.match(raw):
-            entry = self._find_callsign(raw.upper())
-            if entry:
-                self._reply_to_entry(entry)
+            station = self.engine.stations.find(raw.upper())
+            if station:
+                self.engine.reply(station)
             else:
                 self._append_line(f"[cmd] {raw.upper()} not found in rolling buffer.")
 
@@ -304,113 +272,23 @@ class JtconTUI:
                 "(commands: quit, clear, list; or enter index 00-99 / callsign to reply)"
             )
 
-    def _reply_to_entry(self, entry: dict) -> None:
-        """Send a WSJT-X Reply for a rolling-buffer entry."""
-        decoded   = entry.get('decoded')
-        wsjt_addr = entry.get('wsjt_addr')
-        callsign  = entry.get('callsign', '?')
-        idx       = entry.get('idx', -1)
-        if not decoded or not wsjt_addr:
-            self._append_line(f"[cmd] No decode data for {callsign}.")
-            return
-        age = time.monotonic() - entry.get('last_seen', time.monotonic())
-        if age > _STALE_REPLY_S:
-            self._append_line(
-                f"[cmd] Warning: {callsign} last heard {_fmt_age(age)} ago"
-                " — WSJT-X may no longer have that decode."
-            )
-        try:
-            _send_reply(self.tx_sock, wsjt_addr, decoded, log=self._append_line)
-            self._append_line(
-                f"[cmd] ► Reply sent to {callsign} [{idx:02d}]"
-                f"  msg={decoded.get('message', '?')!r}"
-                f"  → {wsjt_addr[0]}:{wsjt_addr[1]}"
-            )
-        except Exception as exc:
-            self._append_line(f"[cmd] Reply to {callsign} failed: {exc}")
-
-    def _find_callsign(self, callsign: str) -> dict | None:
-        """Return the rolling-buffer entry for *callsign*, if any."""
-        with self._buf_lock:
-            idx = self._call_idx.get(callsign)
-            return self._cq_buffer.get(idx) if idx is not None else None
-
-    def _store_entry(self, callsign: str, meta: dict, lines: list, wsjt_addr) -> int:
-        """
-        Record a decode in the rolling buffer and return its index.
-
-        Each callsign owns one slot.  A repeat decode keeps the station's index
-        and refreshes the entry so replies use the newest decode.  A new station
-        takes the next free slot, or evicts the least recently heard station.
-        """
-        now = time.monotonic()
-        with self._buf_lock:
-            idx = self._call_idx.get(callsign)
-            if idx is not None:
-                entry = self._cq_buffer[idx]
-                entry['count'] += 1
-            else:
-                idx = self._alloc_slot()
-                old = self._cq_buffer.get(idx)
-                if old:
-                    del self._call_idx[old['callsign']]
-                self._call_idx[callsign] = idx
-                entry = self._cq_buffer[idx] = {
-                    'idx':        idx,
-                    'callsign':   callsign,
-                    'count':      1,
-                    'first_seen': now,
-                }
-            entry.update({
-                'decoded':      meta.get('decoded'),
-                'wsjt_addr':    wsjt_addr,
-                'needed_flags': meta.get('needed_flags', []),
-                'match_flags':  meta.get('match_flags', []),
-                'lines':        list(lines),
-                'last_seen':    now,
-            })
-        return idx
-
-    def _alloc_slot(self) -> int:
-        """Pick a slot for a new station; caller holds _buf_lock."""
-        for i in range(_BUF_SIZE):
-            idx = (self._next_idx + i) % _BUF_SIZE
-            if idx not in self._cq_buffer:
-                self._next_idx = (idx + 1) % _BUF_SIZE
-                return idx
-        return min(self._cq_buffer.values(), key=lambda e: e['last_seen'])['idx']
-
-    def _clear_buffer(self) -> int:
-        """Empty the rolling buffer; return how many entries were dropped."""
-        with self._buf_lock:
-            n = len(self._cq_buffer)
-            self._cq_buffer.clear()
-            self._call_idx.clear()
-            self._next_idx = 0
-        return n
-
     def _cmd_list(self) -> None:
         """Print NEEDED/MATCH entries from the rolling buffer, most recently heard last."""
-        with self._buf_lock:
-            hits = sorted(
-                (e for e in self._cq_buffer.values()
-                 if e['needed_flags'] or e['match_flags']),
-                key=lambda e: e['last_seen'],
-            )
+        hits = self.engine.stations.hits()
         if not hits:
             self._append_line("[list] No NEEDED/MATCH entries in rolling buffer.")
             return
         now = time.monotonic()
         self._append_line(f"[list] {len(hits)} NEEDED/MATCH entries (last heard at bottom) ——")
-        for entry in hits:
-            lines = entry['lines']
+        for st in hits:
+            lines = st.display or [st.callsign]
             # Keep the decode row aligned with the column header; the heard
             # stats go on the NEEDED/MATCH line below it.
             seen = _col(
-                f"(last heard {_fmt_age(now - entry['last_seen'])} ago, ×{entry['count']})",
+                f"(last heard {fmt_age(now - st.last_seen)} ago, ×{st.count})",
                 _DIM, self.config.display.color,
             )
-            self._append_line(f"{entry['idx']:02d}  {lines[0]}")
+            self._append_line(f"{st.idx:02d}  {lines[0]}")
             if len(lines) > 1:
                 self._append_line(f"{lines[1]}  {seen}")
             else:
@@ -517,329 +395,82 @@ class JtconTUI:
         control.mouse_handler = handler
 
     def _header(self) -> str:
-        return _header_line(self.config, has_adif=self.adif_log is not None,
-                            has_hamdat=self.hamdat is not None)
+        return _header_line(self.config, has_adif=self.engine.adif_log is not None,
+                            has_hamdat=self.engine.hamdat is not None)
 
     def _fatal(self, msg: str) -> None:
         """Log *msg*, stop, and close the TUI; *msg* is reprinted after exit."""
         self._append_line(msg)
         self._fatal_msg = msg
-        self._running   = False
         self._app.invalidate()
 
     def _exit_app(self) -> None:
         """Exit the TUI (UI thread only); safe to call more than once."""
-        self._running = False
         if not self._exiting:
             self._exiting = True
             self._app.exit()
 
-    # ── UDP receive loop (runs in background thread) ──────────────────────────
+    # ── Engine events (event loop thread) ─────────────────────────────────────
 
-    def _udp_loop(self) -> None:
-        while self._running:
-            try:
-                ready, _, _ = select.select([self.sock], [], [], 0.2)
-                if not ready:
-                    continue
-                data, wsjt_addr = self.sock.recvfrom(65535)
-            except ConnectionResetError:
-                continue   # Windows reports ICMP port-unreachable here; harmless
-            except (OSError, ValueError) as exc:   # ValueError: socket closed
-                if self._running:
-                    self._udp_down = True
-                    self._append_line(
-                        f"[udp] Receive loop stopped: {exc} — no further decodes; restart jtcon."
-                    )
-                break
+    def _on_event(self, ev) -> None:
+        if isinstance(ev, SpotEvent):
+            self._show_spot(ev)
+        elif isinstance(ev, LogLine):
+            self._append_line(ev.text)
+        elif isinstance(ev, StatusChanged):
+            self._app.invalidate()
+        elif isinstance(ev, Ready):
+            self._append_line(self._header())
+            self._append_line(ev.text)
+        elif isinstance(ev, UdpDown):
+            self._append_line(ev.text)
+        elif isinstance(ev, Fatal):
+            self._fatal(ev.text)
 
-            # Forward packet to proxy destinations before any other processing.
-            for dest in self.proxy_dests:
-                try:
-                    self.tx_sock.sendto(data, dest)
-                except OSError:
-                    pass
-
-            # Hot-reload ADIF when any watched file changes.
-            if self.adif_log and self._adif_mtimes:
-                try:
-                    changed = any(
-                        p.stat().st_mtime != self._adif_mtimes.get(p)
-                        for p in self.adif_log.paths
-                    )
-                    if changed:
-                        self.adif_log = AdifLog(
-                            self.adif_log.paths, self.cty, self.hamdat,
-                            qsl_only=self.config.entity_needs_lotw,
-                            log=self._append_line,
-                        )
-                        self._adif_mtimes = {
-                            p: p.stat().st_mtime for p in self.adif_log.paths
-                        }
-                        self._append_line(
-                            f"[adif] Reloaded {self.adif_log.total_qsos} QSOs"
-                            f" from {len(self.adif_log.paths)} file(s)."
-                        )
-                        adif_change_script = self.config.actions.script_on_log_reload
-                        if adif_change_script:
-                            try:
-                                proc = subprocess.Popen(
-                                    [str(adif_change_script)]
-                                    + [str(p) for p in self.adif_log.paths],
-                                    stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT,
-                                    text=True,
-                                )
-                                def _relay_output(p=proc):
-                                    for line in p.stdout:
-                                        self._append_line(
-                                            f"[adif-change-script] {line.rstrip()}"
-                                        )
-                                    p.wait()
-                                threading.Thread(
-                                    target=_relay_output, daemon=True
-                                ).start()
-                            except Exception as exc:
-                                self._append_line(f"[adif-change-script] {exc}")
-                except OSError:
-                    pass
-
-            # Intercept Status messages to track TX/RX state and current band.
-            status = try_parse_status(data)
-            if status is not None:
-                self._transmitting = status.get("transmitting", False)
-                new_freq = status.get("dial_freq", 0)
-                if new_freq and self._dial_freq and new_freq != self._dial_freq:
-                    # Decodes from the old frequency can't be replied to usefully.
-                    dropped = self._clear_buffer()
-                    if dropped:
-                        self._append_line(
-                            f"[buffer] Dial frequency changed — cleared {dropped} entries."
-                        )
-                if new_freq:
-                    self._dial_freq = new_freq
-                de = status.get("de_call", "").strip()
-                if de:
-                    self._de_call = de
-                self._app.invalidate()
-                continue
-
-            meta: dict = {}
-            ctx = DecodeContext(
-                config=self.config, cty=self.cty, adif_log=self.adif_log,
-                json_fh=self.json_fh, call_patterns=self.call_patterns,
-                msg_patterns=self.msg_patterns, state_set=self.state_set,
-                hamdat=self.hamdat, cycle_tracker=self.cycle_tracker,
-                alerted=self.alerted, dial_freq=self._dial_freq,
-                de_call=self._de_call, log=self._append_line,
-            )
-            try:
-                out_lines = handle_packet(data, ctx, wsjt_addr, meta)
-            except Exception as exc:
-                out_lines = [f"[error] packet handler: {exc}"]
-
-            if meta.get('bell'):
-                sys.stderr.write('\a')
-                sys.stderr.flush()
-
-            if out_lines:
-                call = meta.get('callsign')
-                is_cq   = meta.get('is_cq')
-                is_hit  = meta.get('needed_flags') or meta.get('match_flags')
-                if call and (is_cq or is_hit):
-                    idx = self._store_entry(call.upper(), meta, out_lines, wsjt_addr)
-                    out_lines = [f"{idx:02d}  {out_lines[0]}"] + out_lines[1:]
-                else:
-                    # Non-CQ with no hit (raw mode) — indent to keep columns aligned.
-                    out_lines = [f"    {out_lines[0]}"] + out_lines[1:]
-
-                for line in out_lines:
-                    self._append_line(line)
-
-                self._line_count += 1
-                if self._line_count % 15 == 0:
-                    self._append_line(self._header())
-
-    # ── Startup (runs in background thread before UDP loop) ──────────────────
-
-    def _startup_then_udp(self) -> None:
-        """
-        Load all data files, logging each step to the decode pane, then fall
-        straight into the UDP receive loop.  Runs entirely in a background thread
-        so the TUI is already visible when the messages appear.
-        """
-        log = self._append_line
-        cfg = self.config
-        for src in cfg.sources:
-            log(f"[config] Loaded {src}")
-        rules = ", ".join(w.name for w in cfg.wanted) or "none"
-        log(f"[config] Wanted rules: {rules}")
-
-        # ── cty.dat ───────────────────────────────────────────────────────────
-        cty_path = cfg.inputs.cty
-        stale = False
-        if cty_path.exists():
-            age_days = (time.time() - cty_path.stat().st_mtime) / 86400
-            stale = age_days > CTY_MAX_AGE_DAYS
-        if stale or not cty_path.exists():
-            reason = f"older than {CTY_MAX_AGE_DAYS} days" if stale else "not found"
-            log(f"[cty.dat] {reason} — downloading from {CTY_DAT_URL} …")
-            try:
-                download_cty(cty_path)
-                log(f"[cty.dat] Saved to {cty_path}")
-            except Exception as exc:
-                if stale:
-                    log(f"[cty.dat] Download failed: {exc} — using cached copy")
-                else:
-                    log(f"[cty.dat] Download failed: {exc} — entity lookup unavailable")
-
-        cty = CtyDat()
-        if cty_path.exists():
-            try:
-                cty.load(cty_path)
-                log(f"[cty.dat] Loaded {len(cty._prefixes)} prefixes"
-                    f" + {len(cty._exact)} exact callsigns")
-            except Exception as exc:
-                log(f"[cty.dat] Load error: {exc} — entity lookup unavailable")
+    def _show_spot(self, ev: SpotEvent) -> None:
+        lines = _render(ev.ctx, ev.result)
+        if ev.result.new_alert:
+            sys.stderr.write("\a")
+            sys.stderr.flush()
+        if ev.station is not None:
+            ev.station.display = lines
+            lines = [f"{ev.station.idx:02d}  {lines[0]}"] + lines[1:]
         else:
-            log("[cty.dat] File not found — entity lookup unavailable")
-        self.cty = cty
-
-        # ── hamdat ────────────────────────────────────────────────────────────
-        states_rule = cfg.rule("states")
-        if states_rule:
-            self.state_set = set(states_rule.settings["states"])
-            if states_rule.settings["file"]:
-                try:
-                    self.state_set |= load_state_file(states_rule.settings["file"])
-                except OSError as exc:
-                    self._fatal(f"[states] Cannot load state list: {exc}")
-                    return
-            log(f"[states] {len(self.state_set)} state(s):"
-                f" {', '.join(sorted(self.state_set))}")
-
-        db_path = cfg.inputs.hamdat
-        if db_path.exists():
-            try:
-                self.hamdat = HamdatLookup(db_path)
-                label = "Auto-detected" if db_path == HAMDAT_DB_DEFAULT else "Using"
-                log(f"[hamdat] {label}: {db_path}")
-            except Exception as exc:
-                if states_rule:
-                    self._fatal(f"[hamdat] Failed to open {db_path}: {exc}")
-                    return
-                log(f"[hamdat] Warning: found but could not open {db_path}: {exc}")
-        elif states_rule:
-            self._fatal(f"[states] hamdat database not found: {db_path}")
-            return
-
-        # ── ADIF ──────────────────────────────────────────────────────────────
-        adif_paths: list[Path] = []
-        for p in _find_wsjt_logs():
-            log(f"[adif] Auto-discovered: {p}")
-            adif_paths.append(p)
-        for f in cfg.inputs.adif:
-            p = f.resolve()
-            if not p.exists():
-                self._fatal(f"[adif] File not found: {p}")
-                return
-            if p not in adif_paths:
-                adif_paths.append(p)
-
-        if adif_paths:
-            try:
-                self.adif_log = AdifLog(adif_paths, self.cty, self.hamdat,
-                                        qsl_only=cfg.entity_needs_lotw,
-                                        log=log)
-                for p in adif_paths:
-                    log(f"[adif] Loaded: {p.name}")
-                al = self.adif_log
-                summary = (f"[adif] {al.total_qsos} QSOs across {len(adif_paths)} file(s)"
-                           f" — {len(al.worked_calls)} calls,"
-                           f" {len(al.worked_dxcc_all)} DXCC,"
-                           f" {len(al.worked_cqz_all)} CQ zones worked")
-                if cfg.entity_needs_lotw:
-                    summary += (f"; {len(al.worked_dxcc)} DXCC,"
-                                f" {len(al.worked_cqz)} CQ zones LoTW-confirmed")
-                log(summary)
-                for p in adif_paths:
-                    try:
-                        self._adif_mtimes[p] = p.stat().st_mtime
-                    except OSError:
-                        pass
-            except Exception as exc:
-                log(f"[adif] Failed to load: {exc}")
-        else:
-            log("[adif] No ADIF log found — NEEDED detection disabled")
-
-        # ── Watchlists ────────────────────────────────────────────────────────
-        try:
-            for key, attr in (("callsigns", "call_patterns"), ("message", "msg_patterns")):
-                spec = cfg.rule(key)
-                if spec:
-                    files = spec.settings["files"]
-                    patterns = load_regex_patterns(files, log=log)
-                    setattr(self, attr, patterns)
-                    log(f"[{key}] {len(patterns)} pattern(s)"
-                        f" from {', '.join(str(f) for f in files)}")
-        except OSError as exc:
-            self._fatal(f"[wanted] Cannot read pattern file: {exc}")
-            return
-        rules = [w.rule for w in cfg.wanted]
-        self.msg_patterns.extend(keyword_patterns(rules))
-        for key, word in ACTIVATION_KEYWORDS.items():
-            if key in rules:
-                log(f"[{key}] {word} pattern active")
-
-        # ── JSON output ───────────────────────────────────────────────────────
-        json_log = cfg.actions.json_log
-        if json_log:
-            try:
-                self.json_fh = open(json_log, "a", encoding="utf-8")
-                log(f"[save] Appending JSON records to: {json_log}")
-            except OSError as exc:
-                self._fatal(f"[save] Cannot open {json_log}: {exc}")
-                return
-
-        # ── UDP proxy destinations ────────────────────────────────────────────
-        self.proxy_dests = [("127.0.0.1", port) for port in cfg.udp.proxy]
-        if self.proxy_dests:
-            targets = ", ".join(f"localhost:{p}" for _, p in self.proxy_dests)
-            log(f"[proxy] Forwarding all packets to: {targets}")
-
-        # ── Column header then ready banner ───────────────────────────────────
-        log(self._header())
-        scope = ("all decodes" if cfg.show_all else
-                 "CQ + matched" if cfg.evaluate_all else "CQ calls only")
-        log(f"[ready] Listening on {cfg.udp.host}:{cfg.udp.port}  ({scope})")
-
-        # ── Hand off to UDP receive loop ──────────────────────────────────────
-        self._udp_loop()
+            # Non-CQ with no hit (show = "all"): indent to keep columns aligned.
+            lines = [f"    {lines[0]}"] + lines[1:]
+        for line in lines:
+            self._append_line(line)
+        self._line_count += 1
+        if self._line_count % 15 == 0:
+            self._append_line(self._header())
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
-    def _worker(self) -> None:
-        """Background thread: startup, then the UDP loop.  Never dies silently."""
+    async def run_async(self) -> int:
+        """Run the engine and the TUI together; return a process exit status."""
+        engine = asyncio.ensure_future(self.engine.run())
+        engine.add_done_callback(self._engine_done)
         try:
-            self._startup_then_udp()
-        except Exception as exc:
-            self._fatal(f"[fatal] {type(exc).__name__}: {exc}")
-
-    def run(self) -> int:
-        """Run the TUI; return a process exit status."""
-        t = threading.Thread(target=self._worker, daemon=True)
-        t.start()
-        try:
-            self._app.run()
+            await self._app.run_async()
         finally:
-            self._running = False
-            if self.json_fh:
-                self.json_fh.close()
-            if self.hamdat:
-                self.hamdat.close()
+            self.engine.stop()
+            try:
+                await engine
+            except Exception:
+                pass                # reported by _engine_done
+            self.engine.close()
         if self._fatal_msg:
             # The full-screen pane is gone; repeat the reason on the terminal.
             print(self._fatal_msg, file=sys.stderr)
             return 1
         return 0
+
+    def _engine_done(self, task) -> None:
+        """The engine stops on its own only after a Fatal event, or by crashing."""
+        if not task.cancelled() and task.exception() is not None:
+            exc = task.exception()
+            self._fatal(f"[fatal] {type(exc).__name__}: {exc}")
+        self._app.invalidate()
+
+    def run(self) -> int:
+        return asyncio.run(self.run_async())

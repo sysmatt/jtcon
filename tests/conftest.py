@@ -13,8 +13,11 @@ import jtcon.tui.render
 from jtcon.config import build_config, check_layer
 from jtcon.core.adif import AdifLog
 from jtcon.core.cty import CtyDat
-from jtcon.core.decode import DecodeContext
+from jtcon.core.decode import DecodeContext, debug_text, evaluate
+from jtcon.core.engine import Engine
 from jtcon.core.patterns import keyword_patterns
+from jtcon.core.protocol import Decode, parse_message
+from jtcon.tui.render import _render
 from v2flags import v2_to_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -114,7 +117,7 @@ def make_ctx(cty, make_adif):
             call_patterns=list(call_patterns),
             msg_patterns=keyword_patterns([w.rule for w in cfg.wanted]),
             state_set=set(states.settings["states"]) if states else set(),
-            hamdat=hamdat, cycle_tracker=None,
+            hamdat=hamdat,
             alerted={} if alerted is None else alerted,
             dial_freq=dial_freq, de_call=MY_CALL,
             log=log or (lambda m: None),
@@ -122,5 +125,61 @@ def make_ctx(cty, make_adif):
     return _make
 
 
+class FakeSock:
+    """Records what is sent; fails every send when fail=True."""
+    def __init__(self, fail=False):
+        self.sent, self.fail = [], fail
+
+    def sendto(self, data, addr):
+        if self.fail:
+            raise OSError("network down")
+        self.sent.append((data, addr))
+
+
+@pytest.fixture
+def make_engine(cty, make_adif):
+    """
+    An Engine with the test inputs already loaded (as its startup would) and a
+    FakeSock for sending.  Arguments as for make_ctx.  Its events are collected
+    in engine.events.
+    """
+    def _make(*argv, config=None, adif=True, hamdat=FakeHamdat(), dial_freq=14_074_000,
+              call_patterns=(), tx_sock=None):
+        cfg = make_config(config) if config is not None else v2_config(*argv)
+        engine = Engine(cfg, None, tx_sock or FakeSock())
+        engine.cty, engine.hamdat = cty, hamdat
+        engine.adif_log = make_adif(hamdat=hamdat, qsl_only=cfg.entity_needs_lotw) if adif else None
+        engine.call_patterns = list(call_patterns)
+        engine.msg_patterns = keyword_patterns([w.rule for w in cfg.wanted])
+        states = cfg.rule("states")
+        engine.state_set = set(states.settings["states"]) if states else set()
+        engine.dial_freq, engine.de_call = dial_freq, MY_CALL
+        engine.events = []
+        engine.subscribe(engine.events.append)
+        return engine
+    return _make
+
+
 def watch_patterns(*regexes: str, source: str = "watch.txt") -> list:
     return [(re.compile(r, re.IGNORECASE), source) for r in regexes]
+
+
+def handle_packet(data: bytes, ctx, addr, out_meta: dict | None = None) -> list:
+    """
+    v2's handle_packet, rebuilt from evaluate() and the renderer, so tests keep
+    comparing the same display lines.  Fills *out_meta* like v2 did.
+    """
+    parsed = parse_message(data)
+    if parsed is None or not isinstance(parsed[1], Decode):
+        return []
+    schema, d = parsed
+    lines = [debug_text(data, schema, d)] if ctx.config.display.debug else []
+    r = evaluate(d, ctx)
+    if r is None:
+        return lines
+    lines.extend(_render(ctx, r))
+    if out_meta is not None:
+        out_meta.update(decoded=d, callsign=r.callsign, is_cq=r.is_cq,
+                        needed_flags=r.needed_flags, match_flags=r.match_flags,
+                        is_needed=bool(r.needed_flags), wsjt_addr=addr, bell=r.new_alert)
+    return lines

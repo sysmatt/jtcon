@@ -12,10 +12,9 @@ import os
 from pathlib import Path
 
 from jtcon.core.bands import _freq_to_band
-from jtcon.core.decode import handle_packet
 from jtcon.tui.render import _BGRN, _BMAG, _BOLD, _BRED, _BYEL, _CYN, _DIM, _GRN, _header_line, _RST
 import wsjtx_packets as pk
-from conftest import watch_patterns
+from conftest import handle_packet, watch_patterns
 
 SNAPSHOT = Path(__file__).parent / "snapshots" / "render_v2.txt"
 

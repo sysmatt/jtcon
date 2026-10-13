@@ -226,6 +226,11 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     app.wait_for(r"04  123015z.{0,60}W1ABC ZL2AB RF70")
     assert "W1ABC W9ZZZ -05" not in app.screen()
 
+    # ── Wanted stations are highlighted in WSJT-X ─────────────────────────────
+    orange = ((255, 165, 0), (0, 0, 0))
+    assert [highlight(wsjtx) for _ in range(4)] == [
+        ("VK3XY", *orange), ("K2XYZ", *orange), ("N1NEW", *orange), ("ZL2AB", *orange)]
+
     # ── Replies: by callsign and by index ─────────────────────────────────────
     app.type("vk3xy\r")
     data, _ = wsjtx.recvfrom(4096)
@@ -239,6 +244,11 @@ def test_live_session(launch, home, wsjtx, tmp_path):
 
     app.type("4\r")
     assert pk.parse_reply(wsjtx.recvfrom(4096)[0])["message"] == "W1ABC ZL2AB RF70"
+
+    # ── QSO Logged: that station's highlight is cleared ───────────────────────
+    wsjtx.sendto(pk.qso_logged("K2XYZ"), jt)
+    app.wait_for(r"\[qso\] Logged K2XYZ")
+    assert highlight(wsjtx) == ("K2XYZ", None, None)
 
     # ── list ──────────────────────────────────────────────────────────────────
     app.type("list\r")
@@ -257,6 +267,8 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     # ── Dial change clears the buffer ─────────────────────────────────────────
     wsjtx.sendto(pk.status(7_074_000, de_call="N0CALL"), jt)
     app.wait_for(r"\[buffer\] Dial frequency changed — cleared 5 entries\.")
+    assert sorted(highlight(wsjtx) for _ in range(3)) == [
+        ("N1NEW", None, None), ("VK3XY", None, None), ("ZL2AB", None, None)]
     app.type("VK3XY\r")
     app.wait_for(r"\[cmd\] VK3XY not found in rolling buffer\.")
 
@@ -268,6 +280,12 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     assert [r["callsign"] for r in records] == ["VK3XY", "W1ABC", "K2XYZ", "N1NEW", "VK3XY"]
     assert records[0]["needed"] == ["NEW-DXCC(VK)", "NEW-CQZ(30)", "NEW-CTRY(Australia)"]
     assert records[-1]["needed"] == []                 # worked after the reload
+
+
+def highlight(sock) -> tuple:
+    h = pk.parse_highlight(sock.recvfrom(4096)[0])
+    assert (h["type"], h["id"], h["last_only"], h["trailing"]) == (13, "WSJT-X", False, 0)
+    return h["callsign"], h["background"], h["foreground"]
 
 
 def test_tx_status_and_ctrl_q(launch, wsjtx):

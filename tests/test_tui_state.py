@@ -1,6 +1,7 @@
-"""TUI-side state: rolling buffer, CMD> commands, output pane trimming and scrolling.
+"""TUI: CMD> commands, the decode pane, the status line, and engine events.
 
-Runs JtconTUI headless (no terminal); the app itself is never started.
+Runs JtconTUI headless (no terminal) on top of a real Engine; packets go
+straight into the engine, and the app itself is never started.
 """
 
 import re
@@ -11,20 +12,12 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from jtcon.core.decode import handle_packet
-from jtcon.tui.app import _BUF_SIZE, _MAX_OUTPUT_LINES, _STALE_REPLY_S, _TRIM_OUTPUT_TO, JtconTUI
+from jtcon.core.engine import STALE_REPLY_S
+from jtcon.core.events import Fatal, LogLine, Ready
+from jtcon.tui.app import _MAX_OUTPUT_LINES, _TRIM_OUTPUT_TO, JtconTUI
 import wsjtx_packets as pk
-from conftest import v2_config
 
 ADDR = ("127.0.0.1", 2237)
-
-
-class _FakeSock:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((data, addr))
 
 
 class _Buffer:
@@ -40,10 +33,10 @@ def clock(monkeypatch):
 
 
 @pytest.fixture
-def make_tui():
+def make_tui(make_engine):
     with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
-        def _make(*argv):
-            return JtconTUI(v2_config("--no-color", *argv), None, _FakeSock())
+        def _make(*argv, **kw):
+            return JtconTUI(make_engine("--no-color", *argv, **kw))
         yield _make
 
 
@@ -52,11 +45,11 @@ def tui(make_tui):
     return make_tui()
 
 
-def store(tui, ctx, msg, addr=ADDR):
-    """Feed one decode through handle_packet into the buffer, as the UDP loop does."""
-    meta = {}
-    lines = handle_packet(pk.decode(msg), ctx, addr, meta)
-    return tui._store_entry(meta["callsign"], meta, lines, addr)
+def store(tui, msg, addr=ADDR):
+    """Feed one decode to the engine, as if WSJT-X sent it; return its index."""
+    tui.engine.datagram_received(pk.decode(msg), addr)
+    tui._flush_output()
+    return tui.engine.events[-1].station.idx
 
 
 def command(tui, text):
@@ -65,70 +58,73 @@ def command(tui, text):
     return tui._lines
 
 
-# ── Rolling buffer ────────────────────────────────────────────────────────────
-
-def test_each_station_keeps_its_index(tui, make_ctx, clock):
-    ctx = make_ctx("--no-color")
-    assert [store(tui, ctx, m) for m in ("CQ W1ABC FN42", "CQ VK3XY QF22", "CQ JA1XYZ PM95")] \
-        == [0, 1, 2]
-    clock[0] += 15
-    assert store(tui, ctx, "CQ DX VK3XY QF22") == 1
-    entry = tui._find_callsign("VK3XY")
-    assert entry["count"] == 2
-    assert entry["first_seen"] == 1000.0 and entry["last_seen"] == 1015.0
-    assert entry["decoded"]["message"] == "CQ DX VK3XY QF22"     # newest decode wins
-    assert tui._find_callsign("ZL1AA") is None
+def test_spots_are_shown_with_their_index(tui):
+    tui.engine.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    tui.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    tui._flush_output()
+    assert tui._lines[0].startswith("00  123015z") and "CQ W1ABC FN42" in tui._lines[0]
+    assert tui._lines[1].startswith("01  123015z") and "CQ VK3XY QF22" in tui._lines[1]
+    assert tui._lines[2].startswith("  *** NEEDED: NEW-DXCC(VK)")
+    # The station keeps its rendering, without the index, for "list".
+    assert tui.engine.stations.find("VK3XY").display == [tui._lines[1][4:], tui._lines[2]]
 
 
-def test_full_buffer_evicts_least_recently_heard(tui, clock):
-    meta = {"decoded": {}, "needed_flags": [], "match_flags": []}
-    for i in range(_BUF_SIZE):
-        clock[0] += 1
-        tui._store_entry(f"K{i}AA", meta, ["line"], ADDR)
-    clock[0] += 1
-    tui._store_entry("K5AA", meta, ["line"], ADDR)     # K0AA is now the oldest
-    clock[0] += 1
-    idx = tui._store_entry("ZL1NEW", meta, ["line"], ADDR)
-    assert idx == 0
-    assert tui._find_callsign("K0AA") is None
-    assert tui._find_callsign("ZL1NEW")["idx"] == 0
-    assert len(tui._cq_buffer) == _BUF_SIZE
+def test_raw_non_cq_is_indented(make_tui):
+    t = make_tui("--raw")
+    t.engine.datagram_received(pk.decode("W1ABC K5TX -05"), ADDR)
+    t._flush_output()
+    assert t._lines[0].startswith("    123015z")
 
 
-def test_clear_buffer(tui, make_ctx):
-    ctx = make_ctx()
-    store(tui, ctx, "CQ W1ABC FN42")
-    store(tui, ctx, "CQ VK3XY QF22")
-    assert tui._clear_buffer() == 2
-    assert tui._cq_buffer == {} and tui._call_idx == {}
-    assert store(tui, ctx, "CQ JA1XYZ PM95") == 0
+def test_header_repeats_every_15_spots(tui):
+    for i in range(15):
+        tui.engine.datagram_received(pk.decode(f"CQ K{i}AA FN42"), ADDR)
+    tui._flush_output()
+    assert tui._lines[-2].startswith("##") and tui._lines[-1].startswith("─")
+
+
+def test_ready_prints_header_then_banner(tui):
+    tui._on_event(Ready("[ready] Listening"))
+    tui._on_event(LogLine("a\nb"))
+    tui._flush_output()
+    assert tui._lines[0].startswith("##") and tui._lines[2:] == ["[ready] Listening", "a", "b"]
+
+
+def test_fatal_event_exits(tui, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tui, "_exit_app", lambda: calls.append(1))
+    tui._on_event(Fatal("[adif] File not found: x"))
+    tui._flush_output()
+    assert tui._fatal_msg == "[adif] File not found: x" and calls == [1]
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-def test_reply_by_index(tui, make_ctx):
-    ctx = make_ctx()
-    store(tui, ctx, "CQ W1ABC FN42")
-    store(tui, ctx, "CQ VK3XY QF22")
+def replies(tui) -> list:
+    return [pk.parse_reply(d)["message"] for d, _ in tui.engine.tx_sock.sent
+            if pk.parse_sent(d)["type"] == 4]
+
+
+def test_reply_by_index(tui):
+    store(tui, "CQ W1ABC FN42")
+    store(tui, "CQ VK3XY QF22")
     lines = command(tui, "01")
     assert lines[-1] == "[cmd] ► Reply sent to VK3XY [01]  msg='CQ VK3XY QF22'  → 127.0.0.1:2237"
-    (data, addr), = tui.tx_sock.sent
-    assert addr == ADDR
-    assert pk.parse_reply(data)["message"] == "CQ VK3XY QF22"
+    assert replies(tui) == ["CQ VK3XY QF22"]
     command(tui, "1")
-    assert len(tui.tx_sock.sent) == 2
+    assert len(replies(tui)) == 2
 
 
-def test_reply_by_callsign(tui, make_ctx):
-    store(tui, make_ctx(), "CQ VK3XY QF22")
+def test_reply_by_callsign(tui):
+    store(tui, "CQ VK3XY QF22")
     assert command(tui, "vk3xy")[-1].startswith("[cmd] ► Reply sent to VK3XY [00]")
     assert command(tui, "ZL1AA")[-1] == "[cmd] ZL1AA not found in rolling buffer."
     assert command(tui, "42")[-1] == "[cmd] No CQ at index 42."
 
 
-def test_stale_reply_warns(tui, make_ctx, clock):
-    store(tui, make_ctx(), "CQ VK3XY QF22")
-    clock[0] += _STALE_REPLY_S + 5
+def test_stale_reply_warns(tui, clock):
+    store(tui, "CQ VK3XY QF22")
+    clock[0] += STALE_REPLY_S + 5
     lines = command(tui, "0")
     assert lines[-2] == ("[cmd] Warning: VK3XY last heard 2m05s ago"
                          " — WSJT-X may no longer have that decode.")
@@ -143,16 +139,15 @@ def test_unknown_command(tui):
     assert len(command(tui, "   ")) == n      # blank input does nothing
 
 
-def test_list(tui, make_ctx, clock):
-    ctx = make_ctx("--no-color")
+def test_list(tui, clock):
     assert command(tui, "list")[-1] == "[list] No NEEDED/MATCH entries in rolling buffer."
-    store(tui, ctx, "CQ VK3XY QF22")         # 00, hit
+    store(tui, "CQ VK3XY QF22")         # 00, hit
     clock[0] += 10
-    store(tui, ctx, "CQ W1ABC FN42")         # 01, no hit: not listed
+    store(tui, "CQ W1ABC FN42")         # 01, no hit: not listed
     clock[0] += 10
-    store(tui, ctx, "CQ KH6/W1XX")           # 02, hit
+    store(tui, "CQ KH6/W1XX")           # 02, hit
     clock[0] += 10
-    store(tui, ctx, "CQ VK3XY QF22")         # 00 heard again: now the most recent
+    store(tui, "CQ VK3XY QF22")         # 00 heard again: now the most recent
     clock[0] += 5
     before = len(tui._lines)
     lines = command(tui, "l")[before:]
@@ -243,19 +238,19 @@ def test_status_line(tui):
     def text():
         return "".join(t for _, t in tui._get_status_text())
 
+    tui.engine.de_call = ""
     assert text().startswith(" RX  [")
-    tui._de_call = "N0CALL"
-    tui._transmitting = True
-    assert text().startswith(" TX  [") and "de=N0CALL" in text()
+    tui.engine.datagram_received(pk.status(14_074_000, de_call="K1ME", transmitting=True), ADDR)
+    assert text().startswith(" TX  [") and "de=K1ME" in text()
     tui._scroll_top = 3
     assert " SCROLL " in text()
-    tui._udp_down = True
+    tui.engine.udp_down = True
     assert text().startswith(" UDP DOWN ")
 
 
 def test_header_columns(make_tui):
-    t = make_tui("--was")
+    t = make_tui("--was", adif=False, hamdat=None)
     assert "ST" not in t._header()                  # no hamdat loaded
-    t.adif_log, t.hamdat = object(), object()
+    t.engine.adif_log, t.engine.hamdat = object(), object()
     h = t._header()
     assert re.search(r"days\s+ST\s+\| entity", h) and "WAS" in h and "QRZ  LoW" in h

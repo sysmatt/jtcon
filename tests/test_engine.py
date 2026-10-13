@@ -1,0 +1,401 @@
+"""The Engine: packets in, events and WSJT-X messages out; log reloads; startup."""
+
+import asyncio
+import os
+import shutil
+import socket
+import sys
+import threading
+
+import pytest
+
+import jtcon.core.adif
+from jtcon.config import merge
+from jtcon.core.adif import AdifLog
+from jtcon.core.engine import Engine
+from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StatusChanged
+import wsjtx_packets as pk
+from conftest import CTY_PATH, LOG_PATH, FakeSock, make_config
+
+ADDR = ("127.0.0.1", 2237)
+ORANGE = ((255, 165, 0), (0, 0, 0))
+
+
+def sent(engine) -> list:
+    """Everything sent to WSJT-X, parsed, as (type, callsign or message, colours)."""
+    out = []
+    for data, addr in engine.tx_sock.sent:
+        m = pk.parse_sent(data)
+        if m["type"] == 13:
+            out.append(("highlight", m["callsign"], (m["background"], m["foreground"])))
+        else:
+            out.append(("reply", m["message"]))
+    return out
+
+
+def spots(engine) -> list:
+    return [e for e in engine.events if isinstance(e, SpotEvent)]
+
+
+def logs(engine) -> list:
+    return [e.text for e in engine.events if isinstance(e, LogLine)]
+
+
+# ── Decodes ───────────────────────────────────────────────────────────────────
+
+def test_cq_becomes_a_spot_with_a_station(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ DX VK3XY QF22"), ADDR)
+    (ev,) = spots(e)
+    assert ev.result.callsign == "VK3XY" and ev.result.new_alert
+    assert ev.station is e.stations.find("VK3XY") and ev.station.addr == ADDR
+    assert ev.station.decode.message == "CQ DX VK3XY QF22"
+    assert ev.ctx.dial_freq == 14_074_000
+
+
+def test_hidden_decodes_still_count_in_the_cycle_stats(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("W1ABC VK3XY -12"), ADDR)    # not shown
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    assert (e.cycle_tracker.cycle_total, e.cycle_tracker.cycle_cq) == (2, 1)
+    assert len(spots(e)) == 1
+
+
+def test_debug_dump_comes_before_the_spot(make_engine):
+    e = make_engine("--debug")
+    e.datagram_received(pk.decode("W1ABC VK3XY -12"), ADDR)     # dumped though hidden
+    assert len(logs(e)) == 1 and logs(e)[0].startswith("[debug] schema=2")
+
+
+def test_other_packets_are_ignored(make_engine):
+    e = make_engine()
+    for data in (b"junk", pk.heartbeat(), pk.header(99)):
+        e.datagram_received(data, ADDR)
+    assert e.events == [] and e.tx_sock.sent == []
+
+
+def test_proxy_forwards_every_packet(make_engine):
+    e = make_engine("--proxy", "2238,2239")
+    e.proxy_dests = [("127.0.0.1", 2238), ("127.0.0.1", 2239)]
+    e.datagram_received(b"anything", ADDR)
+    assert e.tx_sock.sent == [(b"anything", ("127.0.0.1", 2238)),
+                              (b"anything", ("127.0.0.1", 2239))]
+
+
+def test_packet_handler_errors_are_logged(make_engine, monkeypatch):
+    e = make_engine()
+    monkeypatch.setattr("jtcon.core.engine.evaluate", lambda d, ctx: 1 / 0)
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    assert logs(e) == ["[error] packet handler: division by zero"]
+
+
+# ── Status ────────────────────────────────────────────────────────────────────
+
+def test_status_tracks_tx_and_operator(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.status(14_074_000, de_call="K1ME", transmitting=True), ADDR)
+    assert e.transmitting and e.de_call == "K1ME"
+    assert isinstance(e.events[-1], StatusChanged)
+
+
+def test_dial_change_clears_buffer_and_highlights(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    e.datagram_received(pk.status(14_074_000), ADDR)             # same dial: nothing
+    assert len(e.stations) == 2
+    e.datagram_received(pk.status(7_074_000), ADDR)
+    assert len(e.stations) == 0 and e.dial_freq == 7_074_000
+    assert "[buffer] Dial frequency changed — cleared 2 entries." in logs(e)
+    assert sent(e) == [("highlight", "VK3XY", ORANGE), ("highlight", "VK3XY", (None, None))]
+
+
+# ── Highlight Callsign ────────────────────────────────────────────────────────
+
+def test_wanted_station_is_highlighted_once(make_engine):
+    e = make_engine()
+    for _ in range(3):
+        e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)        # not wanted
+    assert sent(e) == [("highlight", "VK3XY", ORANGE)]
+    assert e.tx_sock.sent[0][1] == ADDR
+
+
+def test_highlight_cleared_when_no_longer_wanted(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    e.adif_log.worked_dxcc.add("VK")                     # as if confirmed meanwhile
+    e.adif_log.worked_cqz.add(30)
+    e.adif_log.worked_country.add("AUSTRALIA")
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert sent(e) == [("highlight", "VK3XY", ORANGE), ("highlight", "VK3XY", (None, None))]
+
+
+def test_highlight_cleared_when_the_qso_is_logged(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    e.datagram_received(pk.qso_logged("VK3XY"), ADDR)
+    assert "[qso] Logged VK3XY" in logs(e)
+    assert sent(e)[-1] == ("highlight", "VK3XY", (None, None))
+    e.datagram_received(pk.logged_adif("<call:5>VK3XY <eor>"), ADDR)   # nothing more to clear
+    assert len(sent(e)) == 2
+
+
+def test_wsjtx_close_forgets_its_highlights(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    e.datagram_received(pk.close(), ADDR)
+    assert "[wsjt-x] WSJT-X closed" in logs(e)
+    e.close()                                            # nothing left to clear
+    assert len(sent(e)) == 1
+
+
+def test_close_clears_all_highlights(make_engine):
+    e = make_engine(config={})          # v3 defaults: unconfirmed JA is wanted too
+    for msg in ("CQ VK3XY QF22", "CQ JA1XYZ PM95", "CQ W1ABC FN42"):
+        e.datagram_received(pk.decode(msg), ADDR)
+    e.close()
+    assert sent(e)[2:] == [("highlight", "VK3XY", (None, None)),
+                           ("highlight", "JA1XYZ", (None, None))]
+
+
+def test_highlight_per_wsjtx_instance(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22", client_id="WSJT-X - rig2"), ("10.0.0.2", 2237))
+    data, addr = e.tx_sock.sent[0]
+    assert pk.parse_highlight(data)["id"] == "WSJT-X - rig2" and addr == ("10.0.0.2", 2237)
+
+
+def test_highlight_colours_and_off_switch(make_engine):
+    colours = {"highlight": {"background": "#102030", "foreground": "#FFFFFF"}}
+    e = make_engine(config={"actions": colours})
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert sent(e) == [("highlight", "VK3XY", ((16, 32, 48), (255, 255, 255)))]
+
+    off = make_engine(config={"actions": {"highlight": {"enabled": False}}})
+    off.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert off.tx_sock.sent == [] and len(spots(off)) == 1
+
+
+def test_send_failures_are_logged(make_engine):
+    e = make_engine(tx_sock=FakeSock(fail=True))
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert logs(e) == ["[udp] Send to 127.0.0.1:2237 failed: network down"]
+
+
+# ── Replies ───────────────────────────────────────────────────────────────────
+
+def test_reply(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    e.reply(e.stations.find("W1ABC"))
+    assert sent(e) == [("reply", "CQ W1ABC FN42")]
+    assert logs(e)[-1] == "[cmd] ► Reply sent to W1ABC [00]  msg='CQ W1ABC FN42'  → 127.0.0.1:2237"
+
+
+def test_reply_failure_is_logged(make_engine):
+    e = make_engine(tx_sock=FakeSock(fail=True))
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    e.reply(e.stations.find("W1ABC"))
+    assert logs(e)[-1] == "[cmd] Reply to W1ABC failed: network down"
+
+
+def test_clear_buffer_command(make_engine):
+    e = make_engine()
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    assert e.clear_buffer() == 1
+    assert sent(e)[-1] == ("highlight", "VK3XY", (None, None))
+
+
+# ── Log reload ────────────────────────────────────────────────────────────────
+
+def attach(engine):
+    """Run *engine*'s events on the current loop, as run() does."""
+    engine._loop = asyncio.get_running_loop()
+    engine._loop_thread = threading.get_ident()
+
+
+def _watch_log(engine, path):
+    engine.adif_log = AdifLog([path], engine.cty, engine.hamdat,
+                              qsl_only=engine.config.entity_needs_lotw, log=engine.log)
+    engine._adif_mtimes = engine._mtimes([path])
+
+
+def _touch_later(path):
+    st = path.stat()
+    os.utime(path, (st.st_atime, st.st_mtime + 5))
+
+
+def test_decodes_wait_for_a_reload(make_engine, tmp_path):
+    log = tmp_path / "log.adi"
+    shutil.copy(LOG_PATH, log)
+    out = tmp_path / "script.out"
+    script = tmp_path / "up.sh"
+    script.write_text(f'#!/bin/sh\necho "uploading $1"\necho "$@" > {out}\n')
+    script.chmod(0o755)
+    e = make_engine(config={"actions": {"script": {"on_log_reload": str(script)}}})
+    _watch_log(e, log)
+
+    async def scenario():
+        attach(e)
+        with log.open("a") as f:
+            f.write("<call:5>VK3XY <band:3>20m <mode:3>FT8 <qso_date:8>20240101"
+                    " <lotw_qsl_rcvd:1>Y <EOR>\n")
+        _touch_later(log)
+        e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+        assert e._reloading and spots(e) == []          # held until the reload is done
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if spots(e) and out.exists() and any("uploading" in l for l in logs(e)):
+                break
+
+    asyncio.run(scenario())
+    assert "[adif] Reloaded 10 QSOs from 1 file(s)." in logs(e)
+    (ev,) = spots(e)
+    assert ev.result.needed_flags == []                  # judged against the new log
+    assert f"[on_log_reload] uploading {log}" in logs(e)
+    assert out.read_text() == f"{log}\n"
+
+
+def test_qso_logged_checks_the_log_at_once(make_engine, tmp_path):
+    log = tmp_path / "log.adi"
+    shutil.copy(LOG_PATH, log)
+    e = make_engine()
+    _watch_log(e, log)
+
+    async def scenario():
+        attach(e)
+        e.datagram_received(pk.qso_logged("VK3XY"), ADDR)          # file not written yet
+        assert not e._reloading
+        with log.open("a") as f:
+            f.write("<call:5>VK3XY <band:3>20m <qso_date:8>20261012 <EOR>\n")
+        _touch_later(log)
+        e.datagram_received(pk.logged_adif("<call:5>VK3XY <eor>"), ADDR)
+        assert e._reloading
+        while e._reloading:
+            await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+    assert e.adif_log.total_qsos == 10 and "VK3XY" in e.adif_log.worked_calls
+
+
+def test_unreadable_reload_is_reported_once(make_engine, tmp_path, monkeypatch):
+    log = tmp_path / "log.adi"
+    shutil.copy(LOG_PATH, log)
+    e = make_engine()
+    _watch_log(e, log)
+
+    def broken(*a, **kw):
+        raise ValueError("bad file")
+
+    async def scenario():
+        attach(e)
+        monkeypatch.setattr("jtcon.core.engine.AdifLog", broken)
+        _touch_later(log)
+        e.check_logs()
+        while e._reloading:
+            await asyncio.sleep(0.01)
+        e.check_logs()                                   # same file: no retry
+        assert not e._reloading
+
+    asyncio.run(scenario())
+    assert logs(e) == ["[adif] Reload failed: bad file"]
+
+
+# ── Startup and run() ─────────────────────────────────────────────────────────
+
+@pytest.fixture
+def no_wsjt_logs(monkeypatch):
+    monkeypatch.setattr(jtcon.core.adif, "WSJT_LOG_SEARCH_PATHS", [])
+
+
+def _engine(tmp_path, layer: dict, sock=None) -> Engine:
+    inputs = {"cty": str(CTY_PATH), "hamdat": str(tmp_path / "no-hamdat.db")}
+    e = Engine(make_config(merge({"inputs": inputs}, layer)), sock, FakeSock())
+    e.events = []
+    e.subscribe(e.events.append)
+    return e
+
+
+def test_startup_loads_inputs(tmp_path, no_wsjt_logs):
+    e = _engine(tmp_path, {"inputs": {"adif": [str(LOG_PATH)]},
+                           "wanted": [{"rule": "pota"}]})
+    assert e._load_inputs()
+    assert logs(e) == [
+        "[config] Wanted rules: pota",
+        "[cty.dat] Loaded 4798 prefixes + 2708 exact callsigns",
+        "[adif] Loaded: log.adi",
+        "[adif] 9 QSOs across 1 file(s) — 8 calls, 5 DXCC, 4 CQ zones worked;"
+        " 2 DXCC, 2 CQ zones LoTW-confirmed",
+        "[pota] POTA pattern active",
+        "[highlight] Wanted stations are highlighted in WSJT-X (#ffa500 on #000000)",
+    ]
+
+
+@pytest.mark.parametrize("layer, fatal", [
+    ({"inputs": {"adif": ["/nope/x.adi"]}}, "[adif] File not found: /nope/x.adi"),
+    ({"wanted": [{"rule": "states", "states": ["AK"]}]}, "[states] hamdat database not found"),
+    ({"wanted": [{"rule": "callsigns", "files": ["/nope/w.txt"]}]},
+     "[wanted] Cannot read pattern file"),
+    ({"actions": {"json_log": {"file": "/nope/dir/s.jsonl"}}}, "[save] Cannot open"),
+])
+def test_startup_fatal_errors(tmp_path, no_wsjt_logs, layer, fatal):
+    e = _engine(tmp_path, layer)
+    assert not e._load_inputs()
+    assert isinstance(e.events[-1], Fatal) and e.events[-1].text.startswith(fatal)
+
+
+def test_run_serves_wsjtx_until_stopped(tmp_path, no_wsjt_logs):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    e = _engine(tmp_path, {"udp": {"host": "127.0.0.1", "port": port}}, sock)
+
+    async def scenario():
+        task = asyncio.ensure_future(e.run())
+        while not any(isinstance(ev, Ready) for ev in e.events):
+            await asyncio.sleep(0.01)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as wsjtx:
+            wsjtx.sendto(pk.decode("CQ VK3XY QF22"), ("127.0.0.1", port))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if spots(e):
+                    break
+        e.stop()
+        await asyncio.wait_for(task, 5)
+        e.close()
+
+    asyncio.run(scenario())
+    ready = [ev.text for ev in e.events if isinstance(ev, Ready)]
+    assert ready == [f"[ready] Listening on 127.0.0.1:{port}  (CQ calls only)"]
+    assert spots(e)[0].result.callsign == "VK3XY"
+    assert sock.fileno() == -1                           # closed with the engine
+
+
+def test_run_stops_after_a_fatal_error(tmp_path, no_wsjt_logs):
+    e = _engine(tmp_path, {"inputs": {"adif": ["/nope/x.adi"]}})
+    asyncio.run(asyncio.wait_for(e.run(), 5))
+    assert isinstance(e.events[-1], Fatal)
+
+
+def test_log_from_a_worker_thread_reaches_the_loop(tmp_path):
+    e = _engine(tmp_path, {})
+    seen = []
+
+    async def scenario():
+        attach(e)
+        e.subscribe(lambda ev: seen.append(threading.get_ident()))
+        await asyncio.to_thread(e.log, "from a thread")
+        await asyncio.sleep(0.01)
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(scenario())
+    assert logs(e) == ["from a thread"] and seen == [loop_thread]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell script")
+def test_log_reload_script_failure_is_logged(make_engine, tmp_path):
+    e = make_engine(config={"actions": {"script": {"on_log_reload": str(tmp_path / "missing")}}})
+    e._run_log_reload_script([LOG_PATH])
+    assert logs(e)[0].startswith("[on_log_reload] [Errno 2]")
+

@@ -1,8 +1,9 @@
 """ADIF parsing and the worked/confirmed index built from it (AdifLog)."""
 
 from datetime import date
+from pathlib import Path
 
-from jtcon.core.adif import AdifLog, parse_adif
+from jtcon.core.adif import WSJT_LOG_SEARCH_PATHS, AdifLog, parse_adif
 from jtcon.core.decode import _entity_info
 from conftest import LOG_PATH, FakeHamdat, v2_config
 
@@ -123,3 +124,11 @@ def test_needed_and_worked_flags(make_adif, cty):
 
     only_dxcc = v2_config("--no-need-cqz", "--no-need-country")
     assert a.needed_flags(vk, only_dxcc) == ["NEW-DXCC(VK)"]
+
+
+def test_log_search_covers_wsjtx_and_ws_suite():
+    home = Path.home()
+    for app in ("WSJT-X", "WSJT-X Exp", "WS"):
+        for base in (".local/share", "AppData/Local", "Library/Application Support"):
+            assert home / base / app / "wsjtx_log.adi" in WSJT_LOG_SEARCH_PATHS
+    assert home / "AppData/Roaming/WSJT-X/wsjtx_log.adi" in WSJT_LOG_SEARCH_PATHS   # v2's

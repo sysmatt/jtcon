@@ -13,11 +13,9 @@ from datetime import date
 
 import pytest
 
-from jtcon.core.cycle import CycleTracker
-from jtcon.core.decode import handle_packet
 from jtcon.tui.render import _BMAG
 import wsjtx_packets as pk
-from conftest import watch_patterns
+from conftest import handle_packet, watch_patterns
 
 ADDR = ("127.0.0.1", 2237)
 ALL_NEW_VK = ["NEW-DXCC(VK)", "NEW-CQZ(30)", "NEW-CTRY(Australia)"]
@@ -45,7 +43,7 @@ def test_new_entity_is_needed(make_ctx):
     assert meta["match_flags"] == []
     assert meta["bell"] is True
     assert meta["wsjt_addr"] == ADDR
-    assert meta["decoded"]["message"] == "CQ DX VK3XY QF22"
+    assert meta["decoded"].message == "CQ DX VK3XY QF22"
     assert len(lines) == 2 and "*** NEEDED: NEW-DXCC(VK), NEW-CQZ(30)" in lines[1]
 
 
@@ -177,14 +175,6 @@ def test_status_packet_is_not_a_decode(make_ctx):
     meta = {}
     assert handle_packet(pk.status(14_074_000), make_ctx(), ADDR, meta) == []
     assert meta == {}
-
-
-def test_cycle_tracker_counts_hidden_decodes(make_ctx):
-    ctx = make_ctx()
-    ctx.cycle_tracker = CycleTracker()
-    run(ctx, "W1ABC VK3XY -12")
-    run(ctx, "CQ W1ABC FN42")
-    assert (ctx.cycle_tracker.cycle_total, ctx.cycle_tracker.cycle_cq) == (2, 1)
 
 
 def test_debug_dumps_packet(make_ctx):

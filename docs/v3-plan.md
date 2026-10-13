@@ -161,7 +161,7 @@ Everything jtcon does outward.  Actions are triggered by events and routed by co
 | Action | Trigger | Notes |
 |---|---|---|
 | Reply (WSJT-X 4) | User command | Same as double-clicking the decode |
-| Highlight Callsign (WSJT-X 13) | WANTED hit | **New.** Colours the station in WSJT-X's Band Activity; cleared when no longer wanted |
+| Highlight Callsign (WSJT-X 13) | WANTED hit | **New, done in phase 3.** Colours the station in WSJT-X's Band Activity; cleared when no longer wanted |
 | QRZ upload | QSO Logged / Logged ADIF | **New.** Replaces the change-script hop |
 | Script | WANTED hit, QSO logged, input reloaded | Generalized `--alert-command` / `--adif-change-script` |
 | ntfy | WANTED hit | Background thread, as today |
@@ -426,15 +426,46 @@ jtcon --adif /home/k2tta/ham/data/qrzlog.adif /home/k2tta/.local/share/WS/wsjtx_
 
 as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
 
-### Phase 3: events and engine
-- [ ] **First, from Matt:** auto-discover the WS suite log (WSJT-X Improved's fork,
-      https://sourceforge.net/projects/wsjt-x-improved/files/WS_v3.2.1/).  Linux:
-      `~/.local/share/WS/wsjtx_log.adi` (seen on Matt's machine); confirm the
-      macOS/Windows locations from the release docs/source before adding them
-- [ ] Typed events for all WSJT-X messages we use; encoders for Reply and Highlight
-- [ ] `Engine` extracted from `JtconTUI`: UDP, station table, dial-change clearing,
-      input reload, alert state
-- [ ] TUI becomes a subscriber; snapshot tests still pass
+### Phase 3: events and engine ✅ (pending Matt's live check)
+- [x] **From Matt:** WS suite log auto-discovered.  WSJT-X and its forks keep
+      `wsjtx_log.adi` in Qt's per-app data directory, named after the program, so
+      the search covers `WSJT-X`, `WSJT-X Exp` and `WS` under `~/.local/share`
+      (Linux, confirmed on Matt's machine for WS), `AppData/Local` (Windows) and
+      `~/Library/Application Support` (macOS).  v2 looked in `AppData/Roaming` on
+      Windows, which WSJT-X doesn't use; kept as an extra candidate
+- [x] Typed WSJT-X messages (`core/protocol.py`): Heartbeat, Status, Decode, Clear,
+      QSO Logged (with QDateTime), Close, Logged ADIF; one `parse_message()`;
+      messages from older WSJT-X versions keep the fields they carry.  Encoders for
+      Reply (4) and Highlight Callsign (13)
+- [x] `Engine` (`core/engine.py`, asyncio): startup loading in a worker thread, UDP
+      via a datagram endpoint, proxy, status/dial tracking, ADIF reload, alerts,
+      commands (`reply`, `clear_buffer`).  Events in `core/events.py`; subscribers
+      run on the loop thread (`log()` is safe from any thread)
+- [x] Rolling buffer moved to `core/stations.py` (`StationTable`, `Station`)
+- [x] `core/decode.py` evaluates without rendering (`evaluate()` → `DecodeResult`);
+      the core no longer imports the TUI.  The TUI renders `SpotEvent`s
+- [x] TUI is an engine subscriber; `JtconTUI(engine).run()` runs both on one loop
+- [x] **Highlight Callsign, brought forward from phase 6 (Matt):** wanted stations
+      (any NEEDED/MATCH) are coloured in WSJT-X's Band Activity window; one colour
+      for now (`[actions.highlight]`: `enabled`, `background`, `foreground`, default
+      orange on black).  Cleared when the station is heard again and no longer
+      wanted, when its QSO is logged, on a dial change, on `clear_buffer`, and on
+      exit.  Per WSJT-X instance (client id + address); forgotten when that WSJT-X
+      sends Close
+- [x] **ADIF reload timing:** files checked on every packet (as v2), every second
+      (new: also when no packets arrive) and immediately on QSO Logged / Logged
+      ADIF.  Nothing is read until a file's mtime changes, so the order of WSJT-X's
+      file write and its UDP message doesn't matter.  Decodes arriving during a
+      reload are held and evaluated against the new log.  A file that fails to load
+      is reported once, not retried until it changes again
+- [x] Small changes: `[qso] Logged CALL` and `[wsjt-x] … closed` log lines; the reload
+      script's output is tagged `[on_log_reload]`
+- [x] Tests: 261 pass; render snapshot unchanged.  New `test_engine.py` (highlights,
+      dial change, QSO Logged, reload holding, script, startup errors, a real UDP
+      `run()`), `test_stations.py`; protocol tests cover every message type; the e2e
+      session checks highlights set and cleared as WSJT-X would see them
+- [ ] **Checkpoint: Matt's live test**: same display as phase 2; wanted stations
+      highlighted in WSJT-X; logging a QSO reloads at once and runs `up.sh`
 
 ### Phase 4: inputs and logbook
 - [ ] Input interface with change detection and reload events

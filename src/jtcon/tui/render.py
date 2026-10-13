@@ -52,9 +52,9 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
         cols.append(_col(f"[{datetime.now().strftime('%H:%M:%S')}]", _DIM, color))
 
     cols.append(_col(r.period_utc,              _DIM, color))
-    cols.append(_col(f"{decoded['snr']:+4d}",   _DIM, color))
-    cols.append(_col(f"{decoded['dt']:+6.1f}s", _DIM, color))
-    cols.append(_col(f"{decoded['df']:5d}",     _DIM, color))
+    cols.append(_col(f"{decoded.snr:+4d}",      _DIM, color))
+    cols.append(_col(f"{decoded.dt:+6.1f}s",    _DIM, color))
+    cols.append(_col(f"{decoded.df:5d}",        _DIM, color))
     cols.append(_col(f"{r.mode:<4}",            _DIM, color))
 
     msg_col = f"{r.msg_text:<{_W_MSG}}"
@@ -212,13 +212,3 @@ def _bargraph(cycle_tracker: CycleTracker | None) -> str:
     fraction = (ms % cycle_ms) / cycle_ms
     filled   = int(fraction * _BAR_WIDTH)
     return "█" * filled + "░" * (_BAR_WIDTH - filled)
-
-
-def _fmt_age(seconds: float) -> str:
-    """Format an elapsed time as e.g. '45s', '3m05s', '1h12m'."""
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m{s % 60:02d}s"
-    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
