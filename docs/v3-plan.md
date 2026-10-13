@@ -563,8 +563,9 @@ rule; add ituz and grid now; watchlist hits stay hidden for recently worked call
       scrolls sideways.  No longer repeated every 15 spots, nor printed at startup
       or after `clear`
 - [x] Ignore list (Matt chose all the recommendations):
-      - `i NN` / `i CALL` ignores a call for the session, `u CALL` undoes it, and
-        `i` lists them (from the config / this session); the status bar shows `ign:N`
+      - `ignore NN` / `ignore CALL` ignores a call for the session, `unignore CALL`
+        undoes it, and `ignore` lists them (from the config / this session); the
+        status bar shows `ign:N`
       - preloaded from `[filters] ignore = [...]`, plus repeatable `--ignore CALL`,
         which adds to the configured list
       - matched on the base call (`base_call()`): W1ABC covers W1ABC/P, VE3/W1ABC
@@ -574,7 +575,10 @@ rule; add ituz and grid now; watchlist hits stay hidden for recently worked call
       - ignored CQs are still written to the JSON log, with `"ignored": true`
         (every record now has `"ignored"`)
       - plain calls only, no regex; nothing is written to disk
-- [x] Tests: 311 pass on Python 3.11, 3.12, 3.14
+- [x] CMD> commands are full words (quit, exit, clear, list, ignore, unignore) taking
+      any unique abbreviation; an ambiguous one lists the candidates.  A word with
+      a digit is a callsign (reply), never a command
+- [x] Tests: 312 pass on Python 3.11, 3.12, 3.14
 
 ### Phase 6: actions
 - [ ] Action interface and routing from config (`on_wanted`, `on_qso_logged`, …)

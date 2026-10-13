@@ -566,7 +566,7 @@ class Engine:
                 self.stations.remove(station)
                 self.highlights.clear(station.callsign)
         self.log(f"[ignore] {base} ignored for this session ({len(self.ignored)} ignored;"
-                 f" u {base} to undo).")
+                 f" unignore {base} to undo).")
 
     def unignore(self, call: str) -> None:
         base = base_call(call)

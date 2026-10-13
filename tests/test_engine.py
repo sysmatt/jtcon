@@ -549,7 +549,7 @@ def test_ignore_drops_the_station_and_its_highlight(make_engine):
     e.ignore("vk3xy")
     assert [s.callsign for s in e.stations.all()] == ["W1ABC"]
     assert sent(e) == [("highlight", "VK3XY/P", ORANGE), ("highlight", "VK3XY/P", (None, None))]
-    assert logs(e)[-1] == "[ignore] VK3XY ignored for this session (1 ignored; u VK3XY to undo)."
+    assert logs(e)[-1] == "[ignore] VK3XY ignored for this session (1 ignored; unignore VK3XY to undo)."
     n = len(spots(e))
     e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
     assert len(spots(e)) == n and len(sent(e)) == 2 and len(e.stations) == 1

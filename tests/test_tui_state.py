@@ -14,6 +14,7 @@ from prompt_toolkit.output import DummyOutput
 
 from jtcon.core.engine import STALE_REPLY_S
 from jtcon.core.events import Fatal, LogLine, Ready
+import jtcon.tui.app
 from jtcon.tui.app import _MAX_OUTPUT_LINES, _TRIM_OUTPUT_TO, JtconTUI
 import wsjtx_packets as pk
 
@@ -141,9 +142,9 @@ def test_stale_reply_warns(tui, clock):
 
 def test_unknown_command(tui):
     assert command(tui, "foo bar")[-1] == (
-        "[cmd] Unknown: 'foo bar'  "
-        "(commands: quit, clear, list, i NN|CALL to ignore, u CALL to un-ignore,"
-        " i to list ignored; or enter index 00-99 / callsign to reply)")
+        "[cmd] Unknown: 'foo bar'  (commands: quit, exit, clear, list, ignore [NN|CALL],"
+        " unignore CALL; any unique abbreviation works; or enter index 00-99 / callsign"
+        " to reply)")
     n = len(tui._lines)
     assert len(command(tui, "   ")) == n      # blank input does nothing
 
@@ -193,9 +194,9 @@ def test_clear_command(tui):
 def test_quit_commands(tui, monkeypatch):
     calls = []
     monkeypatch.setattr(tui, "_exit_app", lambda: calls.append(1))
-    for cmd in ("quit", "exit", "q", "Q"):
+    for cmd in ("quit", "exit", "q", "Q", "qu", "e", "EXI"):
         command(tui, cmd)
-    assert len(calls) == 4
+    assert len(calls) == 7
 
 
 # ── Output pane ───────────────────────────────────────────────────────────────
@@ -283,17 +284,30 @@ def test_header_columns(make_tui):
                      r"  QRZ  LoW$", h.splitlines()[0])
 
 
+def test_commands_take_any_unique_abbreviation(tui, monkeypatch):
+    store(tui, "CQ VK3XY QF22")
+    for cmd in ("l", "li", "LIST"):
+        assert command(tui, cmd)[-3].startswith("[list] 1 wanted")
+    assert command(tui, "list 3")[-1] == "[cmd] list takes no argument."
+    assert command(tui, "unig")[-1] == "[cmd] usage: unignore CALL"
+    monkeypatch.setitem(jtcon.tui.app._COMMANDS, "clean", "")
+    assert command(tui, "cle")[-1] == "[cmd] 'cle' is ambiguous: clear, clean."
+    assert command(tui, "clear") == []                      # the whole word wins
+
+
 def test_ignore_commands(tui):
     store(tui, "CQ W1ABC FN42")
     store(tui, "CQ VK3XY QF22")
-    assert command(tui, "i")[-1] == "[ignore] Nothing ignored.  i NN or i CALL ignores a station."
+    assert command(tui, "i")[-1] == ("[ignore] Nothing ignored.  ignore NN or ignore CALL"
+                                     " ignores a station.")
     assert command(tui, "i 01")[-1].startswith("[ignore] VK3XY ignored for this session")
-    assert command(tui, "i w1abc")[-1].startswith("[ignore] W1ABC ignored")
+    assert command(tui, "ignore w1abc")[-1].startswith("[ignore] W1ABC ignored")
     assert len(tui.engine.stations) == 0
-    assert command(tui, "i 05")[-1] == "[cmd] No station at index 05."
-    assert command(tui, "i hello")[-1] == "[cmd] 'hello' is not a callsign (usage: i NN or i CALL)."
-    assert command(tui, "u 3")[-1] == "[cmd] '3' is not a callsign (usage: u CALL)."
-    assert command(tui, "u W1ABC")[-1].startswith("[ignore] W1ABC is no longer ignored")
+    assert command(tui, "ign 05")[-1] == "[cmd] No station at index 05."
+    assert command(tui, "i hello")[-1] == ("[cmd] 'hello' is not a callsign"
+                                           " (usage: ignore [NN|CALL]).")
+    assert command(tui, "u 3")[-1] == "[cmd] '3' is not a callsign (usage: unignore CALL)."
+    assert command(tui, "un W1ABC")[-1].startswith("[ignore] W1ABC is no longer ignored")
     assert " ign:1 " in "".join(t for _, t in tui._get_status_text())
 
 

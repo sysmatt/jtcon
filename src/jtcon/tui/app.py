@@ -31,6 +31,27 @@ _MAX_OUTPUT_LINES = 5000   # output pane is trimmed when it grows past this…
 _TRIM_OUTPUT_TO   = 4000   # …down to this many lines
 _WHEEL_LINES      = 3      # lines per mouse-wheel notch (--mouse)
 
+# CMD> commands and the argument each takes ("": none; "[...]": optional).  Any
+# unique abbreviation works; a word with a digit is a callsign, never a command.
+_COMMANDS = {
+    "quit":     "",
+    "exit":     "",
+    "clear":    "",
+    "list":     "",
+    "ignore":   "[NN|CALL]",
+    "unignore": "CALL",
+}
+
+
+def _match_command(word: str) -> list:
+    """The commands *word* abbreviates: one, several (ambiguous) or none."""
+    word = word.lower()
+    if word in _COMMANDS:
+        return [word]
+    if any(c.isdigit() for c in word):
+        return []
+    return [name for name in _COMMANDS if name.startswith(word)]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ANSI lexer — lets the output TextArea render ANSI escape codes as colours
@@ -239,8 +260,6 @@ class JtconTUI:
 
     def _handle_command(self, buffer) -> None:
         raw = buffer.text.strip()
-        cmd = raw.lower()
-
         if not raw:
             return
 
@@ -248,31 +267,30 @@ class JtconTUI:
         if self._scroll_top is not None:
             self._scroll_to_live()
 
-        if cmd in ("quit", "exit", "q"):
-            self._exit_app()
+        word, _, arg = raw.partition(" ")
+        arg = arg.strip()
+        names = _match_command(word)
 
-        elif cmd == "clear":
-            with self._output_lock:
-                self._pending.clear()
-            self._lines = []
-            self._set_output(follow=True)
-
-        elif cmd and "list".startswith(cmd):
-            self._cmd_list()
-
-        elif cmd == "i":
-            self._cmd_ignored()
-
-        elif cmd.startswith("i ") or cmd.startswith("u "):
-            self._cmd_ignore(cmd[0], raw[2:].strip())
-
-        elif re.match(r'^\d{1,2}$', raw):
+        if re.fullmatch(r"\d{1,2}", raw):
             idx = int(raw)
             station = self.engine.stations.get(idx)
             if station:
                 self.engine.reply(station)
             else:
                 self._append_line(f"[cmd] No CQ at index {idx:02d}.")
+
+        elif len(names) > 1:
+            self._append_line(f"[cmd] {word!r} is ambiguous: {', '.join(names)}.")
+
+        elif names:
+            name = names[0]
+            takes = _COMMANDS[name]
+            if arg and not takes:
+                self._append_line(f"[cmd] {name} takes no argument.")
+            elif not arg and takes and not takes.startswith("["):
+                self._append_line(f"[cmd] usage: {name} {takes}")
+            else:
+                getattr(self, f"_cmd_{name}")(arg)
 
         elif _CALLSIGN_RE.match(raw):
             station = self.engine.stations.find(raw.upper())
@@ -282,33 +300,52 @@ class JtconTUI:
                 self._append_line(f"[cmd] {raw.upper()} not found in rolling buffer.")
 
         else:
+            commands = ", ".join(f"{n} {a}".rstrip() for n, a in _COMMANDS.items())
             self._append_line(
-                f"[cmd] Unknown: {raw!r}  "
-                "(commands: quit, clear, list, i NN|CALL to ignore, u CALL to un-ignore,"
-                " i to list ignored; or enter index 00-99 / callsign to reply)"
+                f"[cmd] Unknown: {raw!r}  (commands: {commands}; any unique abbreviation"
+                " works; or enter index 00-99 / callsign to reply)"
             )
 
-    def _cmd_ignore(self, verb: str, arg: str) -> None:
-        """i NN / i CALL: ignore for this session; u CALL: stop ignoring."""
-        if verb == "i" and re.fullmatch(r"\d{1,2}", arg):
+    def _cmd_quit(self, arg: str) -> None:
+        self._exit_app()
+
+    _cmd_exit = _cmd_quit
+
+    def _cmd_clear(self, arg: str) -> None:
+        with self._output_lock:
+            self._pending.clear()
+        self._lines = []
+        self._set_output(follow=True)
+
+    def _cmd_ignore(self, arg: str) -> None:
+        """ignore NN / ignore CALL: ignore for this session; ignore: list them."""
+        if not arg:
+            self._show_ignored()
+            return
+        if re.fullmatch(r"\d{1,2}", arg):
             station = self.engine.stations.get(int(arg))
             if station is None:
                 self._append_line(f"[cmd] No station at index {int(arg):02d}.")
                 return
             arg = station.callsign
-        if not _CALLSIGN_RE.match(arg.strip("<>")):
-            usage = "i NN or i CALL" if verb == "i" else "u CALL"
-            self._append_line(f"[cmd] {arg!r} is not a callsign (usage: {usage}).")
-            return
-        if verb == "i":
+        if self._is_call(arg, "ignore"):
             self.engine.ignore(arg)
-        else:
+
+    def _cmd_unignore(self, arg: str) -> None:
+        if self._is_call(arg, "unignore"):
             self.engine.unignore(arg)
 
-    def _cmd_ignored(self) -> None:
+    def _is_call(self, arg: str, name: str) -> bool:
+        if _CALLSIGN_RE.match(arg.strip("<>")):
+            return True
+        self._append_line(f"[cmd] {arg!r} is not a callsign (usage: {name} {_COMMANDS[name]}).")
+        return False
+
+    def _show_ignored(self) -> None:
         ignored = self.engine.ignored
         if not ignored:
-            self._append_line("[ignore] Nothing ignored.  i NN or i CALL ignores a station.")
+            self._append_line("[ignore] Nothing ignored.  ignore NN or ignore CALL ignores"
+                              " a station.")
             return
         self._append_line(f"[ignore] {len(ignored)} ignored ——")
         for source in ("config", "session"):
@@ -316,7 +353,7 @@ class JtconTUI:
             if calls:
                 self._append_line(f"  {source + ':':<9} {' '.join(calls)}")
 
-    def _cmd_list(self) -> None:
+    def _cmd_list(self, arg: str = "") -> None:
         """Print the wanted stations in the rolling buffer, most recently heard last."""
         hits = self.engine.stations.hits()
         if not hits:

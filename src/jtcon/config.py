@@ -672,7 +672,7 @@ CONFIG_TEMPLATE = """\
 # suppress_worked_within_days = 5   # 0 = worked today only; -1 = never suppress
 #
 # Stations never shown or alerted on (W1ABC covers W1ABC/P too), unless they
-# call you.  In the TUI, "i NN" or "i CALL" adds one for the session.
+# call you.  In the TUI, "ignore NN" or "ignore CALL" adds one for the session.
 # ignore = ["W1AW", "K1ABC"]
 
 # ── Wanted rules ───────────────────────────────────────────────────────────────
