@@ -21,6 +21,7 @@ from pathlib import Path
 from jtcon.core.cty import CTY_DAT_DEFAULT
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT
 from jtcon.core.messages import _CALLSIGN_RE
+from jtcon.core.qrz import QRZ_DATA_DIR
 
 
 CONFIG_FILE  = "config.toml"
@@ -110,10 +111,21 @@ class ScopeConfig:
 
 
 @dataclass
+class QrzConfig:
+    enabled:         bool        = False
+    api_key:         str | None  = None   # else QRZ_API_KEY, else qrzlog's qrzlog.ini
+    api_key_file:    Path | None = None   # the config file that set api_key
+    dir:             Path        = QRZ_DATA_DIR
+    keep:            int         = 5      # full-download sets kept
+    refresh_minutes: int         = 15
+
+
+@dataclass
 class InputsConfig:
     cty:    Path = CTY_DAT_DEFAULT
     adif:   list = field(default_factory=list)  # besides the auto-discovered WSJT-X log
     hamdat: Path = HAMDAT_DB_DEFAULT
+    qrz:    QrzConfig = field(default_factory=QrzConfig)
 
 
 @dataclass
@@ -135,6 +147,7 @@ class ActionsConfig:
     script_on_wanted:     Path | None = None
     script_on_log_reload: Path | None = None
     json_log:             Path | None = None
+    qrz_upload:           bool        = False   # send each logged QSO to QRZ
 
 
 @dataclass
@@ -173,12 +186,18 @@ class Config:
             actions["script"] = script
         if a.json_log:
             actions["json_log"] = {"file": str(a.json_log)}
+        actions["qrz"] = {"upload": a.qrz_upload}
+        q = self.inputs.qrz
+        qrz = {"enabled": q.enabled, "dir": str(q.dir), "keep": q.keep,
+               "refresh_minutes": q.refresh_minutes}
+        if q.api_key:
+            qrz["api_key"] = "****" + q.api_key[-4:]     # never print the key itself
         return {
             "udp":     {"host": self.udp.host, "port": self.udp.port, "proxy": list(self.udp.proxy)},
             "display": vars(self.display).copy(),
             "scope":   vars(self.scope).copy(),
             "inputs":  {"cty": str(self.inputs.cty), "adif": [str(p) for p in self.inputs.adif],
-                        "hamdat": str(self.inputs.hamdat)},
+                        "hamdat": str(self.inputs.hamdat), "qrz": qrz},
             "filters": vars(self.filters).copy(),
             "actions": actions,
             "wanted":  [{"rule": w.rule, "name": w.name, **_settings_out(w.settings)}
@@ -210,13 +229,16 @@ _SCHEMA = {
     "display": {"show": _choice("cq", "all"), "show_time": bool, "color": bool,
                 "mouse": bool, "debug": bool},
     "scope":   {"decodes": _choice("cq", "all")},
-    "inputs":  {"cty": _PATH, "adif": [_PATH], "hamdat": _PATH},
+    "inputs":  {"cty": _PATH, "adif": [_PATH], "hamdat": _PATH,
+                "qrz": {"enabled": bool, "api_key": str, "dir": _PATH, "keep": int,
+                        "refresh_minutes": int}},
     "filters": {"suppress_worked_within_days": int, "ignore": [_CALL]},
     "actions": {
         "highlight": {"enabled": bool, "background": _COLOR, "foreground": _COLOR},
         "ntfy":     {"topic": str},
         "script":   {"on_wanted": _PATH, "on_log_reload": _PATH},
         "json_log": {"file": _PATH},
+        "qrz":      {"upload": bool},
     },
 }
 
@@ -380,11 +402,15 @@ def load_config(config_file: str | Path | None = None, profile: str | None = Non
     else:
         path = Path(config_file).expanduser()
         raw, sources = _load_layer(path), [path]
+    key_file = path if _api_key(raw) else None
     if profile:
         ppath = profile_path(profile, path)
         if not ppath.exists():
             raise ConfigError(f"profile {profile!r} not found: {ppath}")
-        raw = merge(raw, _load_layer(ppath))
+        layer = _load_layer(ppath)
+        if _api_key(layer):
+            key_file = ppath
+        raw = merge(raw, layer)
         sources.append(ppath)
     if overrides:
         raw = merge(raw, check_layer(overrides, Path.cwd()))
@@ -394,7 +420,12 @@ def load_config(config_file: str | Path | None = None, profile: str | None = Non
         filters["ignore"] = [*filters.get("ignore", []), *extra]
     cfg = build_config(raw, wanted)
     cfg.sources = sources
+    cfg.inputs.qrz.api_key_file = key_file
     return cfg
+
+
+def _api_key(layer: dict):
+    return layer.get("inputs", {}).get("qrz", {}).get("api_key")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -506,6 +537,15 @@ def build_config(raw: dict, wanted: str | None = None) -> Config:
     def path(v):
         return Path(v) if v else None
 
+    qrz = dict(inp.get("qrz", {}))
+    for key in ("keep", "refresh_minutes"):
+        if key in qrz and qrz[key] < 1:
+            raise ConfigError(f"inputs.qrz.{key} must be 1 or more, not {qrz[key]}")
+    if "dir" in qrz:
+        qrz["dir"] = Path(qrz["dir"])
+    if not (qrz.get("api_key") or "").strip():
+        qrz.pop("api_key", None)
+
     for port in udp.get("proxy", []):
         if not 0 < port < 65536:
             raise ConfigError(f"udp.proxy: {port} is not a port number")
@@ -518,7 +558,8 @@ def build_config(raw: dict, wanted: str | None = None) -> Config:
         scope=ScopeConfig(**raw.get("scope", {})),
         inputs=InputsConfig(cty=path(inp.get("cty")) or CTY_DAT_DEFAULT,
                             adif=[Path(p) for p in inp.get("adif", [])],
-                            hamdat=path(inp.get("hamdat")) or HAMDAT_DB_DEFAULT),
+                            hamdat=path(inp.get("hamdat")) or HAMDAT_DB_DEFAULT,
+                            qrz=QrzConfig(**qrz)),
         wanted=specs,
         filters=FiltersConfig(**raw.get("filters", {})),
         actions=ActionsConfig(highlight=hl.get("enabled", True),
@@ -527,7 +568,8 @@ def build_config(raw: dict, wanted: str | None = None) -> Config:
                               ntfy_topic=act.get("ntfy", {}).get("topic"),
                               script_on_wanted=path(script.get("on_wanted")),
                               script_on_log_reload=path(script.get("on_log_reload")),
-                              json_log=path(act.get("json_log", {}).get("file"))),
+                              json_log=path(act.get("json_log", {}).get("file")),
+                              qrz_upload=act.get("qrz", {}).get("upload", False)),
     )
 
 
@@ -666,6 +708,17 @@ CONFIG_TEMPLATE = """\
 # hamdat = "~/.hamdat/hamdat.db"   # FCC database for US states
 # cty    = "~/.jtcon_cty.dat"      # refreshed automatically when older than 30 days
 
+# [inputs.qrz]                    # your QRZ logbook: confirmations, and a daily backup
+# enabled = true
+# api_key = "XXXX-XXXX-XXXX-XXXX" # QRZ.com → Logbook → Settings.  Else the QRZ_API_KEY
+#                                 # environment variable, else qrzlog's
+#                                 # ~/.config/qrzlog/qrzlog.ini.  Keep this file
+#                                 # private:  chmod 600 ~/.config/jtcon/config.toml
+# dir     = "~/.local/share/jtcon/qrz"
+# keep    = 5                     # full downloads kept (one a day, UTC), each with
+#                                 # the updates file the refreshes append to
+# refresh_minutes = 15
+
 [filters]
 # A station worked within this many days isn't wanted again for what that QSO
 # covers (a 20m QSO doesn't hide 5BWAS on 40m), nor for any watchlist.
@@ -732,4 +785,8 @@ rule = "country"
 
 # [actions.json_log]
 # file = "~/jtcon-spots.jsonl"    # one JSON line per CQ
+
+# [actions.qrz]
+# upload = false                  # true: send each QSO WSJT-X logs to your QRZ logbook
+#                                 # (uses the [inputs.qrz] API key)
 """

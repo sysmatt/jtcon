@@ -54,15 +54,46 @@ class AdifInput(Input):
     Only files that changed are parsed again.  QSOs that WSJT-X reported as
     logged (*extra*) are merged in on every load, so they stay worked until the
     log file catches up, and are then merged with the file's record.
+
+    With a QrzStore (*qrz*), the newest QRZ set is read too: its files join
+    *paths*, so a refresh that writes one triggers a reload like any log edit.
     """
     name = "adif"
 
-    def __init__(self, paths, cty, hamdat, log=None):
+    def __init__(self, paths, cty, hamdat, log=None, qrz=None):
+        self.qrz = qrz
         super().__init__(paths)
         self.cty, self.hamdat = cty, hamdat
         self.log = log or (lambda m: None)
         self.extra: list = []
         self._cache: dict = {}              # path -> (mtime, [QSO])
+        self._qrz_cache: tuple = ({}, [])   # (QRZ file mtimes, [QSO])
+        self._file_mtimes: dict = {}
+        self.files_changed = True           # did the last load see an ADIF file change?
+
+    @property
+    def paths(self) -> list:
+        return self.files + (self.qrz.files() if self.qrz else [])
+
+    @paths.setter
+    def paths(self, value) -> None:
+        self.files = [Path(p) for p in value]
+
+    def load(self):
+        before = mtimes(self.files)
+        value = super().load()
+        self.files_changed = before != self._file_mtimes
+        self._file_mtimes = before
+        return value
+
+    def _qrz_qsos(self) -> list:
+        stamp = mtimes(self.qrz.files())
+        if self._qrz_cache[0] == stamp and stamp:
+            return self._qrz_cache[1]
+        qsos = [qso_from_adif(fields, self.cty, self.hamdat, "qrz")
+                for fields, _ in self.qrz.records().values()]
+        self._qrz_cache = (stamp, qsos)
+        return qsos
 
     def _file_qsos(self, path: Path) -> list:
         mtime = path.stat().st_mtime
@@ -76,7 +107,7 @@ class AdifInput(Input):
 
     def read(self) -> tuple:
         logbook = Logbook()
-        for path in self.paths:
+        for path in self.files:
             try:
                 qsos = self._file_qsos(path)
             except Exception as exc:
@@ -85,6 +116,12 @@ class AdifInput(Input):
                 continue
             for q in qsos:
                 logbook.add(q)
+        if self.qrz:
+            try:
+                for q in self._qrz_qsos():
+                    logbook.add(q)
+            except Exception as exc:
+                self.log(f"[qrz] Cannot read the saved QRZ logbook: {exc}")
         duplicates = logbook.merged
         for q in list(self.extra):
             if logbook.add(q).sources == {"wsjt-x"}:

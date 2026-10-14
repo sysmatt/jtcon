@@ -40,6 +40,7 @@ _COMMANDS = {
     "list":     "",
     "ignore":   "[NN|CALL]",
     "unignore": "CALL",
+    "qrz":      "[full]",
 }
 
 
@@ -330,6 +331,13 @@ class JtconTUI:
             arg = station.callsign
         if self._is_call(arg, "ignore"):
             self.engine.ignore(arg)
+
+    def _cmd_qrz(self, arg: str) -> None:
+        """qrz: fetch what changed on QRZ now; qrz full: a fresh full download."""
+        if arg.lower() not in ("", "full"):
+            self._append_line(f"[cmd] usage: qrz {_COMMANDS['qrz']}")
+            return
+        self.engine.qrz_refresh(full=bool(arg))
 
     def _cmd_unignore(self, arg: str) -> None:
         if self._is_call(arg, "unignore"):

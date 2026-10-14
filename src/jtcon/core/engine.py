@@ -12,8 +12,9 @@ import subprocess
 import threading
 import time
 
+from jtcon import __version__
 from jtcon.config import Config
-from jtcon.core.adif import _find_wsjt_logs
+from jtcon.core.adif import _find_wsjt_logs, iter_records
 from jtcon.core.cty import CTY_DAT_URL, CTY_MAX_AGE_DAYS, CtyDat, download_cty
 from jtcon.core.cycle import CycleTracker
 from jtcon.core.decode import DecodeContext, debug_text, evaluate, judge
@@ -23,6 +24,7 @@ from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
 from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
 from jtcon.core.logbook import qso_from_logged
 from jtcon.core.messages import base_call
+from jtcon.core.qrz import QrzClient, QrzStore, QrzSync, key_file_warning, resolve_key
 from jtcon.core.protocol import (Close, Decode, LoggedAdif, QsoLogged, Status, encode_highlight,
                                  encode_reply, mode_name, parse_message)
 from jtcon.core.stations import StationTable, fmt_age
@@ -95,6 +97,7 @@ class Engine:
         self.calls         = None     # CallIndex built from the logbook
         self.rules         = build_rules(config.wanted)
         self.adif_input    = None
+        self.qrz           = None     # QrzSync, when the QRZ input or upload is on
         self.inputs: list  = []       # inputs watched for changes
         self.hamdat        = None
         self.json_fh       = None
@@ -152,11 +155,14 @@ class Engine:
         self._emit(Ready(f"[ready] Listening on {cfg.udp.host}:{cfg.udp.port}  ({scope})"))
         self._transport, _ = await self._loop.create_datagram_endpoint(
             lambda: _Protocol(self), sock=self.sock)
-        checker = asyncio.create_task(self._check_inputs_periodically())
+        tasks = [asyncio.create_task(self._check_inputs_periodically())]
+        if self.qrz:
+            tasks.append(asyncio.create_task(self._qrz_periodically()))
         try:
             await self._stopped.wait()
         finally:
-            checker.cancel()
+            for task in tasks:
+                task.cancel()
 
     def stop(self) -> None:
         if self._stopped is not None:
@@ -254,14 +260,16 @@ class Engine:
             if p not in adif_paths:
                 adif_paths.append(p)
 
-        if adif_paths:
-            inp = AdifInput(adif_paths, self.cty, self.hamdat, log=log)
+        store = self._setup_qrz()
+        if adif_paths or store:
+            inp = AdifInput(adif_paths, self.cty, self.hamdat, log=log, qrz=store)
             try:
                 self.logbook, self.calls = inp.load()
                 self.rebuild_rules()
                 for p in adif_paths:
                     log(f"[adif] Loaded: {p.name}")
-                log(f"[adif] {self._qso_count()} across {len(adif_paths)} file(s)"
+                qrz = " and the saved QRZ logbook" if store and store.files() else ""
+                log(f"[adif] {self._qso_count()} across {len(adif_paths)} file(s){qrz}"
                     f" — {len(self.calls.worked_calls)} calls")
                 for rule in self.rules:
                     if isinstance(rule, AwardRule):
@@ -303,6 +311,42 @@ class Engine:
             targets = ", ".join(f"localhost:{p}" for _, p in self.proxy_dests)
             log(f"[proxy] Forwarding all packets to: {targets}")
         return True
+
+    def _setup_qrz(self):
+        """Make self.qrz when the QRZ input or upload is on; return the QrzStore
+        for the input, or None."""
+        qcfg, log = self.config.inputs.qrz, self.log
+        upload = self.config.actions.qrz_upload
+        if not (qcfg.enabled or upload):
+            return None
+        key, where = resolve_key(qcfg)
+        if not key:
+            log("[qrz] No API key: set api_key in [inputs.qrz], or QRZ_API_KEY —"
+                " QRZ is off")
+            return None
+        log(f"[qrz] API key from {where}")
+        warning = key_file_warning(qcfg)
+        if warning:
+            log(warning)
+        store = QrzStore(qcfg.dir, qcfg.keep) if qcfg.enabled else None
+        client = QrzClient(key, agent=self._user_agent)
+        self.qrz = QrzSync(client, store, log)
+        if store:
+            first = ("" if store.current() else
+                     " — the first full download runs in the background")
+            state = self.qrz.describe()
+            log(f"[qrz] {state[0].upper()}{state[1:]}{first};"
+                f" refreshed every {qcfg.refresh_minutes} min")
+        if upload:
+            log("[qrz] Logged QSOs are uploaded to QRZ")
+        return store
+
+    @staticmethod
+    def _agent(call: str) -> str:
+        return f"jtcon/{__version__} ({call})" if call else f"jtcon/{__version__}"
+
+    def _user_agent(self) -> str:
+        return self._agent(self.de_call)
 
     # ── Input change detection and reload ─────────────────────────────────────
 
@@ -373,13 +417,51 @@ class Engine:
                        if self.logbook.unsaved else "")
             self.log(f"[adif] Reloaded {self._qso_count()} from {len(inp.paths)} file(s)"
                      f"{unsaved}.")
-            self._run_log_reload_script(inp.paths)
+            if inp.files_changed:          # not for a QRZ refresh
+                self._run_log_reload_script(inp.files)
         elif isinstance(inp, StatesInput):
             inp.rule.states = value
             self.log(f"[{inp.name}] Reloaded {inp.describe(value)}")
         else:
             inp.rule.patterns = value
             self.log(f"[{inp.name}] Reloaded {inp.describe(value)}")
+
+    # ── QRZ ───────────────────────────────────────────────────────────────────
+
+    def _background(self, fn, *args, then=None) -> None:
+        """Run fn(*args) in a worker thread, then *then()* on the loop thread.
+        Without a running loop (tests), run both now."""
+        if self._loop is None:
+            fn(*args)
+            if then:
+                then()
+            return
+        fut = self._loop.run_in_executor(None, fn, *args)
+        if then:
+            fut.add_done_callback(lambda _f: then())
+
+    def _qrz_tick(self, full: bool = False, quiet: bool = True) -> None:
+        """Worker thread: refresh the QRZ logbook and retry failed uploads."""
+        self.qrz.refresh(full=full, quiet=quiet)
+        self.qrz.retry_uploads()
+
+    async def _qrz_periodically(self) -> None:
+        while True:
+            await asyncio.to_thread(self._qrz_tick)
+            self.check_inputs()
+            await asyncio.sleep(self.config.inputs.qrz.refresh_minutes * 60)
+
+    def qrz_refresh(self, full: bool = False) -> None:
+        """The qrz command: refresh now (full: a fresh full download)."""
+        if not (self.qrz and self.qrz.store):
+            self.log("[qrz] The QRZ input is off: set enabled = true in [inputs.qrz].")
+            return
+        self._background(self._qrz_tick, full, False, then=self.check_inputs)
+
+    def _upload(self, adif: str) -> None:
+        for fields, record in iter_records(adif):
+            call = fields.get("call", "?").upper()
+            self._background(self.qrz.upload, call, record)
 
     async def _check_inputs_periodically(self) -> None:
         while True:
@@ -467,6 +549,8 @@ class Engine:
         self._emit(StatusChanged(st))
 
     def _on_logged(self, msg) -> None:
+        if isinstance(msg, LoggedAdif) and self.qrz and self.config.actions.qrz_upload:
+            self._upload(msg.adif)
         if isinstance(msg, QsoLogged) and msg.dx_call:
             self.log(f"[qso] Logged {msg.dx_call}")
             self.highlights.clear(msg.dx_call.upper())

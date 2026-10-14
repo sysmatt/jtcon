@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import jtcon.core.decode
+import jtcon.core.qrz
 import jtcon.tui.render
 from jtcon.config import WantedSpec, build_config, check_layer
 from jtcon.core.cty import CtyDat
@@ -45,6 +46,14 @@ class _FrozenDatetime(datetime):
 def frozen_today(monkeypatch):
     for mod in (jtcon.core.decode, jtcon.tui.render):
         monkeypatch.setattr(mod, "datetime", _FrozenDatetime)
+
+
+@pytest.fixture(autouse=True)
+def no_real_qrz(monkeypatch, tmp_path):
+    """No test may reach the real QRZ, or read the real API key."""
+    monkeypatch.setattr(jtcon.core.qrz, "QRZ_API_URL", "http://127.0.0.1:9/api")
+    monkeypatch.setattr(jtcon.core.qrz, "QRZLOG_INI", tmp_path / "no-qrzlog.ini")
+    monkeypatch.delenv("QRZ_API_KEY", raising=False)
 
 
 class FakeHamdat:

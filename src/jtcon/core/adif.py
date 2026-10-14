@@ -52,29 +52,40 @@ _ADIF_EOH_RE = re.compile(r"<EOH>", re.IGNORECASE)
 _ADIF_EOR_RE = re.compile(r"<EOR>", re.IGNORECASE)
 
 
-def parse_adif(path: Path) -> list:
-    text = path.read_text(encoding="utf-8", errors="replace")
+def iter_records(text: str):
+    """Yield (fields, raw) for each record in ADIF *text*: the fields as a dict
+    with lower-case names, and the record's text from its first field through
+    its <EOR>.  A last record without <EOR> is yielded too."""
     eoh  = _ADIF_EOH_RE.search(text)
     body = text[eoh.end():] if eoh else text
-    qsos: list = []
     pos = 0
+    start = None
     current: dict = {}
     while pos < len(body):
         m   = _ADIF_FIELD_RE.search(body, pos)
         eor = _ADIF_EOR_RE.search(body, pos)
         if eor and (not m or eor.start() < m.start()):
             if current:
-                qsos.append(current)
-                current = {}
+                yield current, body[start:eor.end()]
+                current, start = {}, None
             pos = eor.end()
             continue
         if not m:
             break
+        if start is None:
+            start = m.start()
         field  = m.group(1).lower()
         flen   = int(m.group(2))
         vstart = m.end()
         current[field] = body[vstart : vstart + flen].strip()
         pos = vstart + flen
     if current:
-        qsos.append(current)
-    return qsos
+        yield current, body[start:pos]
+
+
+def parse_adif_text(text: str) -> list:
+    return [fields for fields, _ in iter_records(text)]
+
+
+def parse_adif(path: Path) -> list:
+    return parse_adif_text(path.read_text(encoding="utf-8", errors="replace"))

@@ -143,8 +143,8 @@ def test_stale_reply_warns(tui, clock):
 def test_unknown_command(tui):
     assert command(tui, "foo bar")[-1] == (
         "[cmd] Unknown: 'foo bar'  (commands: quit, exit, clear, list, ignore [NN|CALL],"
-        " unignore CALL; any unique abbreviation works; or enter index 00-99 / callsign"
-        " to reply)")
+        " unignore CALL, qrz [full]; any unique abbreviation works; or enter index 00-99"
+        " / callsign to reply)")
     n = len(tui._lines)
     assert len(command(tui, "   ")) == n      # blank input does nothing
 
@@ -194,9 +194,11 @@ def test_clear_command(tui):
 def test_quit_commands(tui, monkeypatch):
     calls = []
     monkeypatch.setattr(tui, "_exit_app", lambda: calls.append(1))
-    for cmd in ("quit", "exit", "q", "Q", "qu", "e", "EXI"):
+    for cmd in ("quit", "exit", "QU", "e", "EXI"):
         command(tui, cmd)
-    assert len(calls) == 7
+    assert len(calls) == 5
+    assert command(tui, "q")[-1] == "[cmd] 'q' is ambiguous: quit, qrz."
+    assert len(calls) == 5
 
 
 # ── Output pane ───────────────────────────────────────────────────────────────
@@ -316,3 +318,9 @@ def test_ignore_list_shows_where_each_came_from(make_tui):
     command(t, "i ZL1AA")
     assert command(t, "i")[-3:] == ["[ignore] 3 ignored ——",
                                     "  config:   W1AW K1ABC", "  session:  ZL1AA"]
+
+
+def test_qrz_command(tui):
+    assert command(tui, "qrz now")[-1] == "[cmd] usage: qrz [full]"
+    assert command(tui, "qr")[-1] == ("[qrz] The QRZ input is off: set enabled = true"
+                                      " in [inputs.qrz].")

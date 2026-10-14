@@ -280,7 +280,7 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     app.wait_for(r"\[cmd\] VK3XY not found in rolling buffer\.")
 
     # ── Quit ──────────────────────────────────────────────────────────────────
-    app.type("q\r")
+    app.type("quit\r")
     assert app.wait_exit() == 0
 
     records = [json.loads(l) for l in saved.read_text().splitlines()]
@@ -326,7 +326,7 @@ def test_stale_cty_is_refreshed(launch, home):
     app.wait_for(r"\[cty\.dat\] Download failed: .* — using cached copy")
     app.wait_for(r"\[cty\.dat\] Loaded 4798 prefixes")
     app.wait_for(r"\[ready\] Listening")
-    app.type("q\r")
+    app.type("quit\r")
     assert app.wait_exit() == 0
 
 
