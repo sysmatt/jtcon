@@ -14,8 +14,8 @@ join them.
 
 ### Setting up
 
-You need your QRZ **Logbook API key**: on QRZ.com, open your logbook, then
-**Settings**.  Uploading needs a QRZ subscription that includes the Logbook API.
+You need your QRZ **Logbook API key**, from QRZ's
+[Logbook API page](https://www.qrz.com/docs/logbook30/api).  Uploading needs a QRZ subscription that includes the Logbook API.
 
 ```toml
 [inputs.qrz]
@@ -77,6 +77,23 @@ confirm = ["qrz"]
 ```
 
 The `QRZ` column shows ⭐ for a station that has confirmed with you on QRZ.
+
+### LoTW confirmations through QRZ
+
+If your QRZ logbook is linked to your LoTW account, QRZ can export your QSOs to
+LoTW and import the LoTW confirmations back into your QRZ logbook.  QRZ records each
+confirmation in the QSO (`LOTW_QSL_RCVD = Y`), so it arrives with jtcon's next QRZ
+download, and every rule counting `lotw` sees it.  That includes the default rules.
+You don't need to download from LoTW yourself.
+
+1. In your QRZ logbook, run the **LoTW export**, which sends your new QSOs to LoTW.
+2. Then run the **LoTW import**, which brings LoTW's confirmations into your QRZ
+   logbook.  These are two separate steps on QRZ.
+3. Then let jtcon fetch them: wait for its next refresh (up to 15 minutes), or type
+   `sync`.  The refresh reports the QSOs that changed: `[qrz] Updates: 12 changed`.
+
+QRZ only gets LoTW confirmations when you run the import, so jtcon's LoTW
+confirmations are as fresh as your last import on QRZ.
 
 The QRZ download is just another log.  The same QSO in your WSJT-X log and in
 the download is counted once, with the confirmations from both.

@@ -710,8 +710,8 @@ CONFIG_TEMPLATE = """\
 
 # [inputs.qrz]                    # your QRZ logbook: confirmations, and a daily backup
 # enabled = true
-# api_key = "XXXX-XXXX-XXXX-XXXX" # QRZ.com → Logbook → Settings.  Else the QRZ_API_KEY
-#                                 # environment variable, else qrzlog's
+# api_key = "XXXX-XXXX-XXXX-XXXX" # from https://www.qrz.com/docs/logbook30/api
+#                                 # Else the QRZ_API_KEY environment variable, else qrzlog's
 #                                 # ~/.config/qrzlog/qrzlog.ini.  Keep this file
 #                                 # private:  chmod 600 ~/.config/jtcon/config.toml
 # dir     = "~/.local/share/jtcon/qrz"

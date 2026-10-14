@@ -97,17 +97,53 @@ program at port 2238.
 
 ## Quick start
 
+**1. Make a config file.**
+
 ```bash
-jtcon --init-config      # writes ~/.config/jtcon/config.toml, every setting explained
-jtcon                    # start; Ctrl-Q quits
+jtcon --init-config
 ```
 
-With no changes jtcon wants new DXCC entities, CQ zones and countries, counting
-LoTW confirmations.  Open the config file to choose your rules, add log files,
-or turn on QRZ.  `jtcon --show-config` prints the settings jtcon will use, and
-`jtcon --list-rules` shows every rule.
+This writes `~/.config/jtcon/config.toml`, with every setting listed and
+explained.  Out of the box jtcon wants new DXCC entities, CQ zones and countries,
+counting LoTW confirmations, and finds your WSJT-X log by itself.
 
-Try something for one run without editing the file:
+**2. Add your QRZ logbook** (optional, but recommended if you use QRZ).  Get your
+API key from QRZ's [Logbook API page](https://www.qrz.com/docs/logbook30/api).  In the config file, find
+the `[inputs.qrz]` block, remove the `#` from the lines below, and paste in your
+key:
+
+```toml
+[inputs.qrz]
+enabled = true
+api_key = "XXXX-XXXX-XXXX-XXXX"
+
+[actions.qrz]
+upload = true            # also send each QSO you log to QRZ
+```
+
+The key gives full access to your logbook, so make the file private:
+
+```bash
+chmod 600 ~/.config/jtcon/config.toml
+```
+
+If your QRZ logbook is linked to LoTW, this also brings in your LoTW
+confirmations (see [Online logbooks](docs/online-logbooks.md#lotw-confirmations-through-qrz)).
+
+**3. Choose your rules.**  Further down the file, the `[[wanted]]` entries pick
+what you're chasing.  Remove the `#` from the ones you want, such as `was` or
+`pota`.  [Wanted rules](docs/wanted-rules.md) describes them all.
+
+**4. Check and start.**
+
+```bash
+jtcon --show-config      # the settings jtcon will use (the key shows as ****1234)
+jtcon                    # start; Ctrl-Q or "quit" to exit
+```
+
+With QRZ on, the first start downloads your whole logbook in the background.
+
+To try something for one run without editing the file:
 
 ```bash
 jtcon --wanted dxcc,was,pota      # just these rules

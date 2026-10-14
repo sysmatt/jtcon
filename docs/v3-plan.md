@@ -651,6 +651,12 @@ deliberately in phase 5 (Q1–Q5), with the tests updated as part of each fix.
 | Q5 | `--raw` applies message patterns (POTA etc.) to non-CQ decodes, but not callsign or entity checks. **Fixed:** every rule follows `scope` | `_classify` |
 | Q6 | cty.dat's `=VERSION` marker line is loaded as an exact callsign (harmless) | `CtyDat._parse` |
 
+## Maintenance
+
+- Check now and then that the QRZ Logbook API page linked from the README and
+  `docs/online-logbooks.md` and the starter config (https://www.qrz.com/docs/logbook30/api) still exists
+  and still says where to get the API key.
+
 ## Open decisions
 
 | # | Question | Leaning |
