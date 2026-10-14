@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="UDP port matching WSJT-X Settings → Reporting (default 2237)")
     run.add_argument("--save", metavar="FILE",
                      help="Append each CQ record as a JSON line to FILE")
+    run.add_argument("--ui", choices=("classic", "textual"),
+                     help="Front end: the classic screen, or the new Textual one")
     run.add_argument("--mouse", action="store_const", const=True,
                      help="Mouse wheel scrolls the decode pane; hold Shift to select text")
     run.add_argument("--no-color", dest="color", action="store_const", const=False,
@@ -105,6 +107,7 @@ def cli_overrides(args: argparse.Namespace) -> dict:
     put("display", "mouse", args.mouse)
     put("display", "color", args.color)
     put("display", "debug", args.debug)
+    put("display", "ui", args.ui)
     if args.save:
         layer["actions"] = {"json_log": {"file": args.save}}
     return layer
@@ -222,7 +225,11 @@ def main(argv: list | None = None) -> None:
     tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
     # ── Launch TUI — all remaining startup happens inside, logged to the pane ─
-    tui = JtconTUI(Engine(cfg, sock, tx_sock))
+    if cfg.display.ui == "textual":
+        from jtcon.tui.textual_app import JtconTextual
+        tui = JtconTextual(Engine(cfg, sock, tx_sock))
+    else:
+        tui = JtconTUI(Engine(cfg, sock, tx_sock))
     try:
         status = tui.run()
     finally:

@@ -348,7 +348,8 @@ def test_cli_help(home):
     assert r.returncode == 0
     assert r.stdout.startswith("usage: jtcon ")
     for flag in ("--config", "--profile", "--wanted", "--scope", "--show-config",
-                 "--init-config", "--list-rules", "--save", "--mouse", "--no-color"):
+                 "--init-config", "--edit-config", "--list-rules", "--save", "--mouse",
+                 "--no-color", "--ui"):
         assert flag in r.stdout
     assert "jtcon --wanted dxcc,was,pota" in r.stdout
     assert 'states = ["AK", "DE"]' in r.stdout

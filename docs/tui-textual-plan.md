@@ -146,9 +146,12 @@ it adds a few MB.  The classic TUI doesn't import it.
 Each stage ends with tests passing on Python 3.11, 3.12 and 3.14, and a live check
 by Matt.
 
-1. **Skeleton.**  `--ui textual`; the app wired to the Engine; full-screen
+1. **Skeleton.** ✅  `--ui textual`; the app wired to the Engine; full-screen
    Decodes pane, log strip, command line with the shared commands, status line;
-   quit and exit cleanup (upload retry, highlight clearing).
+   quit and exit cleanup (upload retry, highlight clearing).  Textual 8.2.8.
+   Commands moved to `tui/commands.py` and the status text to `render.py`, both
+   shared; the classic TUI's tests pass unchanged.  `tests/test_textual.py` runs
+   the app headless (skipped where Textual is older than 8.2)
 2. **Wanted table.**  Rows from Engine events, columns, colours, leaving the table,
    sorting, Enter to answer, `i` to ignore.
 3. **Layouts.**  The four layouts and their keys, the compact decode line, auto

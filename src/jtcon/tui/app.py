@@ -1,10 +1,8 @@
 """The prompt_toolkit full-screen application."""
 
 import asyncio
-import re
 import sys
 import threading
-import time
 
 from prompt_toolkit import Application
 from prompt_toolkit.document import Document
@@ -23,35 +21,15 @@ from prompt_toolkit.widgets import TextArea
 from jtcon.core.engine import Engine
 from jtcon.core.events import (Fatal, LogLine, Ready, SpotEvent, StationUpdated, StatusChanged,
                                UdpDown)
-from jtcon.core.messages import _CALLSIGN_RE
-from jtcon.core.stations import fmt_age
-from jtcon.tui.render import _DIM, _bargraph, _col, _header_line, _render
+from jtcon.tui.commands import COMMANDS, Commands, match_command
+from jtcon.tui.render import _header_line, _render, status_badge, status_text
 
 _MAX_OUTPUT_LINES = 5000   # output pane is trimmed when it grows past this…
 _TRIM_OUTPUT_TO   = 4000   # …down to this many lines
 _WHEEL_LINES      = 3      # lines per mouse-wheel notch (--mouse)
 
-# CMD> commands and the argument each takes ("": none; "[...]": optional).  Any
-# unique abbreviation works; a word with a digit is a callsign, never a command.
-_COMMANDS = {
-    "quit":     "",
-    "exit":     "",
-    "clear":    "",
-    "list":     "",
-    "ignore":   "[NN|CALL]",
-    "unignore": "CALL",
-    "sync":     "[full]",
-}
-
-
-def _match_command(word: str) -> list:
-    """The commands *word* abbreviates: one, several (ambiguous) or none."""
-    word = word.lower()
-    if word in _COMMANDS:
-        return [word]
-    if any(c.isdigit() for c in word):
-        return []
-    return [name for name in _COMMANDS if name.startswith(word)]
+_COMMANDS = COMMANDS               # shared with the other front ends
+_match_command = match_command
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -120,6 +98,9 @@ class JtconTUI:
         )
         self._app = self._build_app()
         self._app.before_render += self._flush_output
+        self.commands = Commands(engine, out=self._append_line,
+                                 quit=lambda: self._exit_app(),
+                                 clear=lambda: self._clear_output())
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -216,178 +197,31 @@ class JtconTUI:
     # ── Status line ───────────────────────────────────────────────────────────
 
     def _get_status_text(self):
-        eng = self.engine
-        bar = _bargraph(eng.cycle_tracker)
-        ct  = eng.cycle_tracker
-
-        if ct and ct.current_time_ms is not None:
-            parity = ct._parity
-            mode   = ct.current_mode
-            ev, od = ct._sums["even"], ct._sums["odd"]
-            all_n   = ev[2] + od[2]
-            avg_dec = (ev[0] + od[0]) / all_n if all_n else 0.0
-            avg_cq  = (ev[1] + od[1]) / all_n if all_n else 0.0
-            ev_d = ev[0] / ev[2] if ev[2] else 0.0
-            od_d = od[0] / od[2] if od[2] else 0.0
-            ev_c = ev[1] / ev[2] if ev[2] else 0.0
-            od_c = od[1] / od[2] if od[2] else 0.0
-            stats = (
-                f"  {mode}"
-                f"  dec={ct.cycle_total} cq={ct.cycle_cq}"
-                f"  avg dec={avg_dec:.1f} cq={avg_cq:.1f}"
-                f"  even dec={ev_d:.1f} cq={ev_c:.1f}"
-                f"  odd dec={od_d:.1f} cq={od_c:.1f}"
-            )
-        else:
-            parity = "even"
-            stats  = "  (waiting for decodes…)"
-
-        # Return a list of (style, text) tuples so the TX badge can be coloured.
-        if eng.udp_down:
-            trx = ("class:status.tx", " UDP DOWN ")
-        elif eng.transmitting:
-            trx = ("class:status.tx", " TX ")
-        else:
-            trx = ("class:status.rx", " RX ")
-
-        de = f"  de={eng.de_call}" if eng.de_call else ""
-        ign = f"  ign:{len(eng.ignored)}" if eng.ignored else ""
+        badge = status_badge(self.engine)
+        # A list of (style, text) tuples so the TX badge can be coloured.
+        trx = ("class:status.rx" if badge == "RX" else "class:status.tx", f" {badge} ")
         scroll = [("class:status.scroll", " SCROLL ")] if self._scroll_top is not None else []
-        return [
-            trx,
-            *scroll,
-            ("class:status", f" [{bar}] {parity}{stats}{de}{ign} "),
-        ]
+        return [trx, *scroll, ("class:status", status_text(self.engine))]
 
     # ── Command handler ───────────────────────────────────────────────────────
 
     def _handle_command(self, buffer) -> None:
-        raw = buffer.text.strip()
-        if not raw:
+        if not buffer.text.strip():
             return
-
         # Command output goes to the bottom of the pane; make sure it's visible.
         if self._scroll_top is not None:
             self._scroll_to_live()
+        self.commands.handle(buffer.text)
 
-        word, _, arg = raw.partition(" ")
-        arg = arg.strip()
-        names = _match_command(word)
+    def _cmd_clear(self, arg: str = "") -> None:
+        self._clear_output()
 
-        if re.fullmatch(r"\d{1,2}", raw):
-            idx = int(raw)
-            station = self.engine.stations.get(idx)
-            if station:
-                self.engine.reply(station)
-            else:
-                self._append_line(f"[cmd] No CQ at index {idx:02d}.")
-
-        elif len(names) > 1:
-            self._append_line(f"[cmd] {word!r} is ambiguous: {', '.join(names)}.")
-
-        elif names:
-            name = names[0]
-            takes = _COMMANDS[name]
-            if arg and not takes:
-                self._append_line(f"[cmd] {name} takes no argument.")
-            elif not arg and takes and not takes.startswith("["):
-                self._append_line(f"[cmd] usage: {name} {takes}")
-            else:
-                getattr(self, f"_cmd_{name}")(arg)
-
-        elif _CALLSIGN_RE.match(raw):
-            station = self.engine.stations.find(raw.upper())
-            if station:
-                self.engine.reply(station)
-            else:
-                self._append_line(f"[cmd] {raw.upper()} not found in rolling buffer.")
-
-        else:
-            commands = ", ".join(f"{n} {a}".rstrip() for n, a in _COMMANDS.items())
-            self._append_line(
-                f"[cmd] Unknown: {raw!r}  (commands: {commands}; any unique abbreviation"
-                " works; or enter index 00-99 / callsign to reply)"
-            )
-
-    def _cmd_quit(self, arg: str) -> None:
-        self._exit_app()
-
-    _cmd_exit = _cmd_quit
-
-    def _cmd_clear(self, arg: str) -> None:
+    def _clear_output(self) -> None:
         with self._output_lock:
             self._pending.clear()
             self._last_key, self._replace_last = None, False
         self._lines = []
         self._set_output(follow=True)
-
-    def _cmd_ignore(self, arg: str) -> None:
-        """ignore NN / ignore CALL: ignore for this session; ignore: list them."""
-        if not arg:
-            self._show_ignored()
-            return
-        if re.fullmatch(r"\d{1,2}", arg):
-            station = self.engine.stations.get(int(arg))
-            if station is None:
-                self._append_line(f"[cmd] No station at index {int(arg):02d}.")
-                return
-            arg = station.callsign
-        if self._is_call(arg, "ignore"):
-            self.engine.ignore(arg)
-
-    def _cmd_sync(self, arg: str) -> None:
-        """sync: fetch what changed in the online logbook and retry waiting
-        uploads now; sync full: a fresh full download."""
-        if arg.lower() not in ("", "full"):
-            self._append_line(f"[cmd] usage: sync {_COMMANDS['sync']}")
-            return
-        self.engine.sync(full=bool(arg))
-
-    def _cmd_unignore(self, arg: str) -> None:
-        if self._is_call(arg, "unignore"):
-            self.engine.unignore(arg)
-
-    def _is_call(self, arg: str, name: str) -> bool:
-        if _CALLSIGN_RE.match(arg.strip("<>")):
-            return True
-        self._append_line(f"[cmd] {arg!r} is not a callsign (usage: {name} {_COMMANDS[name]}).")
-        return False
-
-    def _show_ignored(self) -> None:
-        ignored = self.engine.ignored
-        if not ignored:
-            self._append_line("[ignore] Nothing ignored.  ignore NN or ignore CALL ignores"
-                              " a station.")
-            return
-        self._append_line(f"[ignore] {len(ignored)} ignored ——")
-        for source in ("config", "session"):
-            calls = [c for c, s in ignored.items() if s == source]
-            if calls:
-                self._append_line(f"  {source + ':':<9} {' '.join(calls)}")
-
-    def _cmd_list(self, arg: str = "") -> None:
-        """Print the wanted stations in the rolling buffer, most recently heard last."""
-        hits = self.engine.stations.hits()
-        if not hits:
-            self._append_line("[list] No wanted stations in the rolling buffer.")
-            return
-        now = time.monotonic()
-        self._append_line(f"[list] {len(hits)} wanted (last heard at bottom) ——")
-        for st in hits:
-            lines = st.display or [st.callsign]
-            # Keep the decode row aligned with the column header; the heard
-            # stats go on the WANTED line below it.
-            seen = _col(
-                f"(last heard {fmt_age(now - st.last_seen)} ago, ×{st.count})",
-                _DIM, self.config.display.color,
-            )
-            self._append_line(f"{st.idx:02d}  {lines[0]}")
-            if len(lines) > 1:
-                self._append_line(f"{lines[1]}  {seen}")
-            else:
-                self._append_line(f"  {seen}")
-            for line in lines[2:]:
-                self._append_line(line)
 
     # ── Output append (thread-safe) ───────────────────────────────────────────
 

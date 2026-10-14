@@ -123,6 +123,17 @@ def test_cli_overrides_win(tmp_path):
     assert cfg.actions.json_log == Path.cwd() / "spots.jsonl"   # CLI paths: from cwd
 
 
+def test_ui_choice(tmp_path):
+    assert load_config(config_dir=tmp_path).display.ui == "classic"
+    write(tmp_path / "config.toml", '[display]\nui = "textual"\n')
+    assert load_config(config_dir=tmp_path).display.ui == "textual"
+    args = build_parser().parse_args(["--ui", "classic"])
+    assert load_config(overrides=cli_overrides(args), config_dir=tmp_path).display.ui == "classic"
+    write(tmp_path / "config.toml", '[display]\nui = "fancy"\n')
+    with pytest.raises(ConfigError, match="display.ui"):
+        load_config(config_dir=tmp_path)
+
+
 def test_absent_cli_flags_override_nothing():
     assert cli_overrides(build_parser().parse_args([])) == {}
 
