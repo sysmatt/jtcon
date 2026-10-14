@@ -28,6 +28,8 @@ class Station:
     addr:         tuple | None = None   # WSJT-X address it came from
     wanted:       list  = field(default_factory=list)   # Hits from its newest decode
     display:      object = None     # the front end's rendering of the newest decode
+    heard:        float = 0.0       # last heard sending anything (see Engine._note_stage)
+    stage:        str | None = None # QSO stage of its latest message (messages.qso_stage)
 
     @property
     def is_hit(self) -> bool:
@@ -64,6 +66,7 @@ class StationTable:
             st = Station(idx, callsign, first_seen=now, last_seen=now)
             self._by_idx[idx] = self._by_call[callsign] = st
         st.decode, st.addr, st.last_seen = decode, addr, now
+        st.heard = now
         st.wanted = list(wanted)
         return st
 

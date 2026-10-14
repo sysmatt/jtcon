@@ -54,10 +54,16 @@ it or on its own.
 
 One row per station that at least one rule wants now.
 
-- **Columns:** `##` (the station's number, as today), call, entity, CQ zone, ITU
+- **Columns:** `##` (the station's number, as today), call, QSO stage, entity, CQ zone, ITU
   zone, continent, state, grid, SNR, time since last heard, times heard, days since
   last worked, one ✅❓❌ column per award rule (today's status columns), QRZ ⭐,
   LoTW 🌎, and the rules that want it.
+- **QSO stage** (Matt), from the station's own latest message: 📣 calling CQ,
+  🤝 answering a CQ (grid or no grid), 📶 exchanging reports, 👋 signing off
+  (RRR, RR73, 73); blank for anything else (contest exchanges, free text).  The
+  Engine notes every buffered station's latest message whatever the scope
+  (`Engine._note_stage`, `messages.qso_stage`), without changing the decode used
+  for replies and rules.  "Seen" and the timeout use that latest message too.
 - **Updated in place** from the Engine's events; a row is highlighted briefly when
   it changes.  Colours as today: red for award rules, yellow for watchlists only,
   magenta when heard outside a CQ.

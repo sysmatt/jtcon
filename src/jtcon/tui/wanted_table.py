@@ -15,6 +15,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import DataTable
 
+from jtcon.core.messages import STAGE_73, STAGE_ANSWER, STAGE_CQ, STAGE_REPORT
 from jtcon.core.stations import fmt_age
 from jtcon.core.wanted import MARKS
 from jtcon.tui.render import _status_columns
@@ -26,6 +27,9 @@ SORTS = [
     ("call",       lambda row: row.call),
     ("entity",     lambda row: (row.entity, row.call)),
 ]
+# Where the station is in a QSO, from its latest message.
+STAGE_MARKS = {STAGE_CQ: "📣", STAGE_ANSWER: "🤝", STAGE_REPORT: "📶", STAGE_73: "👋"}
+
 _SORT_BY_COLUMN = {"call": "call", "entity": "entity", "db": "SNR", "seen": "last heard"}
 
 
@@ -35,7 +39,7 @@ class Row:
     def __init__(self, station, result, ctx):
         self.station, self.result, self.ctx = station, result, ctx
         self.call      = station.callsign
-        self.last_seen = station.last_seen
+        self.last_seen = max(station.heard, station.last_seen)   # heard sending anything
         self.snr       = result.decoded.snr
         self.entity    = (result.entity_info or {}).get("entity", "")
 
@@ -57,6 +61,7 @@ class Row:
         cells = [
             f"{self.station.idx:02d}",
             Text(self.call, style=self.style),
+            STAGE_MARKS.get(self.station.stage, ""),
             ei.get("entity", ""),
             str(ei.get("cq_zone", "")),
             str(ei.get("itu_zone", "")),
@@ -83,7 +88,7 @@ class Row:
 
 def columns(cfg, has_log: bool) -> list:
     """(key, label) for each column, in order."""
-    cols = [("idx", "##"), ("call", "Call"), ("entity", "Entity"), ("cqz", "CQz"),
+    cols = [("idx", "##"), ("call", "Call"), ("qso", "QSO"), ("entity", "Entity"), ("cqz", "CQz"),
             ("ituz", "ITUz"), ("ct", "ct"), ("st", "ST"), ("grid", "Grid"), ("db", "dB"),
             ("seen", "Seen"), ("count", "×"), ("days", "days")]
     if has_log:
@@ -128,7 +133,7 @@ class WantedTable(DataTable):
         timeout = self.engine.config.display.wanted_timeout_minutes * 60
         out = []
         for st in self.engine.stations.hits():
-            if now - st.last_seen > timeout or st.callsign not in self.latest:
+            if now - max(st.heard, st.last_seen) > timeout or st.callsign not in self.latest:
                 continue
             out.append(Row(st, *self.latest[st.callsign]))
         live = {r.call for r in out}

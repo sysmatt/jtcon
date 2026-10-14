@@ -79,3 +79,45 @@ def _directed_sender(msg_text: str, de_call: str) -> str | None:
     if not _STRICT_CALL_RE.match(from_call):
         return None
     return from_call
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  QSO stage
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Where a station is in a QSO, from its own latest transmission.
+STAGE_CQ, STAGE_ANSWER, STAGE_REPORT, STAGE_73 = "cq", "answer", "report", "73"
+
+_REPORT_RE = re.compile(r"^R?[+-]\d{1,2}$", re.IGNORECASE)
+
+
+def qso_stage(msg_text: str) -> tuple:
+    """
+    (sender, stage) for a decoded message, or (None, None).
+
+        CQ K5TX EM10          K5TX, "cq"      calling CQ
+        W1ABC K5TX EM10       K5TX, "answer"  answering a CQ (with or without a grid)
+        W1ABC K5TX -12, R-12  K5TX, "report"  exchanging reports
+        W1ABC K5TX RR73       K5TX, "73"      signing off (RRR, RR73, 73)
+
+    Anything else from a station (contest exchanges, free text) is (sender, None).
+    """
+    call, _, _ = parse_cq_message(msg_text)
+    if call:
+        return call, STAGE_CQ
+    tokens = msg_text.split()
+    if tokens and tokens[0].upper() == "TU;":
+        tokens = tokens[1:]
+    if len(tokens) < 2:
+        return None, None
+    sender = tokens[1].strip("<>").upper()
+    if not _STRICT_CALL_RE.match(sender):
+        return None, None
+    extra = tokens[2].upper() if len(tokens) == 3 else "" if len(tokens) == 2 else None
+    if extra in ("RRR", "RR73", "73"):
+        return sender, STAGE_73
+    if extra is not None and _REPORT_RE.match(extra):
+        return sender, STAGE_REPORT
+    if extra == "" or (extra and re.fullmatch(r"[A-R]{2}\d{2}", extra)):
+        return sender, STAGE_ANSWER
+    return sender, None

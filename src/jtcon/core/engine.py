@@ -23,7 +23,7 @@ from jtcon.core.events import (Fatal, InputReloaded, LogLine, Ready, SpotEvent,
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
 from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
 from jtcon.core.logbook import qso_from_logged
-from jtcon.core.messages import base_call
+from jtcon.core.messages import base_call, qso_stage
 from jtcon.core.qrz import (PENDING_FILE, QrzClient, QrzStore, QrzSync, key_file_warning,
                             resolve_key)
 from jtcon.core.protocol import (Close, Decode, LoggedAdif, QsoLogged, Status, encode_highlight,
@@ -632,13 +632,22 @@ class Engine:
                                   d.new, mode_name(d))
         ctx = self.context()
         r = evaluate(d, ctx)
-        if r is None:
-            return
         station = None
-        if r.callsign and (r.is_cq or r.wanted):
+        if r is not None and r.callsign and (r.is_cq or r.wanted):
             station = self.stations.store(r.callsign, d, addr, r.wanted)
             self._update_highlight(station)
-        self._emit(SpotEvent(r, ctx, station))
+        self._note_stage(d.message)
+        if r is not None:
+            self._emit(SpotEvent(r, ctx, station))
+
+    def _note_stage(self, message: str) -> None:
+        """Whatever a buffered station sends, note when, and its QSO stage, so a
+        front end can show where it is in a QSO.  This works with scope "cq" too:
+        it changes nothing the rules or replies use."""
+        sender, stage = qso_stage(message)
+        station = self.stations.find(sender) if sender else None
+        if station is not None:
+            station.heard, station.stage = time.monotonic(), stage
 
     def _update_highlight(self, station) -> None:
         if not self.config.actions.highlight:

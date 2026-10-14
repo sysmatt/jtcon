@@ -54,6 +54,27 @@ def test_cq_becomes_a_spot_with_a_station(make_engine):
     assert ev.ctx.dial_freq == 14_074_000
 
 
+def test_buffered_stations_keep_their_qso_stage(make_engine, monkeypatch):
+    import time
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    e = make_engine()                                   # scope "cq"
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    st = e.stations.find("VK3XY")
+    assert (st.stage, st.heard) == ("cq", 1000.0)
+    for t, msg, stage in ((1015, "W1ABC VK3XY QF22", "answer"),
+                          (1030, "W1ABC VK3XY -12", "report"),
+                          (1045, "W1ABC VK3XY RR73", "73")):
+        now[0] = t
+        e.datagram_received(pk.decode(msg), ADDR)
+        assert (st.stage, st.heard) == (stage, t)
+    # Nothing the rules or replies use has changed: still the CQ, heard at 1000.
+    assert st.decode.message == "CQ VK3XY QF22" and st.last_seen == 1000.0 and st.count == 1
+    assert len(spots(e)) == 1
+    e.datagram_received(pk.decode("VK3XY ZL1AA -05"), ADDR)    # VK3XY receiving: no change
+    assert st.stage == "73"
+
+
 def test_hidden_decodes_still_count_in_the_cycle_stats(make_engine):
     e = make_engine()
     e.datagram_received(pk.decode("W1ABC VK3XY -12"), ADDR)    # not shown

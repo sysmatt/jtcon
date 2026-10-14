@@ -12,7 +12,7 @@ from jtcon.core.alerts import _build_alert_msg
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.cycle import CycleTracker
 from jtcon.core.hamdat import load_state_file
-from jtcon.core.messages import _directed_sender, base_call, parse_cq_message
+from jtcon.core.messages import _directed_sender, base_call, parse_cq_message, qso_stage
 from jtcon.core.patterns import _regex_matches, load_regex_patterns
 from jtcon.core.stations import fmt_age as _fmt_age
 from jtcon.core.wanted import NEW, WORKED, Hit
@@ -147,3 +147,24 @@ def test_build_alert_msg():
 ])
 def test_base_call(call, base):
     assert base_call(call) == base
+
+
+@pytest.mark.parametrize("msg, expected", [
+    ("CQ K5TX EM10",            ("K5TX", "cq")),
+    ("CQ POTA K5TX EM10",       ("K5TX", "cq")),
+    ("CQ K5TX",                 ("K5TX", "cq")),
+    ("W1ABC K5TX EM10",         ("K5TX", "answer")),
+    ("W1ABC K5TX",              ("K5TX", "answer")),
+    ("W1ABC K5TX -12",          ("K5TX", "report")),
+    ("W1ABC K5TX R+05",         ("K5TX", "report")),
+    ("W1ABC K5TX RRR",          ("K5TX", "73")),
+    ("W1ABC K5TX RR73",         ("K5TX", "73")),        # not a grid square
+    ("W1ABC K5TX 73",           ("K5TX", "73")),
+    ("<W1ABC> <K5TX/P> RR73",   ("K5TX/P", "73")),
+    ("TU; W1ABC K5TX 579 0001", ("K5TX", None)),        # contest exchange
+    ("W1ABC RR73; K5TX <W9XX> -08", (None, None)),      # DXpedition mode: no clear sender
+    ("HELLO WORLD",             (None, None)),
+    ("",                        (None, None)),
+])
+def test_qso_stage(msg, expected):
+    assert qso_stage(msg) == expected

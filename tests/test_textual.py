@@ -162,6 +162,18 @@ def test_wanted_table_shows_only_wanted_stations(make_engine):
     run(make_engine, test)
 
 
+def test_wanted_table_shows_the_qso_stage(make_engine):
+    async def test(app, pilot):
+        await hear(app, pilot, "CQ VK3XY QF22")
+        stage = lambda: table(app)[0]["QSO"]
+        assert stage() == "📣"
+        for msg, mark in (("W1ABC VK3XY QF22", "🤝"), ("W1ABC VK3XY R-12", "📶"),
+                          ("W1ABC VK3XY RR73", "👋"), ("CQ VK3XY QF22", "📣")):
+            await hear(app, pilot, msg)
+            assert stage() == mark
+    run(make_engine, test)
+
+
 def test_wanted_table_sorts(make_engine):
     async def test(app, pilot):
         await hear(app, pilot, "CQ VK3XY QF22", snr=-20)
