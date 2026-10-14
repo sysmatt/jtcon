@@ -31,6 +31,7 @@ it or on its own.
 | T8 | Wanted table order | Sortable; most recently heard first by default |
 | T9 | Status line | Keep today's, plus band and frequency |
 | T10 | Old TUI | Kept, and stays the default for now |
+| T11 | Cycling layouts | Ctrl-arrows step through them, as well as the F-keys |
 
 ## Screen
 
@@ -83,6 +84,11 @@ One row per station that at least one rule wants now.
 | F3 | Decodes, full screen |
 | F4 | Side by side: wanted left, decodes right |
 | F5 | Stacked: wanted on top, decodes below |
+
+Ctrl-→ and Ctrl-↓ step forward through the layouts in that order, Ctrl-← and
+Ctrl-↑ step back (Matt).  Ctrl-←/→ then no longer jump words at `CMD>`; commands
+are short.  Some terminals don't pass Ctrl-arrows through (tmux without
+`xterm-keys`, macOS Terminal's desktop switching), so the F-keys stay.
 
 The log strip, command line and status line are in every layout.
 
