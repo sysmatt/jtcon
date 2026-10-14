@@ -168,8 +168,12 @@ by Matt.
    rebuilt from the rolling buffer (`stations.hits()`) with each station's newest
    evaluated decode, on change and every second.  Until stage 3 it sits above the
    decode stream (stacked)
-3. **Layouts.**  The four layouts and their keys, the compact decode line, auto
-   choice, `[display] layout`.
+3. **Layouts.** ✅  The four layouts and their keys, the compact decode line, auto
+   choice, `[display] layout`.  Each decode is rendered in both forms when it
+   arrives, so a switch redraws without re-rendering (old lines keep their
+   times); a pane that was following the newest decodes keeps following.  The
+   side-by-side decode pane is 68 columns.  The entity column (both front ends)
+   narrowed from 30 to 24, the longest cty.dat name, to shorten the full line
 4. **Live controls.**  Rules panel, scope and show toggles, the Engine setters.
 5. **Polish.**  F1 help, mouse, the docs (README section, screenshot), then
    daily use to decide when it becomes the default.

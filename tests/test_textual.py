@@ -19,13 +19,14 @@ def lines(widget) -> list:
     return [strip.text.rstrip() for strip in widget.lines]
 
 
-def run(make_engine, test, *argv, **kw):
+def run(make_engine, test, *argv, layout="stacked", size=SIZE, **kw):
     """Run *test(app, pilot)* inside a headless JtconApp."""
     engine = make_engine("--no-color", *argv, **kw)
+    engine.config.display.layout = layout
 
     async def main():
         app = JtconApp(engine, start_engine=False)
-        async with app.run_test(size=SIZE) as pilot:
+        async with app.run_test(size=size) as pilot:
             await pilot.pause()
             await test(app, pilot)
         return app
@@ -44,7 +45,7 @@ def test_spots_go_to_the_decode_pane_under_a_fixed_header(make_engine):
         header = str(app.header.render()).splitlines()
         assert header[0].startswith("##  HHMMSSZ") and "days" in header[0]
         assert lines(app.log_strip) == []
-    run(make_engine, test)
+    run(make_engine, test, layout="decodes")
 
 
 def test_messages_go_to_the_log_strip(make_engine):
@@ -243,3 +244,98 @@ def test_stations_leave_the_table_after_the_timeout(make_engine):
         assert [r.call for r in app.wanted.wanted_rows(st.last_seen + 599)] == ["VK3XY"]
         assert app.wanted.wanted_rows(st.last_seen + 601) == []
     run(make_engine, test)
+
+
+# ── Layouts ───────────────────────────────────────────────────────────────────
+
+from jtcon.tui.textual_app import auto_layout
+
+
+def test_auto_layout_by_terminal_size():
+    assert auto_layout(200, 30) == "side"
+    assert auto_layout(199, 50) == "stacked"
+    assert auto_layout(199, 49) == "wanted"
+
+
+def shown(app) -> tuple:
+    """(Wanted table shown?, decode pane shown?)"""
+    return (app.wanted.display, app.query_one("#decode-pane").display)
+
+
+def test_starting_layout_auto_or_configured(make_engine):
+    async def check(app, pilot):
+        check.seen = (app.layout, shown(app), app.decodes.compact)
+    for layout, size, expected in (
+            ("auto", (220, 40), ("side", (True, True), True)),
+            ("auto", (150, 60), ("stacked", (True, True), True)),
+            ("auto", (150, 40), ("wanted", (True, False), False)),
+            ("decodes", (220, 60), ("decodes", (False, True), False))):
+        run(make_engine, check, layout=layout, size=size)
+        assert check.seen == expected
+
+
+def test_layout_keys(make_engine):
+    async def test(app, pilot):
+        assert app.layout == "wanted"
+        for key, layout in (("f3", "decodes"), ("f4", "side"), ("f5", "stacked"),
+                            ("f2", "wanted")):
+            await pilot.press(key)
+            assert app.layout == layout
+        seen = []
+        for key in ("ctrl+right",) * 4 + ("ctrl+down", "ctrl+left", "ctrl+up"):
+            await pilot.press(key)
+            seen.append(app.layout)
+        assert seen == ["decodes", "side", "stacked", "wanted", "decodes", "wanted",
+                        "stacked"]
+    run(make_engine, test, layout="wanted")
+
+
+def test_split_layouts_use_the_compact_decode_line(make_engine):
+    async def test(app, pilot):
+        await hear(app, pilot, "CQ W1ABC FN42", "CQ VK3XY QF22")
+        await pilot.press("f3")                               # Decodes: full lines
+        await pilot.pause()
+        full = lines(app.decodes)
+        assert len(full) == 3 and "United States" in full[0] and "WANTED" in full[2]
+        assert "days" in str(app.header.render())
+        await pilot.press("f4")                               # side by side: compact
+        await pilot.pause()
+        compact = lines(app.decodes)
+        assert compact == ["00  123015z    -7   +0.2   1234  CQ W1ABC FN42",
+                           f"01  123015z    -7   +0.2   1234  {'CQ VK3XY QF22':<24} ★"]
+        assert str(app.header.render()).startswith("##  HHMMSSZ    dB     dt     Hz  message")
+        await hear(app, pilot, "CQ ZL1AA RF70")               # new decodes: compact too
+        assert lines(app.decodes)[-1].startswith("02  123015z") and \
+            lines(app.decodes)[-1].endswith("★")
+        await pilot.press("f3")
+        await pilot.pause()
+        assert len(lines(app.decodes)) == 5                   # back to full, with WANTED lines
+    run(make_engine, test, layout="stacked")
+
+
+def test_arrows_scroll_the_decodes_when_the_table_is_hidden(make_engine):
+    async def test(app, pilot):
+        for i in range(80):
+            app.decodes.add(f"line {i}")
+        await pilot.pause()
+        await pilot.press("up")
+        await pilot.pause()
+        assert not app.decodes.is_vertical_scroll_end
+    run(make_engine, test, layout="decodes")
+
+
+def test_switching_layouts_keeps_following_the_newest_decodes(make_engine):
+    async def test(app, pilot):
+        for i in range(80):
+            app.decodes.add(f"line {i}")
+        await pilot.pause()
+        for key in ("f5", "f3", "f4", "f5", "f2", "f5"):
+            await pilot.press(key)
+            await pilot.pause()
+            assert app.decodes.is_vertical_scroll_end, key
+        await pilot.press("pageup", "pageup", "pageup")       # reading back: stays put
+        await pilot.pause()
+        await pilot.press("f3")
+        await pilot.pause()
+        assert not app.decodes.is_vertical_scroll_end
+    run(make_engine, test, layout="side")

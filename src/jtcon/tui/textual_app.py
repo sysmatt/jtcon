@@ -1,29 +1,45 @@
 """The Textual front end (--ui textual).  See docs/tui-textual-plan.md.
 
-Stage 2: the Wanted table above the decode stream (with its fixed column
-header), a log strip for jtcon's own messages, the command line and the
-status line.
+The Wanted table and the decode stream (with its fixed column header), in one
+of four layouts; a log strip for jtcon's own messages; the command line and
+the status line.
 """
 
 import asyncio
 import sys
 import time
+from collections import deque
 
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Input, Label, RichLog, Static
 
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.engine import Engine
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
 from jtcon.tui.commands import Commands
-from jtcon.tui.render import _header_line, _render, status_badge, status_text
+from jtcon.tui.render import (_header_compact, _header_line, _render, _render_compact,
+                              status_badge, status_text)
 from jtcon.tui.wanted_table import WantedTable
 
 DECODE_LINES = 5000     # decode pane lines kept
 LOG_LINES    = 500      # log strip lines kept
+
+# Layouts, in the order Ctrl-arrows step through them, with their names.
+LAYOUTS = {"wanted": "Wanted", "decodes": "Decodes", "side": "Side by side",
+           "stacked": "Stacked"}
+AUTO_SIDE_COLUMNS = 200     # auto layout: side by side from this wide...
+AUTO_STACKED_ROWS = 50      # ...else stacked from this tall, else Wanted
+
+
+def auto_layout(width: int, height: int) -> str:
+    if width >= AUTO_SIDE_COLUMNS:
+        return "side"
+    if height >= AUTO_STACKED_ROWS:
+        return "stacked"
+    return "wanted"
 
 
 def _ansi(text: str) -> Text:
@@ -57,22 +73,53 @@ class LogStrip(RichLog):
 
 class DecodePane(RichLog):
     """The decode stream: follows new lines while at the bottom, stays put
-    while scrolled back."""
+    while scrolled back.  Each decode is kept in its full and compact forms
+    (rendered when it arrived), so switching layouts redraws without
+    re-rendering."""
 
     def __init__(self, **kw):
         super().__init__(wrap=False, auto_scroll=False, max_lines=DECODE_LINES, **kw)
+        self.compact = False
+        self.entries: deque = deque(maxlen=DECODE_LINES)    # (full lines, compact lines)
 
     def add(self, text: str) -> None:
+        """A line of text (command output): the same in both forms."""
+        self.add_entry([text], [text])
+
+    def add_entry(self, full: list, compact: list) -> None:
+        self.entries.append((full, compact))
         follow = self.is_vertical_scroll_end
-        self.write(_ansi(text), shrink=False, scroll_end=follow)
+        for line in compact if self.compact else full:
+            self.write(_ansi(line), shrink=False, scroll_end=follow)
+
+    def set_compact(self, compact: bool) -> None:
+        if compact == self.compact:
+            return
+        self.compact = compact
+        self.clear()
+        for full, short in self.entries:
+            for line in short if compact else full:
+                self.write(_ansi(line), shrink=False, scroll_end=False)
+
+    def reset(self) -> None:
+        self.entries.clear()
+        self.clear()
 
 
 class JtconApp(App):
     """The Textual screen.  JtconTextual runs it together with the Engine."""
 
     CSS = """
-    #wanted  { height: 2fr; scrollbar-size: 1 1; }
-    #header  { height: 2; color: $text-muted; border-top: solid $primary-darken-2; }
+    #panes   { height: 1fr; layout: vertical; }
+    #panes.side { layout: horizontal; }
+    #panes.wanted #decode-pane, #panes.decodes #wanted { display: none; }
+    #wanted  { height: 1fr; scrollbar-size: 1 1; }
+    #decode-pane { height: 1fr; }
+    #panes.stacked #wanted { height: 3fr; }
+    #panes.stacked #decode-pane { height: 2fr; border-top: solid $primary-darken-2; }
+    #panes.side #wanted { width: 1fr; }
+    #panes.side #decode-pane { width: 68; border-left: solid $primary-darken-2; }
+    #header  { height: 2; color: $text-muted; }
     #decodes { height: 1fr; border: none; scrollbar-size: 1 1; }
     #log     { height: 7; border-top: solid $primary-darken-2; scrollbar-size: 1 1; }
     #cmdline { height: 1; }
@@ -91,6 +138,12 @@ class JtconApp(App):
         Binding("pageup", "page_decodes(-1)", show=False, priority=True),
         Binding("pagedown", "page_decodes(1)", show=False, priority=True),
         Binding("escape,ctrl+end", "decodes_to_live", show=False, priority=True),
+        Binding("f2", "layout('wanted')", "Wanted", priority=True),
+        Binding("f3", "layout('decodes')", "Decodes", priority=True),
+        Binding("f4", "layout('side')", "Side by side", priority=True),
+        Binding("f5", "layout('stacked')", "Stacked", priority=True),
+        Binding("ctrl+right,ctrl+down", "step_layout(1)", show=False, priority=True),
+        Binding("ctrl+left,ctrl+up", "step_layout(-1)", show=False, priority=True),
     ]
 
     def __init__(self, engine: Engine, start_engine: bool = True):
@@ -106,14 +159,17 @@ class JtconApp(App):
         self._header_text = ""
         self._table_dirty = True
         self._table_shown = 0.0         # monotonic time of the last rebuild
+        self.layout = ""                # set on mount
         self.engine_task: asyncio.Future | None = None
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
-        yield WantedTable(self.engine, id="wanted")
-        yield Static(id="header")
-        yield DecodePane(id="decodes")
+        with Container(id="panes"):
+            yield WantedTable(self.engine, id="wanted")
+            with Vertical(id="decode-pane"):
+                yield Static(id="header")
+                yield DecodePane(id="decodes")
         yield LogStrip(id="log")
         with Horizontal(id="cmdline"):
             yield Label("CMD> ", id="prompt")
@@ -127,6 +183,8 @@ class JtconApp(App):
         self.header = self.query_one("#header", Static)
         self.status = self.query_one("#status", Static)
         self.query_one("#cmd", Input).focus()
+        layout = self.config.display.layout
+        self.set_layout(auto_layout(*self.size) if layout == "auto" else layout)
         self.watch(self.decodes, "scroll_x", lambda *_: self._show_header(), init=False)
         self.set_interval(0.25, self._show_status)
         self.set_interval(0.25, self._show_table)
@@ -146,10 +204,33 @@ class JtconApp(App):
 
     # ── Header and status ─────────────────────────────────────────────────────
 
+    def set_layout(self, layout: str) -> None:
+        follow = self.decodes.is_vertical_scroll_end
+        panes = self.query_one("#panes")
+        panes.set_classes(layout)
+        self.layout = layout
+        # The split layouts use the compact decode line; the table shows the facts.
+        self.decodes.set_compact(layout in ("side", "stacked"))
+        self._show_header()
+        if follow:          # keep following the newest decodes in the new size
+            self.call_after_refresh(self.decodes.scroll_end, animate=False)
+        if layout == "decodes" and self.focused is self.wanted:
+            self.query_one("#cmd", Input).focus()
+
+    def action_layout(self, layout: str) -> None:
+        self.set_layout(layout)
+
+    def action_step_layout(self, step: int) -> None:
+        names = list(LAYOUTS)
+        self.set_layout(names[(names.index(self.layout) + step) % len(names)])
+
     def _show_header(self) -> None:
         """The column header, shifted with the decode pane if it scrolls sideways."""
-        text = _header_line(self.config, has_log=self.engine.logbook is not None,
-                            has_hamdat=self.engine.hamdat is not None)
+        if self.decodes.compact:
+            text = _header_compact()
+        else:
+            text = _header_line(self.config, has_log=self.engine.logbook is not None,
+                                has_hamdat=self.engine.hamdat is not None)
         self._header_text = text
         skip = int(self.decodes.scroll_x)
         self.header.update(Text("\n".join(line[skip:] for line in text.split("\n")),
@@ -168,7 +249,8 @@ class JtconApp(App):
         line.append(status_text(eng))
         self.status.update(line)
         # The header depends on the logbook, which loads after startup.
-        if self.engine.logbook is not None and "days" not in self._header_text:
+        if (self.engine.logbook is not None and not self.decodes.compact
+                and "days" not in self._header_text):
             self._show_header()
 
     def _show_table(self, force: bool = False) -> None:
@@ -204,7 +286,7 @@ class JtconApp(App):
             self.log_strip.add("[cmd] No station selected in the Wanted table.")
 
     def action_arrow(self, step: int) -> None:
-        if self.focused is self.decodes:
+        if self.focused is self.decodes or self.layout == "decodes":
             self.decodes.scroll_relative(y=step, animate=False)
         elif self.wanted.row_count:
             self.wanted.move_cursor(row=self.wanted.cursor_row + step, animate=False)
@@ -223,7 +305,7 @@ class JtconApp(App):
         self.exit()
 
     def _clear(self) -> None:
-        self.decodes.clear()
+        self.decodes.reset()
         self.log_strip.reset()
 
     # ── Engine events (on the event loop, this app's thread) ──────────────────
@@ -246,15 +328,14 @@ class JtconApp(App):
         lines = _render(ev.ctx, ev.result)
         if ev.result.new_alert:
             self.bell()
+        prefix = "    "
         if ev.station is not None:
             ev.station.display = lines
             self.wanted.note(ev.result, ev.ctx, ev.station)
             self._table_dirty = True
-            lines = [f"{ev.station.idx:02d}  {lines[0]}"] + lines[1:]
-        else:
-            lines = [f"    {lines[0]}"] + lines[1:]
-        for line in lines:
-            self.decodes.add(line)
+            prefix = f"{ev.station.idx:02d}  "
+        self.decodes.add_entry([prefix + lines[0]] + lines[1:],
+                               [prefix + _render_compact(ev.ctx, ev.result)])
 
     def fatal(self, msg: str) -> None:
         """Show *msg*, then close; it's repeated on the terminal after exit."""

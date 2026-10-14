@@ -17,6 +17,7 @@ _W_MSG  = 24
 _W_CALL = 12
 _W_GRID = 6
 _W_DAYS = 5    # days-since-last-worked column width
+_W_ENTITY = 24 # the longest cty.dat entity names ("Central African Republic")
 
 
 # ANSI colour codes used in the decode output pane.
@@ -110,11 +111,11 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
 
     ei = r.entity_info
     if ei:
-        entity_str = (f"| {ei['entity']:<30}  CQ{ei['cq_zone']:<3} ITU{ei['itu_zone']:<3}"
+        entity_str = (f"| {ei['entity']:<{_W_ENTITY}}  CQ{ei['cq_zone']:<3} ITU{ei['itu_zone']:<3}"
                       f" {ei['continent']:<2}")
         cols.append(_col(entity_str, _CYN, color))
     else:
-        cols.append(f"| {'':<30}  {'':5} {'':6} {'':2}")
+        cols.append(f"| {'':<{_W_ENTITY}}  {'':5} {'':6} {'':2}")
 
     if calls:
         status = _status_columns(cfg)
@@ -140,6 +141,28 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
     return lines
 
 
+def _render_compact(ctx: DecodeContext, r: DecodeResult) -> str:
+    """The short decode line for the split layouts: time, dB, dt, Hz, message,
+    and ★ for a wanted station (the Wanted table says why)."""
+    color = ctx.config.display.color
+    d = r.decoded
+    code = (_BMAG if not r.is_cq else
+            _BRED if any(h.status for h in r.wanted) else _BYEL) if r.wanted else ""
+    msg = f"{r.msg_text:<{_W_MSG}}"
+    return "  ".join([
+        _col(r.period_utc, _DIM, color),
+        _col(f"{d.snr:+4d}", _DIM, color),
+        _col(f"{d.dt:+5.1f}", _DIM, color),
+        _col(f"{d.df:5d}", _DIM, color),
+        _col(msg, code, color) if code else msg,
+    ]) + (" " + _col("★", code, color) if code else "")
+
+
+def _header_compact() -> str:
+    header = "  ".join(["##", "HHMMSSZ", f"{'dB':>4}", f"{'dt':>5}", f"{'Hz':>5}", "message"])
+    return header + "\n" + "─" * (len(header) + _W_MSG - len("message") + 2)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Column header line
 # ══════════════════════════════════════════════════════════════════════════════
@@ -161,7 +184,7 @@ def _header_line(cfg: Config, has_log: bool = False,
         parts.append(f"{'days':>{_W_DAYS}}")
     if has_hamdat:
         parts.append(f"{'ST':<2}")
-    parts.append(f"| {'entity':<30}  CQz   ITUz   ct")
+    parts.append(f"| {'entity':<{_W_ENTITY}}  CQz   ITUz   ct")
     if has_log:
         status = _status_columns(cfg)
         if status:

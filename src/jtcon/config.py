@@ -105,6 +105,7 @@ class DisplayConfig:
     debug:     bool = False
     ui:        str  = "classic"   # front end: "classic" or "textual"
     wanted_timeout_minutes: int = 10   # textual: unheard this long, off the Wanted table
+    layout:    str  = "auto"      # textual: "wanted", "decodes", "side", "stacked"
 
 
 @dataclass
@@ -230,7 +231,8 @@ _SCHEMA = {
     "udp":     {"host": str, "port": int, "proxy": [int]},
     "display": {"show": _choice("cq", "all"), "show_time": bool, "color": bool,
                 "mouse": bool, "debug": bool, "ui": _choice("classic", "textual"),
-                "wanted_timeout_minutes": int},
+                "wanted_timeout_minutes": int,
+                "layout": _choice("auto", "wanted", "decodes", "side", "stacked")},
     "scope":   {"decodes": _choice("cq", "all")},
     "inputs":  {"cty": _PATH, "adif": [_PATH], "hamdat": _PATH,
                 "qrz": {"enabled": bool, "api_key": str, "dir": _PATH, "keep": int,
@@ -729,6 +731,8 @@ CONFIG_TEMPLATE = """\
 # debug     = false      # dump raw packets
 # ui        = "classic"  # or "textual": the new screen with a wanted-stations table
 # wanted_timeout_minutes = 10   # textual: a station unheard this long leaves the table
+# layout    = "auto"     # textual: "wanted", "decodes", "side" (by side), "stacked";
+#                        # auto picks by the terminal's size
 
 [scope]
 # decodes = "cq"         # check CQ decodes only, or "all" (WSJT-X "CQ only" must be off)

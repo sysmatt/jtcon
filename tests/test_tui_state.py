@@ -297,7 +297,7 @@ def test_header_columns(make_tui):
     t.engine.logbook, t.engine.hamdat = object(), object()
     h = t._header()
     # One status column per award rule, in config order; pota has none.
-    assert re.search(r"days  ST  \| entity {24}  CQz   ITUz   ct  \| DXCC     WAS   WAS-QRZ"
+    assert re.search(r"days  ST  \| entity {18}  CQz   ITUz   ct  \| DXCC     WAS   WAS-QRZ"
                      r"  QRZ  LoW$", h.splitlines()[0])
 
 
