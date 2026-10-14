@@ -163,6 +163,13 @@ class Config:
     filters: FiltersConfig = field(default_factory=FiltersConfig)
     actions: ActionsConfig = field(default_factory=ActionsConfig)
     sources: list          = field(default_factory=list)   # files loaded, in order
+    # Session only, never saved: [[wanted]] names switched off while running.
+    rules_off: set         = field(default_factory=set)
+
+    @property
+    def active_wanted(self) -> list:
+        """The [[wanted]] entries in use: all but those switched off."""
+        return [w for w in self.wanted if w.name not in self.rules_off]
 
     def rule(self, key: str) -> WantedSpec | None:
         return next((w for w in self.wanted if w.rule == key), None)

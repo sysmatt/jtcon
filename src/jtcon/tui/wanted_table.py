@@ -77,7 +77,7 @@ class Row:
             hit = r.hit(label)
             cells.append(f"{MARKS[hit.status]}{hit.value}" if hit else "")
         if calls:
-            per_band = ctx.band if any(w.rule == "5bwas" for w in cfg.wanted) else None
+            per_band = ctx.band if any(w.rule == "5bwas" for w in cfg.active_wanted) else None
             cells.append("⭐" if calls.confirmed(self.call, "qrz", per_band) else "")
             cells.append("🌎" if calls.confirmed(self.call, "lotw", per_band) else "")
         why = " ".join(h.rule if not h.detail or h.status else f"{h.rule}({h.detail})"

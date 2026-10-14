@@ -42,7 +42,7 @@ _BAR_WIDTH = 14   # characters wide for the cycle bargraph
 def _status_columns(cfg: Config) -> list:
     """(label, value width, column width) for each award rule, in config order."""
     cols = []
-    for spec in cfg.wanted:
+    for spec in cfg.active_wanted:
         cls = RULE_CLASSES[spec.rule]
         if issubclass(cls, AwardRule):
             label = rule_label(spec)
@@ -125,7 +125,7 @@ def _render(ctx: DecodeContext, r: DecodeResult) -> list:
             cols.append("| " + "  ".join(cells))
         # Per call: has this station confirmed with us via QRZ / LoTW (on this
         # band, when 5-Band WAS is on)?
-        per_band = band if any(w.rule == "5bwas" for w in cfg.wanted) else None
+        per_band = band if any(w.rule == "5bwas" for w in cfg.active_wanted) else None
         cols.append("⭐" if calls.confirmed(call, "qrz", per_band) else "  ")
         cols.append("🌎" if calls.confirmed(call, "lotw", per_band) else "  ")
 

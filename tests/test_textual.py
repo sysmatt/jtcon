@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("textual", minversion="8.2")
 
 from jtcon.core.events import Fatal, LogLine, Ready
-from jtcon.tui.textual_app import JtconApp
+from jtcon.tui.textual_app import JtconApp, RulesScreen
 import wsjtx_packets as pk
 
 ADDR = ("127.0.0.1", 2237)
@@ -339,3 +339,65 @@ def test_switching_layouts_keeps_following_the_newest_decodes(make_engine):
         await pilot.pause()
         assert not app.decodes.is_vertical_scroll_end
     run(make_engine, test, layout="side")
+
+
+
+# ── Live controls ─────────────────────────────────────────────────────────────
+
+def test_rules_panel_switches_rules_live(make_engine):
+    async def test(app, pilot):
+        await hear(app, pilot, "CQ VK3XY QF22", "CQ K0AU FN42")
+        assert [r["Call"] for r in table(app)] == ["K0AU", "VK3XY"]
+        await pilot.press("f6")
+        await pilot.pause()
+        rules = app.screen.query_one("#rules")
+        assert [o.value for o in rules.options] == ["dxcc", "cqz", "country"]
+        await pilot.press("down", "space")                   # arrows reach the panel: cqz off
+        await pilot.pause()
+        assert app.config.rules_off == {"cqz"}
+        assert [r["Call"] for r in table(app)] == ["VK3XY"]  # K0AU was wanted for CQZ only
+        assert "CQZ" not in [str(c.label) for c in app.wanted.ordered_columns]
+        assert "CQZ" not in str(app.header.render())
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, RulesScreen)
+        app._show_status()
+        assert " off:CQZ " in str(app.status.render())
+        await pilot.press("f6", "down", "space", "f6")      # back on
+        await pilot.pause()
+        assert app.config.rules_off == set()
+        assert [r["Call"] for r in table(app)] == ["K0AU", "VK3XY"]
+    run(make_engine, test)
+
+
+def test_scope_and_show_toggles(make_engine):
+    async def test(app, pilot):
+        app._show_status()
+        assert "scope:" not in str(app.status.render())
+        await pilot.press("f7")
+        await pilot.pause()
+        assert app.config.scope.decodes == "all"
+        assert lines(app.log_strip)[-1] == "[scope] Checking all decodes"
+        await pilot.press("f8")
+        await pilot.pause()
+        assert app.config.display.show == "all"
+        app._show_status()
+        assert " scope:all show:all " in str(app.status.render())
+        await hear(app, pilot, "W1ABC VK3XY -12")            # non-CQ: now checked, wanted
+        assert [r["Call"] for r in table(app)] == ["VK3XY"]
+        await pilot.press("f7", "f8")
+        await pilot.pause()
+        app._show_status()
+        assert "scope:" not in str(app.status.render())
+    run(make_engine, test)
+
+
+def test_ctrl_q_quits_from_the_rules_panel(make_engine):
+    async def test(app, pilot):
+        await pilot.press("f6")
+        await pilot.pause()
+        assert isinstance(app.screen, RulesScreen)
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+        assert app._exit
+    run(make_engine, test)

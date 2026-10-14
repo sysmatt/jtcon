@@ -174,7 +174,12 @@ by Matt.
    times); a pane that was following the newest decodes keeps following.  The
    side-by-side decode pane is 68 columns.  The entity column (both front ends)
    narrowed from 30 to 24, the longest cty.dat name, to shorten the full line
-4. **Live controls.**  Rules panel, scope and show toggles, the Engine setters.
+4. **Live controls.** ✅  Rules panel (F6, a pop-up with a checkbox per rule;
+   arrows go to it while it's open), scope (F7) and show (F8) toggles.
+   `Engine.set_rule_enabled`, `set_scope`, `set_show`; switched-off rules live
+   in `Config.rules_off` (session only, never in `--show-config`), and
+   `Config.active_wanted` drives the status columns.  The status line shows
+   what differs from the config file (`scope:all show:all off:CQZ`)
 5. **Polish.**  F1 help, mouse, the docs (README section, screenshot), then
    daily use to decide when it becomes the default.
 

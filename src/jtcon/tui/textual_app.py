@@ -14,7 +14,8 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import Input, Label, RichLog, Static
+from textual.screen import ModalScreen
+from textual.widgets import Input, Label, RichLog, SelectionList, Static
 
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.engine import Engine
@@ -23,6 +24,7 @@ from jtcon.tui.commands import Commands
 from jtcon.tui.render import (_header_compact, _header_line, _render, _render_compact,
                               status_badge, status_text)
 from jtcon.tui.wanted_table import WantedTable
+from jtcon.core.wanted import rule_label
 
 DECODE_LINES = 5000     # decode pane lines kept
 LOG_LINES    = 500      # log strip lines kept
@@ -106,6 +108,39 @@ class DecodePane(RichLog):
         self.clear()
 
 
+class RulesScreen(ModalScreen):
+    """The rules panel: each [[wanted]] rule with a switch, applied at once."""
+
+    CSS = """
+    RulesScreen { align: center middle; }
+    #rules-box { width: 56; height: auto; max-height: 80%; padding: 1 2;
+                 border: round $primary; background: $surface; }
+    #rules { height: auto; max-height: 20; border: none; }
+    #rules-help { color: $text-muted; padding-top: 1; }
+    """
+    BINDINGS = [Binding("escape,f6", "dismiss", "Close")]
+
+    def __init__(self, engine):
+        super().__init__()
+        self.engine = engine
+
+    def compose(self) -> ComposeResult:
+        cfg = self.engine.config
+        with Vertical(id="rules-box"):
+            yield Label("[b]Wanted rules[/b] for this session")
+            yield SelectionList(*[(f"{rule_label(w)}  [dim]{w.rule}[/dim]"
+                                   if rule_label(w) != w.rule.upper() else rule_label(w),
+                                   w.name, w.name not in cfg.rules_off)
+                                  for w in cfg.wanted], id="rules")
+            yield Label("Space or Enter switches a rule.  F7 scope, F8 show.\n"
+                        "Esc or F6 closes.  The config file isn't changed.", id="rules-help")
+
+    def on_selection_list_selection_toggled(self, event: SelectionList.SelectionToggled) -> None:
+        name = event.selection.value
+        self.engine.set_rule_enabled(name, name in event.selection_list.selected)
+        self.app.rules_changed()
+
+
 class JtconApp(App):
     """The Textual screen.  JtconTextual runs it together with the Engine."""
 
@@ -144,7 +179,15 @@ class JtconApp(App):
         Binding("f5", "layout('stacked')", "Stacked", priority=True),
         Binding("ctrl+right,ctrl+down", "step_layout(1)", show=False, priority=True),
         Binding("ctrl+left,ctrl+up", "step_layout(-1)", show=False, priority=True),
+        Binding("f6", "rules", "Rules", priority=True),
+        Binding("f7", "toggle_scope", "Scope", priority=True),
+        Binding("f8", "toggle_show", "Show", priority=True),
     ]
+
+    # Keys the main screen takes even while typing; with the rules panel open
+    # they go to the panel instead.
+    _MAIN_SCREEN_ACTIONS = {"arrow", "sort", "page_decodes", "decodes_to_live", "layout",
+                            "step_layout", "rules"}
 
     def __init__(self, engine: Engine, start_engine: bool = True):
         super().__init__()
@@ -160,6 +203,8 @@ class JtconApp(App):
         self._table_dirty = True
         self._table_shown = 0.0         # monotonic time of the last rebuild
         self.layout = ""                # set on mount
+        # As configured, to show on the status line when changed for the session.
+        self.configured = (engine.config.scope.decodes, engine.config.display.show)
         self.engine_task: asyncio.Future | None = None
 
     # ── Layout ────────────────────────────────────────────────────────────────
@@ -246,6 +291,9 @@ class JtconApp(App):
             line.append(f" {eng.dial_freq / 1e6:.3f} MHz {band}", style="bold")
         if not self.decodes.is_vertical_scroll_end:
             line.append(" SCROLL ", style="black on yellow")
+        changes = self.session_changes()
+        if changes:
+            line.append(f" {changes} ", style="black on cyan")
         line.append(status_text(eng))
         self.status.update(line)
         # The header depends on the logbook, which loads after startup.
@@ -300,6 +348,40 @@ class JtconApp(App):
 
     def action_decodes_to_live(self) -> None:
         self.decodes.scroll_end(animate=False)
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in self._MAIN_SCREEN_ACTIONS and isinstance(self.screen, ModalScreen):
+            return False
+        return True
+
+    def action_rules(self) -> None:
+        self.push_screen(RulesScreen(self.engine))
+
+    def rules_changed(self) -> None:
+        """A rule was switched: the status columns and rows follow."""
+        self._show_header()
+        self._show_table(force=True)
+
+    def action_toggle_scope(self) -> None:
+        cfg = self.config
+        self.engine.set_scope("cq" if cfg.scope.decodes == "all" else "all")
+        self._show_table(force=True)
+
+    def action_toggle_show(self) -> None:
+        cfg = self.config
+        self.engine.set_show("cq" if cfg.display.show == "all" else "all")
+
+    def session_changes(self) -> str:
+        """What differs from the config file for this session, for the status line."""
+        cfg, out = self.config, []
+        if cfg.scope.decodes != self.configured[0]:
+            out.append(f"scope:{cfg.scope.decodes}")
+        if cfg.display.show != self.configured[1]:
+            out.append(f"show:{cfg.display.show}")
+        if cfg.rules_off:
+            out.append("off:" + ",".join(rule_label(w) for w in cfg.wanted
+                                         if w.name in cfg.rules_off))
+        return " ".join(out)
 
     def action_quit_jtcon(self) -> None:
         self.exit()

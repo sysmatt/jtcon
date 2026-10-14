@@ -621,7 +621,7 @@ class Engine:
     def context(self) -> DecodeContext:
         return DecodeContext(
             config=self.config, cty=self.cty, logbook=self.logbook, calls=self.calls,
-            rules=self.rules, json_fh=self.json_fh, hamdat=self.hamdat, alerted=self.alerted, dial_freq=self.dial_freq,
+            rules=self.active_rules, json_fh=self.json_fh, hamdat=self.hamdat, alerted=self.alerted, dial_freq=self.dial_freq,
             de_call=self.de_call, log=self.log, ignored=self.ignored,
         )
 
@@ -656,6 +656,37 @@ class Engine:
             self.highlights.set(station.callsign, station.decode.id, station.addr)
         else:
             self.highlights.clear(station.callsign)
+
+    @property
+    def active_rules(self) -> list:
+        """The rules in use: all but those switched off for this session."""
+        off = self.config.rules_off
+        return [r for r in self.rules if r.name not in off] if off else self.rules
+
+    def set_rule_enabled(self, name: str, on: bool) -> None:
+        """Switch a [[wanted]] rule on or off for this session, and judge the
+        buffered stations again.  The config file isn't changed."""
+        off = self.config.rules_off
+        if (name in off) != on:
+            return
+        (off.discard if on else off.add)(name)
+        self.log(f"[rules] {name} {'on' if on else 'off'}")
+        self.refresh_stations()
+
+    def set_scope(self, decodes: str) -> None:
+        """Check "cq" decodes only, or "all", for this session."""
+        if decodes != self.config.scope.decodes:
+            self.config.scope.decodes = decodes
+            self.log("[scope] Checking all decodes" if decodes == "all"
+                     else "[scope] Checking CQs only")
+            self.refresh_stations()
+
+    def set_show(self, show: str) -> None:
+        """Show "cq" decodes and wanted stations, or "all" decodes, for this session."""
+        if show != self.config.display.show:
+            self.config.display.show = show
+            self.log("[show] Showing every decode" if show == "all"
+                     else "[show] Showing CQs and wanted stations")
 
     def refresh_stations(self) -> None:
         """Judge every buffered station again from its newest decode, after the

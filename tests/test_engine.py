@@ -75,6 +75,39 @@ def test_buffered_stations_keep_their_qso_stage(make_engine, monkeypatch):
     assert st.stage == "73"
 
 
+def test_rules_scope_and_show_switch_for_the_session(make_engine):
+    e = make_engine()                                   # dxcc, cqz, country
+    e.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    st = e.stations.find("VK3XY")
+    assert [h.rule for h in st.wanted] == ["DXCC", "CQZ", "CTRY"]
+    e.set_rule_enabled("dxcc", False)
+    assert [h.rule for h in st.wanted] == ["CQZ", "CTRY"]      # judged again at once
+    assert logs(e)[-1] == "[rules] dxcc off"
+    assert [w.name for w in e.config.active_wanted] == ["cqz", "country"]
+    assert [w.name for w in e.config.wanted] == ["dxcc", "cqz", "country"]   # config intact
+    e.set_rule_enabled("cqz", False)
+    e.set_rule_enabled("country", False)
+    assert st.wanted == []
+    e.set_rule_enabled("dxcc", True)
+    assert [h.rule for h in st.wanted] == ["DXCC"] and logs(e)[-1] == "[rules] dxcc on"
+    n = len(logs(e))
+    e.set_rule_enabled("dxcc", True)                    # already on: nothing happens
+    assert len(logs(e)) == n
+    assert "rules_off" not in e.config.as_dict()
+
+    e.datagram_received(pk.decode("W1ABC ZL1AA -12"), ADDR)   # not a CQ: not checked
+    assert e.stations.find("ZL1AA") is None
+    e.set_scope("all")
+    assert logs(e)[-1] == "[scope] Checking all decodes" and e.config.evaluate_all
+    e.datagram_received(pk.decode("W1ABC ZL1AA -12"), ADDR)
+    assert e.stations.find("ZL1AA") is not None
+    e.set_show("all")
+    assert logs(e)[-1] == "[show] Showing every decode" and e.config.show_all
+    e.set_scope("cq")
+    e.set_show("cq")
+    assert logs(e)[-2:] == ["[scope] Checking CQs only", "[show] Showing CQs and wanted stations"]
+
+
 def test_hidden_decodes_still_count_in_the_cycle_stats(make_engine):
     e = make_engine()
     e.datagram_received(pk.decode("W1ABC VK3XY -12"), ADDR)    # not shown
