@@ -137,3 +137,25 @@ def test_labels_and_text():
     assert h.as_dict() == {"rule": "WAS-QRZ", "detail": "MA", "status": "worked"}
     assert Hit("POTA").text() == "POTA" and Hit("POTA").mark() == "POTA"
     assert not Hit("DXCC", "K", CONFIRMED).fires
+
+
+def test_newly_confirmed_items():
+    old = Logbook([qso(state="TX", band="20m", dxcc="K", country="UNITED STATES",
+                       confirmations={"lotw"})])
+    new = Logbook([*old.qsos,
+                   qso("VK3XY", dxcc="VK", country="AUSTRALIA", confirmations={"lotw"}),
+                   qso("DL1AB", dxcc="DL", country="FED. REP. OF GERMANY",
+                       log_country="GERMANY", confirmations={"lotw"}),
+                   qso("W5XX", state="TX", band="40m", confirmations={"lotw"}),
+                   qso("JA1ZZ", dxcc="JA", confirmations=())])        # worked only
+    out = {}
+    for s in (spec("dxcc"), spec("country"), spec("5bwas"), spec("grid", confirm=[])):
+        rule, = build_rules([s])
+        rule.rebuild(old)
+        before = rule.confirmed
+        rule.rebuild(new)
+        out[s.rule] = rule.newly_confirmed(before, new)
+    assert out == {"dxcc": ["DL", "VK"],
+                   "country": ["AUSTRALIA", "FED. REP. OF GERMANY"],   # not GERMANY too
+                   "5bwas": ["TX/40m"],
+                   "grid": []}                     # worked is enough: never "confirmed"

@@ -186,6 +186,21 @@ Change the number of days with `suppress_worked_within_days` under `[filters]`:
 In the TUI, `ignore 07` or `ignore W1ABC` adds one for the session, and `unignore`
 takes it off.
 
+## New confirmations
+
+When a log reloads (your WSJT-X log, another ADIF file, or a QRZ refresh) and it
+brings a confirmation that completes something for one of your award rules, jtcon
+says so:
+
+```
+[wanted] ✅ Now confirmed: DXCC VK, ZL · WAS TX · 5BWAS TX/20m
+```
+
+Only items that just turned ✅ are listed, for the rules you have on, each counted
+by that rule's own `confirm` list.  Rules with `confirm = []` don't take part,
+since for them worked is already enough.  A long list is cut short after 20
+items.
+
 ## Alerts
 
 The bell, script and ntfy alerts fire once when a station becomes wanted.  They

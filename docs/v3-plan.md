@@ -627,6 +627,11 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
       every refresh re-saved unchanged records (now compared by field values)
 
 ### Phase 8: docs and release
+- [x] Confirmation reporting (Matt, after the release): the QRZ refresh line counts
+      new confirmations by source (`4 newly confirmed (3 LoTW, 1 QRZ)`) and lists them
+      (`[qrz] Confirmed: VK3XY 20m (LoTW), …`, up to 20), and a reload
+      that completes award items says `[wanted] ✅ Now confirmed: DXCC VK · WAS TX`
+      (each rule's confirm sources; not at startup; not for `confirm = []`)
 - [x] `--edit-config` (Matt): opens the config in `$VISUAL`/`$EDITOR` (shell-split, so
       `code -w` works), writing the starter file first if missing, then checks it
       (`config OK`, or the error and the command to fix it).  With `--profile`, a

@@ -58,6 +58,24 @@ class _Protocol(asyncio.DatagramProtocol):
         self.engine.connection_lost(exc)
 
 
+NOW_CONFIRMED_MAX = 20    # award items listed on one "Now confirmed" line
+
+
+def _now_confirmed(gained: list) -> str:
+    """"[wanted] Now confirmed: DXCC VK, ZL · WAS TX" for [(label, [items])],
+    cut short after NOW_CONFIRMED_MAX items."""
+    parts, shown = [], 0
+    total = sum(len(items) for _, items in gained)
+    for label, items in gained:
+        room = NOW_CONFIRMED_MAX - shown
+        if room <= 0:
+            break
+        parts.append(f"{label} {', '.join(items[:room])}")
+        shown += min(len(items), room)
+    more = f" … and {total - shown} more" if total > shown else ""
+    return f"[wanted] ✅ Now confirmed: {' · '.join(parts)}{more}"
+
+
 class Highlights:
     """Callsigns we have coloured in WSJT-X, so they can be cleared again."""
 
@@ -421,13 +439,20 @@ class Engine:
     def _apply_reload(self, inp, value) -> None:
         if inp is self.adif_input:
             self.logbook, self.calls, rebuilt = value
+            gained = []
             for rule, new in zip(self.rules, rebuilt):
                 if isinstance(rule, AwardRule):
+                    before = rule.confirmed
                     rule.worked, rule.confirmed = new.worked, new.confirmed
+                    keys = rule.newly_confirmed(before, self.logbook)
+                    if keys:
+                        gained.append((rule.label, keys))
             unsaved = (f", plus {self.logbook.unsaved} logged but not in the files yet"
                        if self.logbook.unsaved else "")
             self.log(f"[adif] Reloaded {self._qso_count()} from {len(inp.paths)} file(s)"
                      f"{unsaved}.")
+            if gained:
+                self.log(_now_confirmed(gained))
             if inp.files_changed:          # not for a QRZ refresh
                 self._run_log_reload_script(inp.files)
         elif isinstance(inp, StatesInput):

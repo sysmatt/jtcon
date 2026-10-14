@@ -48,6 +48,19 @@ class AwardRule(WantedRule):
     def add(self, qso) -> None:
         self._index(qso, self.worked, self.confirmed)
 
+    def newly_confirmed(self, before: set, logbook) -> list:
+        """What is confirmed now but wasn't in *before*, as shown to the
+        operator ("VK", "TX/20m").  Nothing for a rule where worked is enough."""
+        if not self.confirm:
+            return []
+        return [self.key_text(k) for k in sorted(self._new_keys(before, logbook))]
+
+    def _new_keys(self, before: set, logbook) -> set:
+        return self.confirmed - before
+
+    def key_text(self, key) -> str:
+        return str(key)
+
     def status(self, key) -> str:
         return (CONFIRMED if key in self.confirmed else
                 WORKED if key in self.worked else NEW)
@@ -107,6 +120,11 @@ class CountryRule(AwardRule):
     def detail(self, key, spot):
         return spot.entity.get("entity") or key
 
+    def _new_keys(self, before, logbook):
+        # Only cty.dat's names: a log's own COUNTRY spelling is the same country.
+        names = {q.country for q in logbook.qsos}
+        return {k for k in self.confirmed - before if k in names}
+
 
 class WasRule(AwardRule):
     def spot_key(self, spot):
@@ -130,6 +148,9 @@ class FiveBandWasRule(AwardRule):
         return ()
 
     def detail(self, key, spot):
+        return f"{key[0]}/{key[1]}"
+
+    def key_text(self, key):
         return f"{key[0]}/{key[1]}"
 
     def value(self, key, spot):

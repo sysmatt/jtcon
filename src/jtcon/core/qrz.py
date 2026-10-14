@@ -307,8 +307,34 @@ class QrzStore:
 #  Sync: refreshes and uploads (worker threads)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _confirmed(fields: dict | None) -> bool:
-    return bool(fields) and fields.get("app_qrzlog_status", "").upper() == "C"
+# Confirmation sources a QRZ record can carry: (name shown, ADIF field, value).
+_CONFIRMATIONS = (("LoTW", "lotw_qsl_rcvd", "Y"), ("QRZ", "app_qrzlog_status", "C"),
+                  ("eQSL", "eqsl_qsl_rcvd", "Y"), ("card", "qsl_rcvd", "Y"))
+
+
+def _confirmed_by(fields: dict | None) -> set:
+    """The sources that confirm this record: {"LoTW", "QRZ", ...}."""
+    if not fields:
+        return set()
+    return {name for name, field, value in _CONFIRMATIONS
+            if fields.get(field, "").upper() == value}
+
+
+CONFIRMED_CALLS_MAX = 20    # QSOs listed on one "[qrz] Confirmed:" line
+
+
+def _confirmed_calls(items: list) -> str:
+    """"[qrz] Confirmed: VK3XY 20m (LoTW), ..." for [(fields, sources gained)],
+    cut short after CONFIRMED_CALLS_MAX."""
+    order = [name for name, _, _ in _CONFIRMATIONS]
+    shown = []
+    for fields, gained in items[:CONFIRMED_CALLS_MAX]:
+        call = fields.get("call", "?").upper()
+        band = fields.get("band", "").lower()
+        how = ", ".join(n for n in order if n in gained)
+        shown.append(f"{call}{' ' + band if band else ''} ({how})")
+    more = len(items) - len(shown)
+    return "[qrz] Confirmed: " + ", ".join(shown) + (f" … and {more} more" if more else "")
 
 
 class QrzSync:
@@ -376,13 +402,19 @@ class QrzSync:
                 self.log("[qrz] No changes.")
             return
         new = sum(1 for old, _ in changed if old is None)
-        confirmed = sum(1 for old, f in changed if _confirmed(f) and not _confirmed(old))
+        gained = [_confirmed_by(f) - _confirmed_by(old) for old, f in changed]
         parts = [f"{new} new"] if new else []
         if len(changed) > new:
             parts.append(f"{len(changed) - new} changed")
+        confirmed = sum(1 for g in gained if g)
         if confirmed:
-            parts.append(f"{confirmed} newly confirmed")
+            by = [f"{n} {name}" if len({s for g in gained for s in g}) > 1 else name
+                  for name, _, _ in _CONFIRMATIONS
+                  for n in [sum(1 for g in gained if name in g)] if n]
+            parts.append(f"{confirmed} newly confirmed ({', '.join(by)})")
         self.log(f"[qrz] Updates: {', '.join(parts)}")
+        if confirmed:
+            self.log(_confirmed_calls([(f, g) for (_, f), g in zip(changed, gained) if g]))
 
     def describe(self) -> str:
         """Which saved set is in use, and how old it is."""

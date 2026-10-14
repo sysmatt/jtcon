@@ -59,8 +59,14 @@ tick for each batch:
 After that:
 
 - **Every 15 minutes** (`refresh_minutes`), jtcon fetches only what changed and says
-  what it found: `[qrz] Updates: 1 new, 2 changed, 1 newly confirmed`.  When
-  nothing changed it says nothing.
+  what it found, including which kind of confirmation came in and for which QSOs:
+
+  ```
+  [qrz] Updates: 1 new, 5 changed, 4 newly confirmed (3 LoTW, 1 QRZ)
+  [qrz] Confirmed: VK3XY 20m (LoTW), JA1ZZ 40m (LoTW, QRZ), W5XX 20m (LoTW), DL1AB 15m (QRZ)
+  ```
+
+  The list stops after 20 QSOs.  When nothing changed it says nothing.
 - **Once a day**, on the first refresh after midnight UTC, it downloads the whole
   logbook again.  That also catches QSOs you deleted on QRZ.
 - **`sync`** at the `CMD>` prompt fetches changes now; `sync full` downloads the
@@ -93,7 +99,14 @@ You don't need to download from LoTW yourself.
 2. Then run the **LoTW import**, which brings LoTW's confirmations into your QRZ
    logbook.  These are two separate steps on QRZ.
 3. Then let jtcon fetch them: wait for its next refresh (up to 15 minutes), or type
-   `sync`.  The refresh reports the QSOs that changed: `[qrz] Updates: 12 changed`.
+   `sync`.  jtcon reports what came in, and what it means for your awards:
+
+   ```
+   [qrz] Updates: 12 changed, 5 newly confirmed (LoTW)
+   [qrz] Confirmed: VK3XY 20m (LoTW), W5XX 20m (LoTW), W5XX 40m (LoTW), K1AB 40m (LoTW), N2CD 20m (LoTW)
+   [adif] Reloaded 3300 QSOs (1684 duplicates merged) from 4 file(s).
+   [wanted] ✅ Now confirmed: DXCC VK · WAS TX · 5BWAS TX/20m
+   ```
 
 QRZ only gets LoTW confirmations when you run the import, so jtcon's LoTW
 confirmations are as fresh as your last import on QRZ.

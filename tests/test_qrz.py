@@ -258,7 +258,8 @@ def test_sync_full_once_a_day_then_incremental(fake, client, tmp_path):
     fake.qsos[a]["app_qrzlog_status"] = "C"
     fake.modified = {a, fake.add("K3CC")}
     sync.refresh()
-    assert log[-1] == "[qrz] Updates: 1 new, 1 changed, 1 newly confirmed"
+    assert log[-2] == "[qrz] Updates: 1 new, 1 changed, 1 newly confirmed (QRZ)"
+    assert log[-1] == "[qrz] Confirmed: K1AA 20m (QRZ)"
     assert fake.requests[-1][0]["OPTION"].endswith("MODSINCE:2026-10-13")
     n = len(log)
     sync.refresh()                                       # same answer again: quiet
@@ -280,6 +281,27 @@ def test_sync_full_download_shows_a_tick_per_page(fake, client, tmp_path, monkey
     assert progress == [head + "…", head + "✓", head + "✓✓", head + "✓✓✓",
                         head + "✓✓✓ done"]
     assert log == ["[qrz] Full download: 7 QSOs saved to qrz-2026-10-14.adif (keeping 5)"]
+
+
+def test_sync_counts_new_confirmations_by_source(fake, client, tmp_path):
+    log = Log()
+    sync = QrzSync(client, QrzStore(tmp_path), log, today=lambda: DAY)
+    ids = [fake.add(c) for c in ("K1AA", "K2BB", "K3CC", "K4DD")]
+    sync.refresh()
+    fake.qsos[ids[0]]["lotw_qsl_rcvd"] = "Y"                    # LoTW import on QRZ
+    fake.qsos[ids[1]].update(lotw_qsl_rcvd="Y", app_qrzlog_status="C")
+    fake.qsos[ids[2]]["app_qrzlog_status"] = "C"
+    fake.qsos[ids[3]]["comment"] = "edited"
+    fake.modified = set(ids)
+    sync.refresh()
+    assert log[-2:] == ["[qrz] Updates: 4 changed, 3 newly confirmed (2 LoTW, 2 QRZ)",
+                        "[qrz] Confirmed: K1AA 20m (LoTW), K2BB 20m (LoTW, QRZ), K3CC 20m (QRZ)"]
+    fake.qsos[ids[3]]["lotw_qsl_rcvd"] = "Y"
+    sync.refresh()
+    assert log[-2:] == ["[qrz] Updates: 1 changed, 1 newly confirmed (LoTW)",
+                        "[qrz] Confirmed: K4DD 20m (LoTW)"]
+    many = [({"call": f"k{i}aa"}, {"QRZ"}) for i in range(23)]
+    assert qrz._confirmed_calls(many).endswith("K19AA (QRZ) … and 3 more")
 
 
 def test_sync_reports_failures_and_keeps_the_saved_set(fake, client, tmp_path):
@@ -440,8 +462,9 @@ def test_engine_loads_the_saved_set_then_refreshes_into_the_logbook(fake, engine
     fake.add("VK3XY", "C")
     fake.add("ZL1AA", "C")
     asyncio.run(refresh(e))
-    assert logs(e)[-2].startswith("[qrz] Full download: 2 QSOs")
-    assert logs(e)[-1].startswith("[adif] Reloaded 2 QSOs from 1 file(s)")
+    assert logs(e)[-3].startswith("[qrz] Full download: 2 QSOs")
+    assert logs(e)[-2].startswith("[adif] Reloaded 2 QSOs from 1 file(s)")
+    assert logs(e)[-1] == "[wanted] ✅ Now confirmed: DXCC ZL"     # VK was already
     assert e.rules[0].confirmed == {"VK", "ZL"}
     assert {a for _, a in fake.requests} == {f"jtcon/{qrz.__version__}"}
     e.de_call = "K2TTA"
@@ -508,6 +531,26 @@ def test_engine_first_start_with_only_qrz_says_the_download_is_pending(engine):
     e = engine()
     assert e._load_inputs()
     assert "[adif] No QSOs yet: the QRZ logbook loads after its first download" in logs(e)
+
+
+def test_engine_reports_award_items_newly_confirmed(fake, engine, tmp_path):
+    import jtcon.core.engine as eng
+    store = QrzStore(tmp_path / "qrz")
+    day = qrz.utc_today()
+    store.write_full(day, [rec(1, "VK3XY", "N"), rec(2, "ZL1AA", "N"), rec(3, "JA1ZZ", "C")])
+    e = engine()                     # dxcc counted by QRZ confirmations
+    assert e._load_inputs()
+    assert not any("Now confirmed" in t for t in logs(e))         # not at startup
+    store.append_updates([rec(1, "VK3XY", "C"), rec(2, "ZL1AA", "C")])
+    e._apply_reload(e.adif_input, e._load_input(e.adif_input))
+    assert logs(e)[-1] == "[wanted] ✅ Now confirmed: DXCC VK, ZL"
+    n = len(logs(e))
+    e._apply_reload(e.adif_input, e._load_input(e.adif_input))    # nothing new: quiet
+    assert len(logs(e)) == n + 1 and logs(e)[-1].startswith("[adif] Reloaded")
+    assert eng._now_confirmed([("DXCC", ["A", "B", "C"]), ("WAS", ["TX", "MA"])]) == (
+        "[wanted] ✅ Now confirmed: DXCC A, B, C · WAS TX, MA")
+    many = [("GRID", [f"FN{i:02d}" for i in range(25)]), ("WAS", ["TX"])]
+    assert eng._now_confirmed(many).endswith("FN18, FN19 … and 6 more")
 
 
 def test_reload_script_runs_for_log_files_not_qrz_refreshes(engine, tmp_path, monkeypatch):
