@@ -210,6 +210,15 @@ def test_store_full_then_updates_latest_record_wins(tmp_path):
     assert updates.startswith("QRZ logbook updates") and updates.count("<eor>") == 2
 
 
+def test_store_same_fields_in_other_text_are_not_a_change(tmp_path):
+    # QRZ can send an unchanged record with its fields in another order.
+    store = QrzStore(tmp_path)
+    store.write_full(DAY, [rec(1)])
+    shuffled = "<APP_QRZLOG_LOGID:1>1 <APP_QRZLOG_STATUS:1>N\n<CALL:4>K1AA <EOR>"
+    assert store.append_updates([shuffled]) == []
+    assert not store.updates_path(DAY).exists()
+
+
 def test_store_skips_a_record_cut_short(tmp_path):
     store = QrzStore(tmp_path)
     store.write_full(DAY, [rec(1)])

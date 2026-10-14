@@ -179,10 +179,6 @@ class QrzClient:
 _FULL_RE = re.compile(r"^qrz-(\d{4}-\d{2}-\d{2})\.adif$")
 
 
-def _same(a: str, b: str) -> bool:
-    return a.split() == b.split()
-
-
 def _header(kind: str, when: datetime) -> str:
     stamp = when.strftime("%Y%m%d %H%M%S")
     return (f"QRZ logbook {kind}, saved by jtcon {__version__} at"
@@ -266,7 +262,8 @@ class QrzStore:
         return path
 
     def append_updates(self, records: list) -> list:
-        """Append the records that are new or differ from the newest set's copy.
+        """Append the records that are new or whose field values differ from the
+        newest set's copy (QRZ may send the same record with different text).
         Returns (old fields or None, new fields) for each appended record."""
         day = self.current()
         if day is None:
@@ -277,7 +274,7 @@ class QrzStore:
             fields = next((f for f, _ in iter_records(raw)), {})
             key = fields.get(_LOGID)
             old = have.get(key) if key else None
-            if old is not None and _same(old[1], raw):
+            if old is not None and old[0] == fields:
                 continue
             changed.append((old[0] if old else None, fields))
             texts.append(raw.strip() + "\n")
