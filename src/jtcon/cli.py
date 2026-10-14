@@ -26,7 +26,7 @@ examples:
   jtcon --show-config --wanted was    see what a run would use, without running
 
 lists in the config file (TOML):
-  adif   = ["~/ham/qrzlog.adif", "/data/old.adi"]
+  adif   = ["~/ham/old.adi", "/data/contest.adi"]
   states = ["AK", "DE"]
   proxy  = [2238, 2239]
 

@@ -627,9 +627,9 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
       every refresh re-saved unchanged records (now compared by field values)
 
 ### Phase 8: docs and release
-- [ ] README rewritten for v3: concepts, config reference, rule reference, migration
-      notes from v2 flags.  Matt: the QRZ part as "Online logbooks", QRZ the first
-      supported, more may follow
+- [x] README rewritten for v3, short, with the references in `docs/`:
+      `configuration.md`, `wanted-rules.md`, `online-logbooks.md` (Matt: generic,
+      QRZ the first supported, more may follow), `migrating-from-v2.md`
 - [ ] Merge `v3` into `main`, tag `v3.0.0`
 
 ### Phase 9: front ends (separate plans)

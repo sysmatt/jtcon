@@ -704,7 +704,7 @@ CONFIG_TEMPLATE = """\
 
 [inputs]
 # The WSJT-X log is found automatically; list any other ADIF files here.
-# adif   = ["~/ham/qrzlog.adif"]
+# adif   = ["~/ham/old.adi"]
 # hamdat = "~/.hamdat/hamdat.db"   # FCC database for US states
 # cty    = "~/.jtcon_cty.dat"      # refreshed automatically when older than 30 days
 
