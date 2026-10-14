@@ -572,7 +572,7 @@ rule; add ituz and grid now; watchlist hits stay hidden for recently worked call
       regenerated and reviewed, with v3 sections (WAS by LoTW and QRZ, 5BWAS, ituz,
       grid, mixed confirm).  Mutation checks: v2-style suppression fails 2 tests,
       LoTW-only confirmation fails 5
-- [ ] **Checkpoint: Matt's live test**: the new display; `confirm = ["lotw",
+- [x] **Checkpoint: Matt's live test**: the new display; `confirm = ["lotw",
       "qrz"]` with the QRZ download; a station worked on one band still wanted for
       5BWAS on another
 
@@ -635,7 +635,7 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
 - [x] README rewritten for v3, short, with the references in `docs/`:
       `configuration.md`, `wanted-rules.md`, `online-logbooks.md` (Matt: generic,
       QRZ the first supported, more may follow), `migrating-from-v2.md`
-- [ ] Merge `v3` into `main`, tag `v3.0.0`
+- [x] Merge `v3` into `main`, tag `v3.0.0` (released 2026-10-14)
 
 ### Phase 9: front ends (separate plans)
 - [ ] TUI on Textual: stations table plus live log, select-and-Enter to reply, rule
@@ -673,35 +673,32 @@ deliberately in phase 5 (Q1–Q5), with the tests updated as part of each fix.
 | D5 | Keep the JSON log (`--save`) | Yes, as an action |
 | D6 | Station memory across sessions (SQLite of when/where stations were heard) | Later |
 
-## Git workflow for this branch
+## Git workflow
 
-All work happens on `v3`; `main` stays as the released v2.
+v3.0.0 is released.  Development happens on `dev`; `main` holds what's published,
+and pipx installs from `main`.  (`v3` was merged and deleted.)
 
 ```bash
-git switch v3                 # make sure you're on the branch
+git switch dev                # make sure you're on dev
 git status                    # see what changed
 git add -A && git commit      # commit as usual
-git push                      # goes to origin/v3 (tracking set by "push -u")
+git push                      # goes to origin/dev
 ```
 
-Bringing a fix from `main` into `v3`:
+Trying dev with pipx:
 
 ```bash
-git switch v3
-git merge main
+pipx install --force "git+https://github.com/sysmatt/jtcon@dev"
 ```
 
-Trying the branch with pipx:
-
-```bash
-pipx install --force "git+https://github.com/sysmatt/jtcon@v3"
-```
-
-Releasing (phase 8):
+Publishing (a fast-forward, as long as nothing is committed to `main` directly):
 
 ```bash
 git switch main
-git merge v3
-git tag v3.0.0
-git push && git push --tags
+git pull
+git merge dev
+git tag -a v3.1.0 -m "jtcon 3.1.0"     # only for a named release
+git push
+git push origin v3.1.0
+git switch dev
 ```
