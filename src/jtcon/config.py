@@ -384,6 +384,29 @@ def profile_path(profile: str, config_file: Path) -> Path:
     return config_file.parent / PROFILES_DIR / f"{profile}.toml"
 
 
+_API_KEY_LINE_RE = re.compile(r"^([ \t]*)api_key[ \t]*=.*$", re.MULTILINE)
+
+
+def profile_from_config(text: str, name: str, source: str, day: str) -> str:
+    """A new profile's text: *text* (the main config file) under a header
+    explaining profiles, with any api_key line commented out."""
+    header = (
+        f'# Profile "{name}": copied from {source} on {day}.\n'
+        f"# Use it with:  jtcon --profile {name}\n"
+        "#\n"
+        f"# A profile is layered on top of {source}.  Keep only what you want to be\n"
+        "# different, and delete the rest: anything left here overrides\n"
+        f"# {source}, even after you change {source} later.  Any [[wanted]]\n"
+        f"# entries here replace {source}'s whole list; delete them all to keep\n"
+        f"# {source}'s rules.  Relative paths here are relative to this file's folder.\n"
+        "# Check it with:  jtcon --show-config --profile " + name + "\n"
+        "\n"
+    )
+    body = _API_KEY_LINE_RE.sub(
+        lambda m: f"{m.group(1)}# api_key: set in {source}, not copied here", text)
+    return header + body
+
+
 def load_config(config_file: str | Path | None = None, profile: str | None = None,
                 overrides: dict | None = None, wanted: str | None = None,
                 config_dir: Path | None = None, ignore: list | None = None) -> Config:

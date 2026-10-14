@@ -7,8 +7,15 @@ countries, counting LoTW confirmations.
 
 ```bash
 jtcon --init-config      # write a starter file, every setting explained (never overwrites)
+jtcon --edit-config      # open it in your editor, then check it
 jtcon --show-config      # print the settings jtcon will actually use
 ```
+
+`--edit-config` uses `$VISUAL`, or else `$EDITOR`; set one first, for example
+`export EDITOR=nano` in your `~/.bashrc`.  If there's no config file yet, it writes
+the starter file first.  When you close the editor, jtcon checks the file and
+says `config OK` or what's wrong.  Files jtcon creates are readable by you alone,
+as they may hold your QRZ API key.
 
 The file is [TOML](https://toml.io/).  A mistake (a misspelt setting, a word where a
 number belongs) stops jtcon with a message naming the file and the setting.
@@ -28,6 +35,18 @@ operating: chasing DX, hunting parks, a contest.  Put it in `profiles/` next to
 jtcon --profile parks            # ~/.config/jtcon/profiles/parks.toml
 jtcon --profile ~/elsewhere.toml # a path works too
 ```
+
+The easiest way to make one:
+
+```bash
+jtcon --edit-config --profile parks
+```
+
+If `profiles/parks.toml` doesn't exist yet, this starts it as a copy of
+`config.toml`, with a note at the top, and opens it.  Delete everything you don't
+want to change: whatever stays in the profile overrides `config.toml`, even after
+you change `config.toml` later.  Your QRZ API key isn't copied; the profile uses the
+one in `config.toml`.
 
 A profile only needs the settings it changes.  Tables merge setting by setting, so
 `[display] show_time = true` in a profile leaves your other display settings
@@ -169,6 +188,7 @@ Options override the config file for one run.
 | `--profile NAME` | Layer `profiles/NAME.toml` on top; a path to a `.toml` file works too |
 | `--show-config` | Print the settings jtcon will use, and exit.  The QRZ API key shows as `****` plus its last four characters |
 | `--init-config` | Write a starter config file, and exit |
+| `--edit-config` | Open the config file in `$VISUAL` or `$EDITOR`, then check it.  With `--profile`, open the profile instead, starting a new one as a copy of the config file |
 | `--list-rules` | List the wanted rules and their settings, and exit |
 | `--wanted RULES` | Use these rules (or `[[wanted]]` names) instead of the configured ones: `dxcc,was,pota`.  `RULE:VALUE` gives a rule its files, states or confirmations: `callsigns:a.txt+b.txt`, `states:AK+DE`, `dxcc:lotw+qrz`, `grid:worked`.  `none` for no rules |
 | `--scope cq\|all` | Check CQs only, or every decode |

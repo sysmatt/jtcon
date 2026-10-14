@@ -1,13 +1,18 @@
 """Command line: argument parsing and startup."""
 
 import argparse
+import os
+import shlex
 import socket
+import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 from jtcon import __version__
 from jtcon.config import (CONFIG_FILE, CONFIG_TEMPLATE, RULES, ConfigError,
-                          default_config_dir, list_rules, load_config, show_config)
+                          default_config_dir, list_rules, load_config, profile_from_config,
+                          profile_path, show_config)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -24,6 +29,8 @@ examples:
   jtcon --wanted was,states:AK+DE     several values joined with +
   jtcon --profile parks --scope all   profiles/parks.toml, checking every decode
   jtcon --show-config --wanted was    see what a run would use, without running
+  jtcon --edit-config --profile parks edit profiles/parks.toml (made from the
+                                      config file if it doesn't exist yet)
 
 lists in the config file (TOML):
   adif   = ["~/ham/old.adi", "/data/contest.adi"]
@@ -55,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Print the effective configuration and exit")
     cfg.add_argument("--init-config", action="store_true",
                      help="Write a commented starter config file and exit")
+    cfg.add_argument("--edit-config", action="store_true",
+                     help="Open the config file in $VISUAL or $EDITOR, then check it; with "
+                          "--profile, the profile (a new one starts as a copy of the config)")
     cfg.add_argument("--list-rules", action="store_true",
                      help="List the wanted rules and their settings, and exit")
 
@@ -100,14 +110,81 @@ def cli_overrides(args: argparse.Namespace) -> dict:
     return layer
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Create *path* readable by its owner only: it may come to hold an API key."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _config_file(args: argparse.Namespace) -> Path:
+    return Path(args.config).expanduser() if args.config else default_config_dir() / CONFIG_FILE
+
+
 def _init_config(path: Path) -> int:
     if path.exists():
         print(f"jtcon: {path} already exists; not overwriting it", file=sys.stderr)
         return 1
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    _write_private(path, CONFIG_TEMPLATE)
     print(f"Wrote {path}")
     return 0
+
+
+def _editor() -> list:
+    """The user's editor command, from $VISUAL or $EDITOR ("code -w" works)."""
+    for var in ("VISUAL", "EDITOR"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return shlex.split(value)
+    return []
+
+
+def _edit_config(args: argparse.Namespace) -> int:
+    """Open the config file (or, with --profile, the profile) in the user's
+    editor, making it first if needed; then check the result."""
+    editor = _editor()
+    if not editor:
+        print("jtcon: set VISUAL or EDITOR to your editor first, e.g.  export EDITOR=nano",
+              file=sys.stderr)
+        return 1
+    main_file = _config_file(args)
+    if not main_file.exists():
+        _write_private(main_file, CONFIG_TEMPLATE)
+        print(f"Wrote a starter config: {main_file}")
+    target = main_file
+    if args.profile:
+        target = profile_path(args.profile, main_file)
+        if not target.exists():
+            _write_private(target, profile_from_config(
+                main_file.read_text(encoding="utf-8"), args.profile, main_file.name,
+                date.today().isoformat()))
+            print(f"Made profile {target} from {main_file.name}")
+    try:
+        status = subprocess.call([*editor, str(target)])
+    except OSError as exc:
+        print(f"jtcon: can't run the editor {editor[0]!r}: {exc}", file=sys.stderr)
+        return 1
+    if status != 0:
+        print(f"jtcon: the editor exited with status {status}", file=sys.stderr)
+    try:
+        load_config(args.config, args.profile)
+    except ConfigError as exc:
+        print(f"jtcon: config error: {exc}", file=sys.stderr)
+        print(f"Fix it with:  jtcon --edit-config{_edit_args(args)}", file=sys.stderr)
+        return 2
+    print(f"config OK: {target}")
+    return 0
+
+
+def _edit_args(args: argparse.Namespace) -> str:
+    """The --config/--profile options to repeat in a hint, quoted for the shell."""
+    out = ""
+    if args.config:
+        out += f" --config {shlex.quote(args.config)}"
+    if args.profile:
+        out += f" --profile {shlex.quote(args.profile)}"
+    return out
 
 
 def main(argv: list | None = None) -> None:
@@ -117,8 +194,9 @@ def main(argv: list | None = None) -> None:
         print(list_rules())
         sys.exit(0)
     if args.init_config:
-        path = Path(args.config).expanduser() if args.config else default_config_dir() / CONFIG_FILE
-        sys.exit(_init_config(path))
+        sys.exit(_init_config(_config_file(args)))
+    if args.edit_config:
+        sys.exit(_edit_config(args))
 
     try:
         cfg = load_config(args.config, args.profile, cli_overrides(args), args.wanted,

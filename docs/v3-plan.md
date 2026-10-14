@@ -627,6 +627,11 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
       every refresh re-saved unchanged records (now compared by field values)
 
 ### Phase 8: docs and release
+- [x] `--edit-config` (Matt): opens the config in `$VISUAL`/`$EDITOR` (shell-split, so
+      `code -w` works), writing the starter file first if missing, then checks it
+      (`config OK`, or the error and the command to fix it).  With `--profile`, a
+      missing profile starts as a copy of the config under a header explaining
+      profiles; its `api_key` line is commented out.  Files jtcon creates are 0600
 - [x] README rewritten for v3, short, with the references in `docs/`:
       `configuration.md`, `wanted-rules.md`, `online-logbooks.md` (Matt: generic,
       QRZ the first supported, more may follow), `migrating-from-v2.md`

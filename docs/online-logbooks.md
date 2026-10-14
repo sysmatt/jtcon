@@ -26,13 +26,16 @@ api_key = "XXXX-XXXX-XXXX-XXXX"
 upload = true                    # and send each QSO you log (off by default)
 ```
 
-The key gives full access to your QRZ logbook, so keep the config file private:
+The key gives full access to your QRZ logbook, so keep the config file private.
+Files jtcon creates (`--init-config`, `--edit-config`) are readable by you alone.
+For a file you made some other way:
 
 ```bash
 chmod 600 ~/.config/jtcon/config.toml
 ```
 
-jtcon warns at startup if other users can read the file holding the key.
+jtcon warns at startup if other users can read the file holding the key, and a
+new profile made with `--edit-config --profile` doesn't copy the key.
 `jtcon --show-config` shows the key as `****` plus its last four characters.
 
 Instead of the config file, the key can come from the `QRZ_API_KEY` environment

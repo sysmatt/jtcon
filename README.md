@@ -104,7 +104,8 @@ jtcon --init-config
 ```
 
 This writes `~/.config/jtcon/config.toml`, with every setting listed and
-explained.  Out of the box jtcon wants new DXCC entities, CQ zones and countries,
+explained.  `jtcon --edit-config` opens it in your editor (`$VISUAL` or
+`$EDITOR`) and checks it when you close the editor.  Out of the box jtcon wants new DXCC entities, CQ zones and countries,
 counting LoTW confirmations, and finds your WSJT-X log by itself.
 
 **2. Add your QRZ logbook** (optional, but recommended if you use QRZ).  Get your
@@ -121,11 +122,10 @@ api_key = "XXXX-XXXX-XXXX-XXXX"
 upload = true            # also send each QSO you log to QRZ
 ```
 
-The key gives full access to your logbook, so make the file private:
-
-```bash
-chmod 600 ~/.config/jtcon/config.toml
-```
+The key gives full access to your logbook, so the file must be private.  jtcon
+creates it readable by you alone; if you made it some other way, run
+`chmod 600 ~/.config/jtcon/config.toml`.  jtcon warns at startup if others can
+read it.
 
 If your QRZ logbook is linked to LoTW, this also brings in your LoTW
 confirmations (see [Online logbooks](docs/online-logbooks.md#lotw-confirmations-through-qrz)).

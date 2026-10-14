@@ -45,6 +45,8 @@ def _free_udp_port() -> int:
 def _env(home: Path, **extra) -> dict:
     env = dict(os.environ)
     env.pop("XDG_CONFIG_HOME", None)        # config comes from HOME/.config only
+    env.pop("VISUAL", None)                 # --edit-config: tests choose the editor
+    env.pop("EDITOR", None)
     env.update(HOME=str(home), TERM="xterm", COLUMNS=str(COLS), LINES=str(ROWS),
                PYTHONUSERBASE=site.getuserbase(),   # keep user-installed packages
                **extra)
@@ -330,9 +332,9 @@ def test_stale_cty_is_refreshed(launch, home):
     assert app.wait_exit() == 0
 
 
-def _run_cli(*args, home):
+def _run_cli(*args, home, **env):
     return subprocess.run([sys.executable, str(LAUNCHER), *args], capture_output=True,
-                          text=True, env=_env(home), timeout=30)
+                          text=True, env=_env(home, **env), timeout=30)
 
 
 def test_cli_version(home):
@@ -382,6 +384,58 @@ def test_cli_init_config_then_show_config(home):
     assert '[[wanted]]\nrule = "was"\nname = "was"\nconfirm = ["lotw"]' in r.stdout
     assert '[[wanted]]\nrule = "pota"\nname = "pota"' in r.stdout
     assert 'rule = "dxcc"' not in r.stdout
+
+
+# An "editor" that appends its first argument's text to the file it's given.
+_APPEND = "sh -c 'printf \"%s\" \"$0\" >> \"$1\"'"
+
+
+def test_cli_edit_config_needs_an_editor(home):
+    r = _run_cli("--edit-config", home=home)
+    assert r.returncode == 1
+    assert r.stderr == "jtcon: set VISUAL or EDITOR to your editor first, e.g.  export EDITOR=nano\n"
+    r = _run_cli("--edit-config", home=home, EDITOR="no-such-editor-xyz")
+    assert r.returncode == 1 and "can't run the editor 'no-such-editor-xyz'" in r.stderr
+
+
+def test_cli_edit_config_makes_a_starter_file_then_checks_it(home):
+    path = home / ".config" / "jtcon" / "config.toml"
+    r = _run_cli("--edit-config", home=home, EDITOR="true")
+    assert r.returncode == 0
+    assert r.stdout == f"Wrote a starter config: {path}\nconfig OK: {path}\n"
+    assert (path.stat().st_mode & 0o777) == 0o600
+    # VISUAL wins over EDITOR.
+    r = _run_cli("--edit-config", home=home, VISUAL="true", EDITOR="false")
+    assert r.returncode == 0 and r.stderr == ""          # "false" would have complained
+    r = _run_cli("--edit-config", home=home, EDITOR="false")
+    assert r.stderr == "jtcon: the editor exited with status 1\n"
+    r = _run_cli("--edit-config", home=home, EDITOR=f"{_APPEND} '\nbogus = 1\n'")
+    assert r.returncode == 2
+    assert "jtcon: config error:" in r.stderr and "bogus" in r.stderr
+    assert r.stderr.endswith("Fix it with:  jtcon --edit-config\n")
+
+
+def test_cli_edit_config_profile_starts_as_a_copy(home):
+    write_config(home, '[udp]\nport = 2240\n[inputs.qrz]\nenabled = true\n'
+                       '  api_key = "SECRET-KEY-1234"\n')
+    profile = home / ".config" / "jtcon" / "profiles" / "parks.toml"
+    r = _run_cli("--edit-config", "--profile", "parks", home=home, EDITOR="true")
+    assert r.returncode == 0
+    assert r.stdout == (f"Made profile {profile} from config.toml\nconfig OK: {profile}\n")
+    text = profile.read_text()
+    assert text.startswith('# Profile "parks": copied from config.toml on ')
+    assert "Keep only what you want to be\n# different, and delete the rest" in text
+    assert "SECRET-KEY" not in text
+    assert '  # api_key: set in config.toml, not copied here\n' in text
+    assert "port = 2240" in text
+    assert (profile.stat().st_mode & 0o777) == 0o600
+    r = _run_cli("--show-config", "--profile", "parks", home=home)
+    assert r.returncode == 0 and 'api_key = "****1234"' in r.stdout   # still from config.toml
+
+    # An existing profile is opened as it is, not copied again.
+    profile.write_text("[udp]\nport = 2241\n")
+    r = _run_cli("--edit-config", "--profile", "parks", home=home, EDITOR="true")
+    assert r.stdout == f"config OK: {profile}\n" and profile.read_text() == "[udp]\nport = 2241\n"
 
 
 def test_cli_profile(home):
