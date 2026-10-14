@@ -29,6 +29,7 @@ QRZ_API_URL   = "https://logbook.qrz.com/api"
 QRZ_DATA_DIR  = Path.home() / ".local" / "share" / "jtcon" / "qrz"
 QRZLOG_INI    = Path.home() / ".config" / "qrzlog" / "qrzlog.ini"
 PAGE_SIZE     = 250           # records per FETCH request, as QRZ suggests
+PENDING_FILE  = "pending-uploads.adif"   # uploads waiting for QRZ, in the data dir
 _LOGID        = "app_qrzlog_logid"
 _EOR_END_RE   = re.compile(r"<eor>\s*$", re.IGNORECASE)
 
@@ -118,14 +119,14 @@ class QrzClient:
         self.key, self.url, self.timeout = key, url or QRZ_API_URL, timeout
         self.agent = agent or (lambda: f"jtcon/{__version__}")
 
-    def _post(self, **params) -> dict:
+    def _post(self, timeout: float | None = None, **params) -> dict:
         data = urllib.parse.urlencode({"KEY": self.key, **params}).encode("utf-8")
         req = urllib.request.Request(self.url, data=data, method="POST", headers={
             "User-Agent": self.agent(),
             "Content-Type": "application/x-www-form-urlencoded",
         })
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             raise QrzNetworkError(f"HTTP {exc.code} {exc.reason}") from None
@@ -138,8 +139,9 @@ class QrzClient:
             raise QrzAuthError(res.get("REASON") or "API key not accepted")
         return res
 
-    def fetch(self, option: str = "") -> list:
-        """Every matching record's raw ADIF text, fetched PAGE_SIZE at a time."""
+    def fetch(self, option: str = "", on_page=None) -> list:
+        """Every matching record's raw ADIF text, fetched PAGE_SIZE at a time;
+        *on_page* is called after each page."""
         records, after = [], 0
         while True:
             opt = f"MAX:{PAGE_SIZE},AFTERLOGID:{after}" + (f",{option}" if option else "")
@@ -150,6 +152,8 @@ class QrzClient:
                 raise QrzError(res.get("REASON") or f"unexpected answer {res.get('RESULT')!r}")
             page = list(iter_records(res.get("ADIF", "")))
             records += [raw for _, raw in page]
+            if on_page:
+                on_page()
             ids = [int(f[_LOGID]) for f, _ in page if f.get(_LOGID, "").isdigit()]
             if len(page) < PAGE_SIZE or not ids:
                 break
@@ -159,9 +163,9 @@ class QrzClient:
     def fetch_changed(self, since: date) -> list:
         return self.fetch(f"MODSINCE:{since.isoformat()}")
 
-    def insert(self, record: str) -> tuple:
+    def insert(self, record: str, timeout: float | None = None) -> tuple:
         """("added", logid) or ("duplicate", ""); raises QrzError otherwise."""
-        res = self._post(ACTION="INSERT", ADIF=record)
+        res = self._post(timeout, ACTION="INSERT", ADIF=record)
         result, reason = res.get("RESULT"), res.get("REASON", "")
         if result in ("OK", "REPLACE"):
             if res.get("COUNT") == "0":
@@ -311,9 +315,15 @@ class QrzSync:
     """Keeps the store up to date and uploads logged QSOs.  Methods run in
     worker threads and report through *log*; only one refresh runs at a time."""
 
-    def __init__(self, client: QrzClient, store: QrzStore | None, log, today=utc_today):
+    def __init__(self, client: QrzClient, store: QrzStore | None, log, today=utc_today,
+                 progress=None, pending_path: Path | None = None):
+        """*progress*, if given, shows a full download's progress: each call
+        replaces the line from the call before.  Uploads that can't reach QRZ
+        are kept in *pending_path* until they go through, across restarts."""
         self.client, self.store, self.log, self.today = client, store, log, today
-        self.pending: list = []          # (call, record) uploads to retry
+        self.progress = progress
+        self.pending_path = pending_path
+        self.pending: list = self._load_pending()    # (call, record) uploads to retry
         self._lock = threading.Lock()
         self._pending_lock = threading.Lock()
 
@@ -343,8 +353,18 @@ class QrzSync:
             self._lock.release()
 
     def _full(self, day: date) -> None:
-        self.log("[qrz] Downloading the full logbook …")
-        records = self.client.fetch()
+        head, ticks = "[qrz] Downloading the full logbook ", ""
+        (self.progress or self.log)(head + "…")
+
+        def page():
+            nonlocal ticks
+            ticks += "✓"
+            if self.progress:
+                self.progress(head + ticks)
+
+        records = self.client.fetch(on_page=page)
+        if self.progress:
+            self.progress(head + ticks + " done")
         path = self.store.write_full(day, records)
         self.log(f"[qrz] Full download: {len(records)} QSOs saved to {path.name}"
                  f" (keeping {self.store.keep})")
@@ -378,27 +398,80 @@ class QrzSync:
     # ── Uploads ───────────────────────────────────────────────────────────────
 
     def upload(self, call: str, record: str) -> None:
+        """Upload one logged QSO; if QRZ can't be reached, keep it to retry."""
         try:
-            result, logid = self.client.insert(record)
+            self._send(call, record, None, self.log)
         except QrzNetworkError as exc:
             with self._pending_lock:
                 self.pending.append((call, record))
-            self.log(f"[qrz] Upload of {call} failed: {exc} — will retry at the next refresh")
-            return
+                self._save_pending()
+            self.log(f"[qrz] Upload of {call} failed: {exc} — saved, will retry at the next sync")
+
+    def retry_uploads(self, timeout: float | None = None, log=None) -> None:
+        """Retry the waiting uploads, oldest first, stopping at the first that
+        can't reach QRZ.  *log* replaces self.log (used at exit)."""
+        log = log or self.log
+        with self._pending_lock:
+            waiting = list(self.pending)
+        for i, (call, record) in enumerate(waiting):
+            try:
+                self._send(call, record, timeout, log)
+            except QrzNetworkError as exc:
+                left = len(waiting) - i
+                log(f"[qrz] Can't reach QRZ: {exc} — {left} upload{'s' * (left != 1)}"
+                    " still waiting")
+                return
+            with self._pending_lock:
+                if (call, record) in self.pending:    # a sync may run beside a tick
+                    self.pending.remove((call, record))
+                    self._save_pending()
+
+    def _send(self, call: str, record: str, timeout, log) -> None:
+        """Upload and report; raises QrzNetworkError if QRZ can't be reached."""
+        try:
+            result, logid = self.client.insert(record, timeout)
         except QrzAuthError as exc:
-            self.log(f"[qrz] Upload of {call} refused: {exc}"
-                     " (uploads need a QRZ logbook subscription and a valid key)")
+            log(f"[qrz] Upload of {call} refused: {exc}"
+                " (uploads need a QRZ logbook subscription and a valid key)")
             return
+        except QrzNetworkError:
+            raise
         except QrzError as exc:
-            self.log(f"[qrz] Upload of {call} failed: {exc}")
+            log(f"[qrz] Upload of {call} failed: {exc}")
             return
         if result == "added":
-            self.log(f"[qrz] ▲ {call} uploaded to QRZ" + (f" (logid {logid})" if logid else ""))
+            log(f"[qrz] ▲ {call} uploaded to QRZ" + (f" (logid {logid})" if logid else ""))
         else:
-            self.log(f"[qrz] {call} is already in QRZ (duplicate)")
+            log(f"[qrz] {call} is already in QRZ (duplicate)")
 
-    def retry_uploads(self) -> None:
-        with self._pending_lock:
-            pending, self.pending = self.pending, []
-        for call, record in pending:
-            self.upload(call, record)
+    def _load_pending(self) -> list:
+        try:
+            text = self.pending_path.read_text(encoding="utf-8") if self.pending_path else ""
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            self.log(f"[qrz] Can't read the waiting uploads in {self.pending_path}: {exc}")
+            return []
+        return [(f.get("call", "?").upper(), raw.strip()) for f, raw in iter_records(text)
+                if _EOR_END_RE.search(raw)]
+
+    def _save_pending(self) -> None:
+        """Rewrite the pending file from self.pending (hold _pending_lock)."""
+        path = self.pending_path
+        if path is None:
+            return
+        try:
+            if not self.pending:
+                path.unlink(missing_ok=True)
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".part")
+            text = _header("uploads waiting", datetime.now(timezone.utc))
+            text += "".join(record.strip() + "\n" for _, record in self.pending)
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            self.log(f"[qrz] Can't save the waiting uploads to {path}: {exc}")

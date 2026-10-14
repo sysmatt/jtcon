@@ -40,7 +40,7 @@ _COMMANDS = {
     "list":     "",
     "ignore":   "[NN|CALL]",
     "unignore": "CALL",
-    "qrz":      "[full]",
+    "sync":     "[full]",
 }
 
 
@@ -94,6 +94,8 @@ class JtconTUI:
         self._output_lock  = threading.Lock()
         self._pending: list = []
         self._lines:   list = []
+        self._last_key = None       # key of the last line queued (see LogLine)
+        self._replace_last = False  # the next flush replaces _lines[-1]
         # Top line of the decode pane while scrolled back from the command line;
         # None means the pane follows new output.
         self._scroll_top: int | None = None
@@ -315,6 +317,7 @@ class JtconTUI:
     def _cmd_clear(self, arg: str) -> None:
         with self._output_lock:
             self._pending.clear()
+            self._last_key, self._replace_last = None, False
         self._lines = []
         self._set_output(follow=True)
 
@@ -332,12 +335,13 @@ class JtconTUI:
         if self._is_call(arg, "ignore"):
             self.engine.ignore(arg)
 
-    def _cmd_qrz(self, arg: str) -> None:
-        """qrz: fetch what changed on QRZ now; qrz full: a fresh full download."""
+    def _cmd_sync(self, arg: str) -> None:
+        """sync: fetch what changed in the online logbook and retry waiting
+        uploads now; sync full: a fresh full download."""
         if arg.lower() not in ("", "full"):
-            self._append_line(f"[cmd] usage: qrz {_COMMANDS['qrz']}")
+            self._append_line(f"[cmd] usage: sync {_COMMANDS['sync']}")
             return
-        self.engine.qrz_refresh(full=bool(arg))
+        self.engine.sync(full=bool(arg))
 
     def _cmd_unignore(self, arg: str) -> None:
         if self._is_call(arg, "unignore"):
@@ -387,10 +391,17 @@ class JtconTUI:
 
     # ── Output append (thread-safe) ───────────────────────────────────────────
 
-    def _append_line(self, text: str) -> None:
-        """Queue *text* for the output pane.  Safe to call from any thread."""
+    def _append_line(self, text: str, key: str | None = None) -> None:
+        """Queue *text* for the output pane.  Safe to call from any thread.
+        A *key* matching the last line's replaces that line (see LogLine)."""
         with self._output_lock:
+            if key is not None and key == self._last_key:
+                if self._pending:
+                    self._pending.pop()
+                else:
+                    self._replace_last = True
             self._pending.extend(text.split("\n"))
+            self._last_key = key
         self._app.invalidate()
 
     def _flush_output(self, _app=None) -> None:
@@ -399,8 +410,11 @@ class JtconTUI:
             self._exit_app()
         with self._output_lock:
             new, self._pending = self._pending, []
+            replace, self._replace_last = self._replace_last, False
         if not new:
             return
+        if replace and self._lines:
+            self._lines.pop()
         self._lines.extend(new)
         dropped = 0
         if len(self._lines) > _MAX_OUTPUT_LINES:
@@ -520,7 +534,7 @@ class JtconTUI:
         elif isinstance(ev, StationUpdated):
             ev.station.display = _render(ev.ctx, ev.result)     # for "list"
         elif isinstance(ev, LogLine):
-            self._append_line(ev.text)
+            self._append_line(ev.text, ev.key)
         elif isinstance(ev, StatusChanged):
             self._app.invalidate()
         elif isinstance(ev, Ready):
@@ -558,6 +572,7 @@ class JtconTUI:
                 await engine
             except Exception:
                 pass                # reported by _engine_done
+            self.engine.retry_uploads_at_exit(print)
             self.engine.close()
         if self._fatal_msg:
             # The full-screen pane is gone; repeat the reason on the terminal.

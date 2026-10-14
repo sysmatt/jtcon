@@ -21,7 +21,7 @@ from pathlib import Path
 from jtcon.core.cty import CTY_DAT_DEFAULT
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT
 from jtcon.core.messages import _CALLSIGN_RE
-from jtcon.core.qrz import QRZ_DATA_DIR
+import jtcon.core.qrz as _qrz
 
 
 CONFIG_FILE  = "config.toml"
@@ -115,7 +115,7 @@ class QrzConfig:
     enabled:         bool        = False
     api_key:         str | None  = None   # else QRZ_API_KEY, else qrzlog's qrzlog.ini
     api_key_file:    Path | None = None   # the config file that set api_key
-    dir:             Path        = QRZ_DATA_DIR
+    dir:             Path        = field(default_factory=lambda: _qrz.QRZ_DATA_DIR)
     keep:            int         = 5      # full-download sets kept
     refresh_minutes: int         = 15
 

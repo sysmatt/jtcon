@@ -191,10 +191,12 @@ wins).  One set per UTC day jtcon runs, in `~/.local/share/jtcon/qrz/`:
   `app_qrzlog_logid`) replaces the earlier one.  Older sets are backups only.
   A record cut short by a write in progress (no `<EOR>`) is skipped
 - A full download on the first refresh of each UTC day (it also catches records
-  deleted on QRZ, which `MODSINCE` can't report), and on `qrz full`.  `keep = N`
+  deleted on QRZ, which `MODSINCE` can't report), and on `sync full`.  `keep = N`
   keeps N sets, the oldest set's two files deleted together
 - Refresh every `refresh_minutes` (15): `MODSINCE:<yesterday, UTC>`; only records
-  that differ from the stored copy are appended, so repeats add nothing
+  whose field values differ from the stored copy are appended, so repeats add
+  nothing (QRZ sends unchanged records with different text, so the raw text
+  can't be compared).  A full download shows a tick per page on one line
 - The store's files join `AdifInput.paths`, so a refresh that writes reloads the
   Logbook through the normal reload path.  `on_log_reload` runs only when a real
   log file changed, not for a QRZ refresh
@@ -529,7 +531,7 @@ as `~/.config/jtcon/config.toml`: see `K2TTA_V3` in `tests/test_config.py`.
       it; logging a QSO shows `Reloaded N QSOs` with no double count.  Passed
       ("immediately better than what we had before")
 
-### Phase 5: wanted rules ✅ (pending Matt's live check)
+### Phase 5: wanted rules ✅
 Matt's choices: compact WANTED line with status marks; one status column per award
 rule; add ituz and grid now; watchlist hits stay hidden for recently worked calls.
 
@@ -602,7 +604,7 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
 - [ ] Action interface and routing from config (`on_wanted`, `on_qso_logged`, …)
 - [ ] Reply, Highlight Callsign (set and clear), script, ntfy, bell, JSON log, proxy
 
-### Phase 7: QRZ integration ✅ (pending Matt's live check)
+### Phase 7: QRZ integration ✅
 - [x] Client (`core/qrz.py`): FETCH paged by `AFTERLOGID` (highest + 1), `MODSINCE`,
       INSERT; User-Agent `jtcon/<version> (<call from WSJT-X>)` as the API asks;
       AUTH, FAIL and network errors as their own exceptions.  A FETCH that matches
@@ -610,21 +612,24 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
 - [x] Backup store and sync, as above; one refresh at a time; the pane gets one
       line per change (`[qrz] Updates: 1 new, 2 changed, 1 newly confirmed`)
 - [x] Upload on Logged ADIF when `[actions.qrz] upload = true` (off by default);
-      network failures retried at the next refresh while jtcon runs
+      network failures saved to `pending-uploads.adif` in the data dir and retried
+      at each refresh, at `sync`, once more at exit (5 s timeout) and at the next
+      start; a retry stops at the first that can't reach QRZ.  Duplicates are fine
 - [x] API key: `[inputs.qrz] api_key`, then `QRZ_API_KEY`, then qrzlog's
       `qrzlog.ini` (D4); the startup log names the source; a warning when the
       config file holding it is readable by others; `--show-config` masks it
-- [x] `qrz` command (refresh now) and `qrz full`.  `q` is now ambiguous (quit, qrz)
+- [x] `sync` command (Matt: generic, for more online logbooks later): fetch what
+      changed and retry waiting uploads now; `sync full` for a fresh full download
 - [x] Tests: 331 pass on Python 3.11, 3.12, 3.14, against a fake QRZ server
       (`tests/test_qrz.py`); conftest stops any test reaching the real QRZ or key
-- [ ] **Checkpoint: Matt's live test**: the first full download; `qrz` after a
-      confirmation on QRZ; an upload; a restart offline.  To verify against the
-      real API: the answer to a FETCH that matches nothing, and MODSINCE's day
-      boundary
+- [x] **Checkpoint: Matt's live test** passed: the first full download, a refresh
+      after a confirmation on QRZ, an upload, a restart offline.  Found and fixed:
+      every refresh re-saved unchanged records (now compared by field values)
 
 ### Phase 8: docs and release
 - [ ] README rewritten for v3: concepts, config reference, rule reference, migration
-      notes from v2 flags
+      notes from v2 flags.  Matt: the QRZ part as "Online logbooks", QRZ the first
+      supported, more may follow
 - [ ] Merge `v3` into `main`, tag `v3.0.0`
 
 ### Phase 9: front ends (separate plans)
@@ -652,7 +657,7 @@ deliberately in phase 5 (Q1–Q5), with the tests updated as part of each fix.
 |---|---|---|
 | D1 | Minimum Python: 3.11 (built-in `tomllib`) or stay on 3.10 and add `tomli` | **Decided: 3.11** (phase 2) |
 | D2 | QRZ code: make `qrzlog` an importable library that jtcon depends on, or copy a small QRZ client into jtcon | **Decided: jtcon's own small client** (phase 7) |
-| D3 | Add UDP multicast support in v3 | Yes, small |
+| D3 | Add UDP multicast support in v3 | **Parking lot** (Matt wants to understand it first) |
 | D4 | QRZ API key: jtcon's own config, env var, or read qrzlog's `~/.config/qrzlog/qrzlog.ini` | **Decided:** jtcon config, then env var, then qrzlog's |
 | D5 | Keep the JSON log (`--save`) | Yes, as an action |
 | D6 | Station memory across sessions (SQLite of when/where stations were heard) | Later |

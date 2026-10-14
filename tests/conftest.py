@@ -53,6 +53,7 @@ def no_real_qrz(monkeypatch, tmp_path):
     """No test may reach the real QRZ, or read the real API key."""
     monkeypatch.setattr(jtcon.core.qrz, "QRZ_API_URL", "http://127.0.0.1:9/api")
     monkeypatch.setattr(jtcon.core.qrz, "QRZLOG_INI", tmp_path / "no-qrzlog.ini")
+    monkeypatch.setattr(jtcon.core.qrz, "QRZ_DATA_DIR", tmp_path / "qrz-data")
     monkeypatch.delenv("QRZ_API_KEY", raising=False)
 
 

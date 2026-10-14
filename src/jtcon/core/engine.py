@@ -24,7 +24,8 @@ from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
 from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
 from jtcon.core.logbook import qso_from_logged
 from jtcon.core.messages import base_call
-from jtcon.core.qrz import QrzClient, QrzStore, QrzSync, key_file_warning, resolve_key
+from jtcon.core.qrz import (PENDING_FILE, QrzClient, QrzStore, QrzSync, key_file_warning,
+                            resolve_key)
 from jtcon.core.protocol import (Close, Decode, LoggedAdif, QsoLogged, Status, encode_highlight,
                                  encode_reply, mode_name, parse_message)
 from jtcon.core.stations import StationTable, fmt_age
@@ -34,6 +35,7 @@ from jtcon.core.wanted.watch import ActivationRule, CallsignsRule, StatesRule
 
 STALE_REPLY_S  = 120   # warn when replying to a station last heard longer ago than this
 INPUT_CHECK_S  = 1.0   # how often logs and watchlists are checked for changes
+EXIT_UPLOAD_S  = 5     # per-request timeout when retrying uploads at exit
 
 
 def _rgb(hex_color: str) -> tuple:
@@ -136,9 +138,9 @@ class Engine:
         for callback in self._subscribers:
             callback(event)
 
-    def log(self, text: str) -> None:
+    def log(self, text: str, key: str | None = None) -> None:
         """Send a LogLine; safe from any thread."""
-        self._emit(LogLine(text))
+        self._emit(LogLine(text, key))
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -268,9 +270,13 @@ class Engine:
                 self.rebuild_rules()
                 for p in adif_paths:
                     log(f"[adif] Loaded: {p.name}")
-                qrz = " and the saved QRZ logbook" if store and store.files() else ""
-                log(f"[adif] {self._qso_count()} across {len(adif_paths)} file(s){qrz}"
-                    f" — {len(self.calls.worked_calls)} calls")
+                if store and not store.files() and not adif_paths:
+                    log("[adif] No QSOs yet: the QRZ logbook loads after its first download")
+                else:
+                    qrz = (" and the saved QRZ logbook" if store.files() else
+                           "; the QRZ logbook loads after its first download") if store else ""
+                    log(f"[adif] {self._qso_count()} across {len(adif_paths)} file(s){qrz}"
+                        f" — {len(self.calls.worked_calls)} calls")
                 for rule in self.rules:
                     if isinstance(rule, AwardRule):
                         log(f"[{rule.name}] {self._award_summary(rule)}")
@@ -330,7 +336,9 @@ class Engine:
             log(warning)
         store = QrzStore(qcfg.dir, qcfg.keep) if qcfg.enabled else None
         client = QrzClient(key, agent=self._user_agent)
-        self.qrz = QrzSync(client, store, log)
+        self.qrz = QrzSync(client, store, log,
+                           progress=lambda text: log(text, key="qrz-full"),
+                           pending_path=qcfg.dir / PENDING_FILE)
         if store:
             first = ("" if store.current() else
                      " — the first full download runs in the background")
@@ -339,6 +347,9 @@ class Engine:
                 f" refreshed every {qcfg.refresh_minutes} min")
         if upload:
             log("[qrz] Logged QSOs are uploaded to QRZ")
+        n = len(self.qrz.pending)
+        if n:
+            log(f"[qrz] {n} upload{'s' * (n != 1)} waiting from last time — retrying now")
         return store
 
     @staticmethod
@@ -451,12 +462,26 @@ class Engine:
             self.check_inputs()
             await asyncio.sleep(self.config.inputs.qrz.refresh_minutes * 60)
 
-    def qrz_refresh(self, full: bool = False) -> None:
-        """The qrz command: refresh now (full: a fresh full download)."""
-        if not (self.qrz and self.qrz.store):
-            self.log("[qrz] The QRZ input is off: set enabled = true in [inputs.qrz].")
+    def sync(self, full: bool = False) -> None:
+        """The sync command: fetch what changed in the online logbook and retry
+        waiting uploads now (full: a fresh full download)."""
+        if not self.qrz:
+            self.log("[sync] Nothing to sync: QRZ is off (see [inputs.qrz] and [actions.qrz]).")
+            return
+        if not self.qrz.store and (full or not self.qrz.pending):
+            self.log("[sync] Nothing to sync: no uploads are waiting, and the QRZ"
+                     " download is off (set enabled = true in [inputs.qrz]).")
             return
         self._background(self._qrz_tick, full, False, then=self.check_inputs)
+
+    def retry_uploads_at_exit(self, report) -> None:
+        """One last try for the waiting uploads, with a short timeout; whatever
+        still fails stays saved for the next start.  *report* gets the lines
+        (the TUI is gone by now)."""
+        if self.qrz and self.qrz.pending:
+            n = len(self.qrz.pending)
+            report(f"[qrz] Trying {n} waiting upload{'s' * (n != 1)} before exit …")
+            self.qrz.retry_uploads(timeout=EXIT_UPLOAD_S, log=report)
 
     def _upload(self, adif: str) -> None:
         for fields, record in iter_records(adif):

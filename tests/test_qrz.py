@@ -269,6 +269,19 @@ def test_sync_full_once_a_day_then_incremental(fake, client, tmp_path):
     assert sync.describe() == "using qrz-2026-10-15.adif (today)"
 
 
+def test_sync_full_download_shows_a_tick_per_page(fake, client, tmp_path, monkeypatch):
+    monkeypatch.setattr(qrz, "PAGE_SIZE", 3)
+    for i in range(7):
+        fake.add(f"K{i}AA")
+    log, progress = Log(), []
+    QrzSync(client, QrzStore(tmp_path), log, today=lambda: DAY,
+            progress=progress.append).refresh()
+    head = "[qrz] Downloading the full logbook "
+    assert progress == [head + "…", head + "✓", head + "✓✓", head + "✓✓✓",
+                        head + "✓✓✓ done"]
+    assert log == ["[qrz] Full download: 7 QSOs saved to qrz-2026-10-14.adif (keeping 5)"]
+
+
 def test_sync_reports_failures_and_keeps_the_saved_set(fake, client, tmp_path):
     log = Log()
     store = QrzStore(tmp_path)
@@ -296,10 +309,34 @@ def test_uploads_and_retries(fake, client):
     assert log[-1] == "[qrz] Upload of BAD1X failed: missing band"
     fake.down = True
     sync.upload("ZL1AA", adif_record({"call": "ZL1AA", "qso_date": "20261014"}))
-    assert log[-1].endswith("— will retry at the next refresh") and len(sync.pending) == 1
+    assert log[-1].endswith("— saved, will retry at the next sync") and len(sync.pending) == 1
     fake.down = False
     sync.retry_uploads()
     assert log[-1] == "[qrz] ▲ ZL1AA uploaded to QRZ (logid 1001)" and sync.pending == []
+
+
+def test_waiting_uploads_are_saved_across_restarts(fake, client, tmp_path):
+    path = tmp_path / "qrz" / qrz.PENDING_FILE
+    log = Log()
+    sync = QrzSync(client, None, log, pending_path=path)
+    fake.down = True
+    for call in ("ZL1AA", "VK3XY", "JA1ZZ"):
+        sync.upload(call, adif_record({"call": call, "qso_date": "20261014", "band": "20m"}))
+    assert path.read_text().startswith("QRZ logbook uploads waiting, saved by jtcon")
+    n = len(fake.requests)
+    sync.retry_uploads()                                 # still down: stops at the first
+    assert log[-1] == "[qrz] Can't reach QRZ: HTTP 503 Service Unavailable — 3 uploads still waiting"
+    assert len(fake.requests) == n + 1
+
+    again = QrzSync(client, None, log, pending_path=path)    # jtcon restarted
+    assert [call for call, _ in again.pending] == ["ZL1AA", "VK3XY", "JA1ZZ"]
+    fake.down = False
+    fake.add("VK3XY", qso_date="20261014")              # already there: logid 1000
+    again.retry_uploads(timeout=5)
+    assert log[-3:] == ["[qrz] ▲ ZL1AA uploaded to QRZ (logid 1001)",
+                        "[qrz] VK3XY is already in QRZ (duplicate)",
+                        "[qrz] ▲ JA1ZZ uploaded to QRZ (logid 1002)"]
+    assert again.pending == [] and not path.exists()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -377,9 +414,9 @@ def engine(tmp_path, monkeypatch):
 
 
 async def refresh(e):
-    """The qrz command; without e._loop the refresh itself runs at once, and
+    """The sync command; without e._loop the refresh itself runs at once, and
     the reload it starts runs on this loop."""
-    e.qrz_refresh()
+    e.sync()
     for _ in range(200):
         if not e._reloading:
             return
@@ -416,8 +453,9 @@ def test_engine_without_a_key_turns_qrz_off(engine):
     e = engine(api_key="")
     assert e._load_inputs() and e.qrz is None
     assert "[qrz] No API key: set api_key in [inputs.qrz], or QRZ_API_KEY — QRZ is off" in logs(e)
-    e.qrz_refresh()
-    assert logs(e)[-1] == "[qrz] The QRZ input is off: set enabled = true in [inputs.qrz]."
+    e.sync()
+    assert logs(e)[-1] == ("[sync] Nothing to sync: QRZ is off (see [inputs.qrz] and"
+                           " [actions.qrz]).")
 
 
 def test_engine_uploads_logged_qsos_when_asked(fake, engine, tmp_path):
@@ -435,6 +473,41 @@ def test_engine_uploads_logged_qsos_when_asked(fake, engine, tmp_path):
     n = len(fake.requests)
     e2.datagram_received(pk.logged_adif(adif), ("127.0.0.1", 2237))
     assert len(fake.requests) == n
+
+
+def test_engine_retries_saved_uploads_at_sync_and_exit(fake, engine, tmp_path):
+    path = tmp_path / "qrz" / qrz.PENDING_FILE
+    e = engine(enabled=False)
+    e.config.actions.qrz_upload = True
+    assert e._load_inputs()
+    e.sync()
+    assert logs(e)[-1] == ("[sync] Nothing to sync: no uploads are waiting, and the QRZ"
+                           " download is off (set enabled = true in [inputs.qrz]).")
+    fake.down = True
+    adif = adif_record({"call": "ZL1AA", "qso_date": "20261014", "band": "20m"})
+    e.datagram_received(pk.logged_adif(adif), ("127.0.0.1", 2237))
+    assert path.exists()
+
+    e2 = engine(enabled=False)                           # restarted
+    e2.config.actions.qrz_upload = True
+    assert e2._load_inputs()
+    assert "[qrz] 1 upload waiting from last time — retrying now" in logs(e2)
+    e2.sync()                                            # QRZ still down
+    assert logs(e2)[-1].endswith("— 1 upload still waiting")
+    fake.down = False
+    out = []
+    e2.retry_uploads_at_exit(out.append)
+    assert out == ["[qrz] Trying 1 waiting upload before exit …",
+                   "[qrz] ▲ ZL1AA uploaded to QRZ (logid 1000)"]
+    assert not path.exists()
+    e2.retry_uploads_at_exit(out.append)                 # nothing waiting: silent
+    assert len(out) == 2
+
+
+def test_engine_first_start_with_only_qrz_says_the_download_is_pending(engine):
+    e = engine()
+    assert e._load_inputs()
+    assert "[adif] No QSOs yet: the QRZ logbook loads after its first download" in logs(e)
 
 
 def test_reload_script_runs_for_log_files_not_qrz_refreshes(engine, tmp_path, monkeypatch):

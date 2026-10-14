@@ -87,6 +87,23 @@ def test_header_stays_out_of_the_pane(tui):
     assert not any(line.startswith(("##", "─")) for line in tui._lines)
 
 
+def test_keyed_log_lines_update_in_place(tui):
+    tui._on_event(LogLine("dl …", "k"))
+    tui._flush_output()
+    tui._on_event(LogLine("dl ✓", "k"))
+    tui._on_event(LogLine("dl ✓✓", "k"))                 # replaced while still queued
+    tui._flush_output()
+    assert tui._lines == ["dl ✓✓"]
+    tui._on_event(LogLine("other"))
+    tui._on_event(LogLine("dl ✓✓✓", "k"))                # not last any more: a new line
+    tui._flush_output()
+    assert tui._lines == ["dl ✓✓", "other", "dl ✓✓✓"]
+    tui._cmd_clear("")
+    tui._on_event(LogLine("dl done", "k"))
+    tui._flush_output()
+    assert tui._lines == ["dl done"]
+
+
 def header_rows(tui):
     text = "".join(t for _, t, *_ in tui._get_header_text())
     return text.split("\n")
@@ -143,7 +160,7 @@ def test_stale_reply_warns(tui, clock):
 def test_unknown_command(tui):
     assert command(tui, "foo bar")[-1] == (
         "[cmd] Unknown: 'foo bar'  (commands: quit, exit, clear, list, ignore [NN|CALL],"
-        " unignore CALL, qrz [full]; any unique abbreviation works; or enter index 00-99"
+        " unignore CALL, sync [full]; any unique abbreviation works; or enter index 00-99"
         " / callsign to reply)")
     n = len(tui._lines)
     assert len(command(tui, "   ")) == n      # blank input does nothing
@@ -194,11 +211,9 @@ def test_clear_command(tui):
 def test_quit_commands(tui, monkeypatch):
     calls = []
     monkeypatch.setattr(tui, "_exit_app", lambda: calls.append(1))
-    for cmd in ("quit", "exit", "QU", "e", "EXI"):
+    for cmd in ("quit", "exit", "QU", "q", "e", "EXI"):
         command(tui, cmd)
-    assert len(calls) == 5
-    assert command(tui, "q")[-1] == "[cmd] 'q' is ambiguous: quit, qrz."
-    assert len(calls) == 5
+    assert len(calls) == 6
 
 
 # ── Output pane ───────────────────────────────────────────────────────────────
@@ -320,7 +335,7 @@ def test_ignore_list_shows_where_each_came_from(make_tui):
                                     "  config:   W1AW K1ABC", "  session:  ZL1AA"]
 
 
-def test_qrz_command(tui):
-    assert command(tui, "qrz now")[-1] == "[cmd] usage: qrz [full]"
-    assert command(tui, "qr")[-1] == ("[qrz] The QRZ input is off: set enabled = true"
-                                      " in [inputs.qrz].")
+def test_sync_command(tui):
+    assert command(tui, "sync now")[-1] == "[cmd] usage: sync [full]"
+    assert command(tui, "s")[-1] == ("[sync] Nothing to sync: QRZ is off (see [inputs.qrz]"
+                                     " and [actions.qrz]).")

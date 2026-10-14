@@ -7,8 +7,11 @@ from jtcon.core.protocol import Status
 
 @dataclass
 class LogLine:
-    """A message for the operator: startup, reloads, command results, errors."""
+    """A message for the operator: startup, reloads, command results, errors.
+    A line with a *key* replaces the line just before it when that one has the
+    same key and nothing came in between (progress shown on one line)."""
     text: str
+    key: str | None = None
 
 
 @dataclass
