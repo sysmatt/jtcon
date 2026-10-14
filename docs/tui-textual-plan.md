@@ -64,10 +64,15 @@ One row per station that at least one rule wants now.
 - **Leaves the table** when it's no longer wanted (a QSO, a confirmation, an
   ignore), or when it hasn't been heard for `wanted_timeout_minutes` (default 10;
   a config setting under `[display]`).
-- **Sorting:** last heard (default), SNR, call, entity; a key cycles them, or click
-  a column header.
-- **Actions on the selected row:** Enter (or double-click) answers it, `i` ignores
-  it.  Typing a number or call at `CMD>` still works.
+- **Sorting:** last heard (default), SNR, call, entity; Ctrl-S cycles them, or click
+  the Call, Entity, dB or Seen header.  The selected station stays selected when
+  the rows move.
+- **Selecting and answering without leaving `CMD>`:** ↑↓ move the selection, and
+  Enter on an empty command line answers the selected station.  PgUp/PgDn still
+  scroll the decodes.  Typing a number or call at `CMD>` still works.
+- **With the table focused** (Tab): ↑↓, Enter answers, `i` ignores.  A single
+  click only selects a row; a double-click answers it, so a stray click never
+  calls anyone.
 
 ### Decodes
 
@@ -152,8 +157,11 @@ by Matt.
    Commands moved to `tui/commands.py` and the status text to `render.py`, both
    shared; the classic TUI's tests pass unchanged.  `tests/test_textual.py` runs
    the app headless (skipped where Textual is older than 8.2)
-2. **Wanted table.**  Rows from Engine events, columns, colours, leaving the table,
-   sorting, Enter to answer, `i` to ignore.
+2. **Wanted table.** ✅  Rows from Engine events, columns, colours, leaving the
+   table, sorting, Enter to answer, `i` to ignore.  `tui/wanted_table.py`; rows
+   rebuilt from the rolling buffer (`stations.hits()`) with each station's newest
+   evaluated decode, on change and every second.  Until stage 3 it sits above the
+   decode stream (stacked)
 3. **Layouts.**  The four layouts and their keys, the compact decode line, auto
    choice, `[display] layout`.
 4. **Live controls.**  Rules panel, scope and show toggles, the Engine setters.

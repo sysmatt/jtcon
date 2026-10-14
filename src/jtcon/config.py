@@ -104,6 +104,7 @@ class DisplayConfig:
     mouse:     bool = False
     debug:     bool = False
     ui:        str  = "classic"   # front end: "classic" or "textual"
+    wanted_timeout_minutes: int = 10   # textual: unheard this long, off the Wanted table
 
 
 @dataclass
@@ -228,7 +229,8 @@ def _choice(*values):
 _SCHEMA = {
     "udp":     {"host": str, "port": int, "proxy": [int]},
     "display": {"show": _choice("cq", "all"), "show_time": bool, "color": bool,
-                "mouse": bool, "debug": bool, "ui": _choice("classic", "textual")},
+                "mouse": bool, "debug": bool, "ui": _choice("classic", "textual"),
+                "wanted_timeout_minutes": int},
     "scope":   {"decodes": _choice("cq", "all")},
     "inputs":  {"cty": _PATH, "adif": [_PATH], "hamdat": _PATH,
                 "qrz": {"enabled": bool, "api_key": str, "dir": _PATH, "keep": int,
@@ -561,6 +563,9 @@ def build_config(raw: dict, wanted: str | None = None) -> Config:
     def path(v):
         return Path(v) if v else None
 
+    if disp.get("wanted_timeout_minutes", 1) < 1:
+        raise ConfigError("display.wanted_timeout_minutes must be 1 or more,"
+                          f" not {disp['wanted_timeout_minutes']}")
     qrz = dict(inp.get("qrz", {}))
     for key in ("keep", "refresh_minutes"):
         if key in qrz and qrz[key] < 1:
@@ -723,6 +728,7 @@ CONFIG_TEMPLATE = """\
 # mouse     = false      # mouse wheel scrolls; hold Shift to select text
 # debug     = false      # dump raw packets
 # ui        = "classic"  # or "textual": the new screen with a wanted-stations table
+# wanted_timeout_minutes = 10   # textual: a station unheard this long leaves the table
 
 [scope]
 # decodes = "cq"         # check CQ decodes only, or "all" (WSJT-X "CQ only" must be off)

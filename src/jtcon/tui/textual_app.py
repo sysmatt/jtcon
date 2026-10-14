@@ -1,11 +1,13 @@
 """The Textual front end (--ui textual).  See docs/tui-textual-plan.md.
 
-Stage 1: the decode stream with its fixed column header, a log strip for
-jtcon's own messages, the command line and the status line.
+Stage 2: the Wanted table above the decode stream (with its fixed column
+header), a log strip for jtcon's own messages, the command line and the
+status line.
 """
 
 import asyncio
 import sys
+import time
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -18,6 +20,7 @@ from jtcon.core.engine import Engine
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
 from jtcon.tui.commands import Commands
 from jtcon.tui.render import _header_line, _render, status_badge, status_text
+from jtcon.tui.wanted_table import WantedTable
 
 DECODE_LINES = 5000     # decode pane lines kept
 LOG_LINES    = 500      # log strip lines kept
@@ -68,7 +71,8 @@ class JtconApp(App):
     """The Textual screen.  JtconTextual runs it together with the Engine."""
 
     CSS = """
-    #header  { height: 2; color: $text-muted; }
+    #wanted  { height: 2fr; scrollbar-size: 1 1; }
+    #header  { height: 2; color: $text-muted; border-top: solid $primary-darken-2; }
     #decodes { height: 1fr; border: none; scrollbar-size: 1 1; }
     #log     { height: 7; border-top: solid $primary-darken-2; scrollbar-size: 1 1; }
     #cmdline { height: 1; }
@@ -79,9 +83,11 @@ class JtconApp(App):
 
     BINDINGS = [
         Binding("ctrl+q,ctrl+c", "quit_jtcon", "Quit", priority=True),
-        # Scroll the decode pane while typing at CMD>.
-        Binding("up", "scroll_decodes(-1)", show=False, priority=True),
-        Binding("down", "scroll_decodes(1)", show=False, priority=True),
+        # While typing at CMD>: ↑↓ move through the Wanted table, PgUp/PgDn
+        # scroll the decode pane.  With the decode pane focused, ↑↓ scroll it.
+        Binding("up", "arrow(-1)", show=False, priority=True),
+        Binding("down", "arrow(1)", show=False, priority=True),
+        Binding("ctrl+s", "sort", "Sort", show=False, priority=True),
         Binding("pageup", "page_decodes(-1)", show=False, priority=True),
         Binding("pagedown", "page_decodes(1)", show=False, priority=True),
         Binding("escape,ctrl+end", "decodes_to_live", show=False, priority=True),
@@ -98,11 +104,14 @@ class JtconApp(App):
                                  clear=lambda: self._clear(),
                                  listing=lambda t: self.decodes.add(t))
         self._header_text = ""
+        self._table_dirty = True
+        self._table_shown = 0.0         # monotonic time of the last rebuild
         self.engine_task: asyncio.Future | None = None
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
+        yield WantedTable(self.engine, id="wanted")
         yield Static(id="header")
         yield DecodePane(id="decodes")
         yield LogStrip(id="log")
@@ -113,12 +122,14 @@ class JtconApp(App):
 
     def on_mount(self) -> None:
         self.decodes = self.query_one(DecodePane)
+        self.wanted = self.query_one(WantedTable)
         self.log_strip = self.query_one(LogStrip)
         self.header = self.query_one("#header", Static)
         self.status = self.query_one("#status", Static)
         self.query_one("#cmd", Input).focus()
         self.watch(self.decodes, "scroll_x", lambda *_: self._show_header(), init=False)
         self.set_interval(0.25, self._show_status)
+        self.set_interval(0.25, self._show_table)
         self._show_header()
         self._show_status()
         self.engine.subscribe(self._on_event)
@@ -160,17 +171,46 @@ class JtconApp(App):
         if self.engine.logbook is not None and "days" not in self._header_text:
             self._show_header()
 
+    def _show_table(self, force: bool = False) -> None:
+        """Rebuild the Wanted table when something changed, and every second
+        for the "Seen" times."""
+        now = time.monotonic()
+        if force or self._table_dirty or now - self._table_shown >= 1.0:
+            self._table_dirty = False
+            self._table_shown = now
+            self.wanted.refresh_rows()
+
     # ── Commands and keys ─────────────────────────────────────────────────────
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        """A command; or, on an empty line, answer the selected station."""
         text = event.value
         event.input.value = ""
         if text.strip():
             self.decodes.scroll_end(animate=False)
             self.commands.handle(text)
+            self._show_table(force=True)
+        else:
+            self.answer(self.wanted.selected_call)
 
-    def action_scroll_decodes(self, lines: int) -> None:
-        self.decodes.scroll_relative(y=lines, animate=False)
+    def on_wanted_table_answer(self, event: WantedTable.Answer) -> None:
+        self.answer(event.call)
+
+    def answer(self, call: str | None) -> None:
+        station = self.engine.stations.find(call) if call else None
+        if station:
+            self.engine.reply(station)
+        else:
+            self.log_strip.add("[cmd] No station selected in the Wanted table.")
+
+    def action_arrow(self, step: int) -> None:
+        if self.focused is self.decodes:
+            self.decodes.scroll_relative(y=step, animate=False)
+        elif self.wanted.row_count:
+            self.wanted.move_cursor(row=self.wanted.cursor_row + step, animate=False)
+
+    def action_sort(self) -> None:
+        self.log_strip.add(f"[wanted] Sorted by {self.wanted.cycle_sort()}")
 
     def action_page_decodes(self, direction: int) -> None:
         page = max(1, self.decodes.scrollable_content_region.height - 1)
@@ -193,6 +233,8 @@ class JtconApp(App):
             self._show_spot(ev)
         elif isinstance(ev, StationUpdated):
             ev.station.display = _render(ev.ctx, ev.result)     # for "list"
+            self.wanted.note(ev.result, ev.ctx, ev.station)
+            self._table_dirty = True
         elif isinstance(ev, LogLine):
             self.log_strip.add(ev.text, ev.key)
         elif isinstance(ev, (Ready, UdpDown)):
@@ -206,6 +248,8 @@ class JtconApp(App):
             self.bell()
         if ev.station is not None:
             ev.station.display = lines
+            self.wanted.note(ev.result, ev.ctx, ev.station)
+            self._table_dirty = True
             lines = [f"{ev.station.idx:02d}  {lines[0]}"] + lines[1:]
         else:
             lines = [f"    {lines[0]}"] + lines[1:]
