@@ -644,6 +644,7 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
 
 ### Phase 9: front ends (separate plans)
 Textual TUI: [tui-textual-plan.md](tui-textual-plan.md) (decisions made 2026-10-14).
+GUI (PySide6): [gui-plan.md](gui-plan.md) (decisions made 2026-10-14).
 - [ ] TUI on Textual: stations table plus live log, select-and-Enter to reply, rule
       toggles
 - [ ] GUI, on the same Engine
