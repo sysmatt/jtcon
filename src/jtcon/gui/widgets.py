@@ -140,7 +140,14 @@ class Table(QTableView):
         return [key for key, _ in self.model().cols]
 
     def _row_height(self, extra: int) -> None:
+        self._extra = extra
         self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + extra)
+
+    def font_changed(self) -> None:
+        """After setFont: rows and default column widths to suit."""
+        self._row_height(self._extra)
+        if self.model().cols:
+            self.apply_columns()
 
     # ── Applying the user's choices ───────────────────────────────────────────
 

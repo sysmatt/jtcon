@@ -86,6 +86,7 @@ Settings are applied in order, later ones winning: built-in defaults, then
 | `debug` | `false` | Show raw packets |
 | `ui` | `"classic"` | Which screen: `"classic"`, `"textual"` for the newer one with the Wanted table, or `"gui"` for the desktop window, which needs the `jtcon[gui]` install (see the README) |
 | `layout` | `"auto"` | The newer screen's starting layout: `"wanted"`, `"decodes"`, `"side"` (side by side) or `"stacked"`.  `"auto"` picks from the terminal size: side by side from 200 columns wide, stacked from 50 rows tall, otherwise the Wanted table.  The desktop window uses it the first time only (after that it remembers how you left it); there `"auto"` means side by side on a screen 2400 pixels wide, else stacked |
+| `theme` | `"dark"` | The desktop window's look: `"dark"`, `"light"`, or `"system"` for your desktop's own.  View › Theme changes it for the session |
 | `wanted_timeout_minutes` | `10` | The newer screen: a station unheard this long leaves the Wanted table |
 
 ### `[scope]`

@@ -10,7 +10,7 @@ import json
 import time
 
 from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QDockWidget, QLabel, QMainWindow,
                                QMessageBox, QToolBar, QToolTip)
 
@@ -19,12 +19,14 @@ from jtcon.core.bands import _freq_to_band
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
 from jtcon.gui.menus import Menus
 from jtcon.gui.models import DecodeRow, decode_columns
+from jtcon.gui.theme import app_icon, apply_theme
 from jtcon.gui.widgets import CommandLine, DecodesView, LogView, WantedView, fixed_font
 from jtcon.tui.render import _render
 from jtcon.ui.commands import Commands
 from jtcon.ui.status import session_changes, status_badge, status_text
 
 TICK_MS = 250           # status bar and column refresh
+TEXT_SIZES = range(-4, 13)  # points smaller or bigger than normal (View › Text size)
 
 # Layouts, in the order Ctrl-arrows step through them, with their names.
 LAYOUTS = {"wanted": "Wanted", "decodes": "Decodes", "side": "Side by side",
@@ -41,9 +43,11 @@ def window_settings() -> QSettings:
     """Where the window keeps itself: window.ini beside config.toml."""
     return QSettings(str(default_config_dir() / "window.ini"), QSettings.Format.IniFormat)
 
+# Colours only: a font in a style sheet would override the text size, and the
+# labels without a style sheet follow the theme's palette.
 _BADGE_STYLE = {
-    "RX": "background: #2e7d32; color: white; font-weight: bold; padding: 1px 8px;",
-    "TX": "background: #c62828; color: white; font-weight: bold; padding: 1px 8px;",
+    "RX": "background: #2e7d32; color: white; padding: 1px 8px;",
+    "TX": "background: #c62828; color: white; padding: 1px 8px;",
 }
 _BADGE_STYLE["UDP DOWN"] = _BADGE_STYLE["TX"]
 _NOTE_STYLE = "padding: 1px 6px; color: black; background: %s;"
@@ -71,6 +75,9 @@ class MainWindow(QMainWindow):
         self.configured = (self.config.scope.decodes, self.config.display.show)
 
         self.setWindowTitle("jtcon")
+        self.setWindowIcon(app_icon())
+        self.theme = ""
+        self.set_theme(self.config.display.theme)
         self.wanted = WantedView(engine)
         self.decodes = DecodesView()
         self.log_view = LogView()
@@ -78,6 +85,8 @@ class MainWindow(QMainWindow):
         self.layout_name = ""
         self._panels()
         self._status_bar()
+        self.text_size = 0
+        self._fonts = {w: QFont(w.font()) for w in self._text_widgets()}
 
         self.commands = Commands(engine, out=self.log_view.add, quit=self.close,
                                  clear=self._clear)
@@ -96,7 +105,7 @@ class MainWindow(QMainWindow):
         self._tick()                    # the columns, before restoring their state
         self._restore()
         self.cmd.setFocus()
-        self.log_view.add("[keys] F1 help · F2–F5 layouts (or the buttons along the top) ·"
+        self.log_view.add("[keys] F1 help · F2–F5 layouts (View › Layout) ·"
                           " F6 rules · F7 scope · F8 show · Enter on an empty CMD> answers the"
                           " selected station · drag a panel by its title to move it")
 
@@ -133,12 +142,12 @@ class MainWindow(QMainWindow):
 
     _TITLE_TIP = ("Drag this title to move the panel: beside, above or below another,"
                   " or onto one for tabs.  Double-click it to float the panel as its own"
-                  " window, and again to put it back.  F2–F5 or the buttons along the top"
-                  " lay the panels out for you.")
+                  " window, and again to put it back.  F2–F5 (View › Layout) lay the"
+                  " panels out for you.")
     _BUTTON_TIPS = {
         "qt_dockwidget_floatbutton": "Float this panel as its own window, or put it back",
-        "qt_dockwidget_closebutton": "Close this panel (the View menu, F2–F5 or the layout"
-                                     " buttons bring it back)",
+        "qt_dockwidget_closebutton": "Close this panel (the View menu or F2–F5 bring it"
+                                     " back)",
     }
 
     def _title_tips(self, dock) -> None:
@@ -213,6 +222,12 @@ class MainWindow(QMainWindow):
     def _restore(self) -> None:
         """The window as it was last time; the first time, the configured layout."""
         s = self.settings
+        try:
+            size = int(s.value("text_size", 0))
+        except (TypeError, ValueError):
+            size = 0
+        if size:
+            self.set_text_size(size)
         for view, key in ((self.wanted, "wanted_columns"), (self.decodes, "decode_columns")):
             try:
                 view.restore(json.loads(s.value(key, "{}")))
@@ -228,6 +243,32 @@ class MainWindow(QMainWindow):
             self.menus.show_layout()
         else:
             self.set_layout(self.first_layout())
+
+    # ── Theme and text size ───────────────────────────────────────────────────
+
+    def set_theme(self, name: str) -> None:
+        """Dark, light or system, for the whole application; the config file's
+        theme at startup, View › Theme for the session."""
+        apply_theme(QApplication.instance(), name)
+        self.theme = name
+
+    def _text_widgets(self) -> list:
+        return [self.wanted, self.decodes, self.log_view, self.cmd.edit, self.status,
+                self.badge, self.freq, self.scroll_note, self.changes]
+
+    def set_text_size(self, size: int) -> None:
+        """Text *size* points bigger (or smaller) than normal, in the panels,
+        the command line and the status bar."""
+        self.text_size = min(max(size, TEXT_SIZES.start), TEXT_SIZES.stop - 1)
+        for widget, base in self._fonts.items():
+            font = QFont(base)
+            if base.pointSizeF() > 0:
+                font.setPointSizeF(max(5.0, base.pointSizeF() + self.text_size))
+            else:                       # a font sized in pixels
+                font.setPixelSize(max(7, base.pixelSize() + self.text_size * 4 // 3))
+            widget.setFont(font)
+        for view in (self.wanted, self.decodes):
+            view.font_changed()
 
     def first_layout(self) -> str:
         name = self.config.display.layout
@@ -248,15 +289,20 @@ class MainWindow(QMainWindow):
         s.setValue("geometry", self.saveGeometry())
         s.setValue("state", self.saveState(STATE_VERSION))
         s.setValue("layout", self.layout_name)
+        s.setValue("text_size", self.text_size)
         s.setValue("wanted_columns", json.dumps(self.wanted.state()))
         s.setValue("decode_columns", json.dumps(self.decodes.state()))
         s.sync()
 
     def _status_bar(self) -> None:
         bar = self.statusBar()
+        bold = QFont(self.font())
+        bold.setBold(True)
         self.badge = QLabel()
+        self.badge.setFont(bold)
         self.freq = QLabel()
-        self.freq.setStyleSheet("font-weight: bold; padding: 0 6px;")
+        self.freq.setFont(bold)
+        self.freq.setContentsMargins(6, 0, 6, 0)
         self.scroll_note = QLabel(" SCROLL ")
         self.scroll_note.setStyleSheet(_NOTE_STYLE % "#e5c07b")
         self.status = QLabel()

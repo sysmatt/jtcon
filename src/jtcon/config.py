@@ -114,6 +114,7 @@ class DisplayConfig:
     ui:        str  = "classic"   # front end: "classic", "textual" or "gui"
     wanted_timeout_minutes: int = 10   # textual: unheard this long, off the Wanted table
     layout:    str  = "auto"      # textual: "wanted", "decodes", "side", "stacked"
+    theme:     str  = "dark"      # gui: "dark", "light", or "system" (the desktop's own)
 
 
 @dataclass
@@ -247,7 +248,8 @@ _SCHEMA = {
     "display": {"show": _choice("cq", "all"), "show_time": bool, "color": bool,
                 "mouse": bool, "debug": bool, "ui": _choice("classic", "textual", "gui"),
                 "wanted_timeout_minutes": int,
-                "layout": _choice("auto", "wanted", "decodes", "side", "stacked")},
+                "layout": _choice("auto", "wanted", "decodes", "side", "stacked"),
+                "theme": _choice("dark", "light", "system")},
     "scope":   {"decodes": _choice("cq", "all")},
     "inputs":  {"cty": _PATH, "adif": [_PATH], "hamdat": _PATH,
                 "qrz": {"enabled": bool, "api_key": str, "dir": _PATH, "keep": int,
@@ -749,6 +751,8 @@ CONFIG_TEMPLATE = """\
 # wanted_timeout_minutes = 10   # textual: a station unheard this long leaves the table
 # layout    = "auto"     # textual: "wanted", "decodes", "side" (by side), "stacked";
 #                        # auto picks by the terminal's size
+# theme     = "dark"     # the desktop window (ui = "gui"): "dark", "light", or
+#                        # "system" for your desktop's own look
 
 [scope]
 # decodes = "cq"         # check CQ decodes only, or "all" (WSJT-X "CQ only" must be off)

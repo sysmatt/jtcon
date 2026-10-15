@@ -234,7 +234,7 @@ macOS Terminal); most terminals then select as usual.
 A third front end is on its way: a desktop window, on Qt, for Linux, Windows and
 macOS ([the plan](docs/gui-plan.md)).  It has the Wanted table, the decode
 stream as a table and the log, as panels you arrange, plus menus, the command
-line and the status bar; a dark theme comes next.  **F1** lists every key.
+line and the status bar.  **F1** lists every key.
 
 The Wanted table works as on the Textual screen: click a column header to sort
 (again to reverse), or Ctrl-S; double-click a station, or select it and press
@@ -242,16 +242,20 @@ Enter, to answer it; ↑↓ at `CMD>` select, and Enter on an empty line answers
 Right-click a station to answer it, ignore it, copy its call, or look it up on
 QRZ.com.
 
-The buttons along the top (or F2–F5, or the View menu) lay the panels out in
-the Textual screen's four layouts: Wanted, Decodes, Side by side, Stacked;
-Ctrl-arrows step through them.  You can also arrange them yourself: drag a panel
+View › Layout (or F2–F5) lays the panels out in the Textual screen's four
+layouts: Wanted, Decodes, Side by side, Stacked; Ctrl-arrows step through them.  You can also arrange them yourself: drag a panel
 by its title to put it beside, above or below another, onto one (as tabs), or
 out on its own (on a second screen, say).  The View menu brings back a panel you
 closed, and "Reset window layout" starts afresh.
 
 The Rules menu (or F6) switches rules on and off for the session, and has the
 scope (F7) and show (F8) switches; the Logbook menu runs a QRZ sync; File › Edit
-config file opens the config in your editor (restart jtcon to use the changes).  Right-click a table's column
+config file opens the config in your editor (restart jtcon to use the changes).
+
+It's dark by default.  `theme = "light"` under `[display]` makes it light, and
+`theme = "system"` takes your desktop's own look; View › Theme switches for the
+session.  View › Text size (Ctrl-plus, Ctrl-minus, Ctrl-0) makes the panels'
+text bigger or smaller, and the window remembers it.  Right-click a table's column
 headers to hide or show columns; drag a header to move its column.  The decodes
 keep their columns per layout: side by side and stacked start with the short
 ones.  The window remembers its size, panels and columns from one run to the

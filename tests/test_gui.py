@@ -15,7 +15,7 @@ pytest.importorskip("qasync")
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QToolBar
 
 import jtcon.gui.models
 from jtcon.core.events import Fatal, LogLine, Ready
@@ -278,12 +278,19 @@ def test_the_gui_runs_the_engine_on_one_loop(make_engine, qapp, monkeypatch, cap
         out.sendto(pk.decode("CQ VK3XY QF22"), sock.getsockname())
         out.close()
 
+    waited = []
+
     def check_and_close():
+        """Every 50 ms until the decode is in (or 5 s): a busy machine is slow."""
         seen["rows"] = table(gui.window)
-        gui.window.close()
+        waited.append(1)
+        if seen["rows"] or len(waited) > 100:
+            gui.window.close()
+        else:
+            QTimer.singleShot(50, check_and_close)
 
     QTimer.singleShot(200, send)
-    QTimer.singleShot(600, check_and_close)
+    QTimer.singleShot(250, check_and_close)
     qapp.setQuitOnLastWindowClosed(False)
     loop = qasync.QEventLoop(qapp)
     asyncio.set_event_loop(loop)
@@ -643,7 +650,7 @@ def test_the_first_layout(window, monkeypatch):
     assert window(layout="auto").layout_name == "decodes"
 
 
-# ── Menus, toolbar, live controls ────────────────────────────────────────────
+# ── Menus and live controls ───────────────────────────────────────────────────
 
 def menu(win, title: str):
     for action in win.menuBar().actions():
@@ -661,23 +668,23 @@ def test_the_menus_and_the_startup_hint(window):
     assert [a.text().replace("&", "") for a in win.menuBar().actions()] == [
         "File", "View", "Rules", "Logbook", "Help"]
     assert win.first_log[0].startswith("[keys] F1 help · F2–F5 layouts")
-    assert list(items(menu(win, "View")))[:6] == [
-        "Wanted", "Decodes", "Side by side", "Stacked", "Next layout", "Previous layout"]
+    assert list(items(menu(win, "View")))[:4] == [
+        "Layout", "Wanted panel", "Decodes panel", "Log panel"]
 
 
-def test_the_layout_toolbar(window):
+def test_the_layout_menu(window):
     win = window(layout="stacked")
-    bar = win.menus.toolbar
-    buttons = [a for a in bar.actions() if a.text()]
-    assert [a.text().replace("&", "") for a in buttons] == [
-        "Wanted", "Decodes", "Side by side", "Stacked"]
+    layouts = items(menu(win, "View"))["Layout"].menu()
+    assert list(items(layouts)) == ["Wanted", "Decodes", "Side by side", "Stacked",
+                                    "Next layout", "Previous layout"]
     assert win.menus.layout_actions["stacked"].isChecked()
-    win.menus.layout_actions["side"].trigger()
+    items(layouts)["Side by side"].trigger()
     assert win.layout_name == "side" and win.menus.layout_actions["side"].isChecked()
-    press(win, "F3")                                  # the keys tick the buttons too
+    press(win, "F3")                                  # the keys tick the menu too
     assert win.menus.layout_actions["decodes"].isChecked()
     assert not win.menus.layout_actions["side"].isChecked()
     assert "F4" in win.menus.layout_actions["side"].toolTip()
+    assert not win.findChildren(QToolBar, "layout-bar")             # no button row (Matt)
 
 
 def test_panels_can_be_closed_and_brought_back(window):
@@ -800,3 +807,60 @@ def test_edit_config_file(window, monkeypatch, tmp_path):
     monkeypatch.setattr(gm, "open_in_editor", lambda path: False)
     edit.trigger()
     assert win.log_view.lines()[-1].startswith("[config] Couldn't open an editor")
+
+
+# ── Look and feel ─────────────────────────────────────────────────────────────
+
+def test_dark_by_default_and_the_theme_menu(window):
+    from jtcon.gui.theme import is_dark
+    app = QApplication.instance()
+    win = window()
+    assert win.theme == "dark" and is_dark(app) and app.style().name() == "fusion"
+    themes = items(menu(win, "View"))["Theme"].menu()
+    assert list(items(themes))[:3] == ["Dark", "Light", "System"]
+    themes.aboutToShow.emit()
+    assert win.menus.theme_actions["dark"].isChecked()
+    items(themes)["Light"].trigger()
+    assert win.theme == "light" and not is_dark(app)
+    items(themes)["System"].trigger()
+    import jtcon.gui.theme as th
+    assert app.style().name() == th._original["style"].lower()
+    assert app.palette().color(app.palette().ColorRole.Window) == \
+        th._original["palette"].color(app.palette().ColorRole.Window)
+    assert win.config.display.theme == "dark"          # the session only
+
+
+def test_the_configured_theme(window):
+    from jtcon.gui.theme import is_dark
+    win = window(config={"display": {"theme": "light"}})
+    assert win.theme == "light" and not is_dark(QApplication.instance())
+    win.set_theme("dark")
+
+
+def test_text_size(window):
+    win = window()
+    base = win.decodes.font().pointSizeF()
+    row = win.decodes.verticalHeader().defaultSectionSize()
+    press(win, "Ctrl++")
+    press(win, "Ctrl++")
+    assert win.text_size == 2 and win.decodes.font().pointSizeF() == base + 2
+    assert win.decodes.verticalHeader().defaultSectionSize() > row
+    assert win.log_view.font().pointSizeF() > base and win.badge.font().bold()
+    press(win, "Ctrl+-")
+    assert win.text_size == 1
+    for _ in range(30):
+        press(win, "Ctrl+-")
+    assert win.text_size == -4                          # no smaller than that
+    press(win, "Ctrl+0")
+    assert win.text_size == 0 and win.decodes.font().pointSizeF() == base
+    # Remembered with the window.
+    win.set_text_size(3)
+    win.close()
+    win = window()
+    assert win.text_size == 3 and win.decodes.font().pointSizeF() == base + 3
+
+
+def test_the_icon(window):
+    win = window()
+    assert not win.windowIcon().isNull()
+    assert win.windowIcon().pixmap(32).width() == 32

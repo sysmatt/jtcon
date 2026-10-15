@@ -1,4 +1,4 @@
-"""The window's menus, its layout toolbar, and the Keys and About boxes.
+"""The window's menus, and the Keys and About boxes.
 
 Every menu item with a key works from anywhere in the window (Qt runs an
 action's shortcut whether or not its menu is open)."""
@@ -7,11 +7,12 @@ import sys
 
 from PySide6.QtCore import QProcess, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import QDialog, QLabel, QScrollArea, QToolBar, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QLabel, QScrollArea, QVBoxLayout
 
 from jtcon import __version__
 from jtcon.config import CONFIG_FILE, CONFIG_TEMPLATE, default_config_dir, write_private
 from jtcon.core.wanted import rule_label
+from jtcon.gui.theme import THEMES
 
 HOMEPAGE = "https://github.com/sysmatt/jtcon"
 
@@ -26,8 +27,7 @@ LAYOUT_ITEMS = [
 KEYS_HELP = """\
 <h3>Layouts</h3>
 <table cellspacing="6">
-<tr><td><b>F2 F3 F4 F5</b></td><td>Wanted, Decodes, Side by side, Stacked; or the buttons
- along the top</td></tr>
+<tr><td><b>F2 F3 F4 F5</b></td><td>Wanted, Decodes, Side by side, Stacked (View › Layout)</td></tr>
 <tr><td><b>Ctrl-arrows</b></td><td>the next or previous layout</td></tr>
 <tr><td>Drag a panel's title</td><td>beside, above or below another panel, or onto one for tabs</td></tr>
 <tr><td>Double-click a panel's title</td><td>float it as its own window, and back</td></tr>
@@ -70,7 +70,7 @@ KEYS_HELP = """\
 
 
 class Menus:
-    """Builds the menu bar and the layout toolbar on *window* (a MainWindow)."""
+    """Builds the menu bar on *window* (a MainWindow)."""
 
     def __init__(self, window):
         self.window = window
@@ -84,7 +84,6 @@ class Menus:
         self._rules(self.rules_menu)
         self._logbook(bar.addMenu("&Logbook"))
         self._help(bar.addMenu("&Help"))
-        self._toolbar()
 
     def _action(self, menu, text: str, slot, keys=(), tip: str = "",
                 checkable: bool = False) -> QAction:
@@ -129,43 +128,54 @@ class Menus:
 
     def _view(self, menu) -> None:
         win = self.window
+        layouts = menu.addMenu("&Layout")
         self.layouts = QActionGroup(win)
         self.layout_actions = {}
         for name, text, key, tip in LAYOUT_ITEMS:
-            action = self._action(menu, text, lambda _=False, n=name: win.set_layout(n),
+            action = self._action(layouts, text, lambda _=False, n=name: win.set_layout(n),
                                   keys=[key], tip=f"{tip} ({key})", checkable=True)
             self.layouts.addAction(action)
             self.layout_actions[name] = action
-        self._action(menu, "&Next layout", lambda: win.step_layout(1),
+        layouts.addSeparator()
+        self._action(layouts, "&Next layout", lambda: win.step_layout(1),
                      keys=["Ctrl+Right", "Ctrl+Down"])
-        self._action(menu, "&Previous layout", lambda: win.step_layout(-1),
+        self._action(layouts, "&Previous layout", lambda: win.step_layout(-1),
                      keys=["Ctrl+Left", "Ctrl+Up"])
+        layouts.aboutToShow.connect(self.show_layout)
         menu.addSeparator()
         for dock in win.docks.values():
             action = dock.toggleViewAction()
             action.setText(f"{dock.windowTitle()} panel")
             menu.addAction(action)
         menu.addSeparator()
+        themes = menu.addMenu("&Theme")
+        self.themes = QActionGroup(win)
+        self.theme_actions = {}
+        for name, text in THEMES.items():
+            action = self._action(themes, text, lambda _=False, n=name: win.set_theme(n),
+                                  checkable=True)
+            self.themes.addAction(action)
+            self.theme_actions[name] = action
+        themes.addSeparator()
+        note = themes.addAction("For this session; [display] theme sets it for good")
+        note.setEnabled(False)
+        themes.aboutToShow.connect(
+            lambda: self.theme_actions[win.theme].setChecked(True))
+        sizes = menu.addMenu("Te&xt size")
+        self._action(sizes, "&Bigger", lambda: win.set_text_size(win.text_size + 1),
+                     keys=["Ctrl++", "Ctrl+="])
+        self._action(sizes, "&Smaller", lambda: win.set_text_size(win.text_size - 1),
+                     keys=["Ctrl+-"])
+        self._action(sizes, "&Normal", lambda: win.set_text_size(0), keys=["Ctrl+0"])
+        menu.addSeparator()
         self.reset = self._action(menu, "&Reset window layout", win.reset_layout,
                                   tip="Panels, columns and size as the first time")
-        menu.aboutToShow.connect(self.show_layout)
 
     def show_layout(self) -> None:
-        """Tick the current layout (menu and toolbar)."""
+        """Tick the current layout."""
         action = self.layout_actions.get(self.window.layout_name)
         if action:
             action.setChecked(True)
-
-    def _toolbar(self) -> None:
-        bar = QToolBar("Layouts", self.window)
-        bar.setObjectName("layout-bar")
-        bar.setMovable(False)
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        bar.addWidget(QLabel(" Layout: "))
-        for action in self.layout_actions.values():
-            bar.addAction(action)
-        self.window.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
-        self.toolbar = bar
 
     # ── Rules ─────────────────────────────────────────────────────────────────
 

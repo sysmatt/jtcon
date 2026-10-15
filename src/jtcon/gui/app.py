@@ -8,6 +8,7 @@ import qasync
 from PySide6.QtWidgets import QApplication
 
 from jtcon.core.engine import Engine
+from jtcon.gui.theme import app_icon
 from jtcon.gui.window import MainWindow
 
 
@@ -48,6 +49,8 @@ class JtconGui:
         app.setApplicationName("jtcon")
         app.setOrganizationName("jtcon")
         app.setQuitOnLastWindowClosed(False)    # run_async finishes up after it closes
+        app.setDesktopFileName("jtcon")
+        app.setWindowIcon(app_icon())
         loop = qasync.QEventLoop(app)
         asyncio.set_event_loop(loop)
         try:

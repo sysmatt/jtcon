@@ -136,6 +136,15 @@ def test_ui_choice(tmp_path):
         load_config(config_dir=tmp_path)
 
 
+def test_theme_choice(tmp_path):
+    assert load_config(config_dir=tmp_path).display.theme == "dark"
+    write(tmp_path / "config.toml", '[display]\ntheme = "system"\n')
+    assert load_config(config_dir=tmp_path).display.theme == "system"
+    write(tmp_path / "config.toml", '[display]\ntheme = "blue"\n')
+    with pytest.raises(ConfigError, match="display.theme"):
+        load_config(config_dir=tmp_path)
+
+
 def test_the_gui_without_pyside6_says_how_to_add_it(tmp_path, monkeypatch, capsys):
     import importlib
     import jtcon.cli
