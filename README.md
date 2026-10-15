@@ -233,14 +233,23 @@ macOS Terminal); most terminals then select as usual.
 
 A third front end is on its way: a desktop window, on Qt, for Linux, Windows and
 macOS ([the plan](docs/gui-plan.md)).  So far it has the Wanted table, the
-decode stream as a table, the log, the command line and the status bar; panels
-you can arrange, and menus, come next.
+decode stream as a table and the log, as panels you arrange, plus the command
+line and the status bar; menus come next.
 
 The Wanted table works as on the Textual screen: click a column header to sort
 (again to reverse), or Ctrl-S; double-click a station, or select it and press
 Enter, to answer it; ↑↓ at `CMD>` select, and Enter on an empty line answers.
 Right-click a station to answer it, ignore it, copy its call, or look it up on
 QRZ.com.
+
+The panels move: drag one by its title to put it beside, above or below another,
+on top of one (as tabs), or out on its own (on a second screen, say).  F2–F5 put
+them back in the Textual screen's four layouts (Wanted, Decodes, Side by side,
+Stacked), and Ctrl-arrows step through those.  Right-click a table's column
+headers to hide or show columns; drag a header to move its column.  The decodes
+keep their columns per layout: side by side and stacked start with the short
+ones.  The window remembers its size, panels and columns from one run to the
+next, in `window.ini` beside your config file.
 
 It needs Qt, which the plain install leaves out (it's a big download), so add it
 with the `gui` extra and start jtcon with `--ui gui`:

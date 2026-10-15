@@ -1,14 +1,20 @@
-"""The main window: the Wanted table, the decode table and the log, the
-command line, the status bar.  Engine events arrive on the Qt thread (one event loop, qasync)."""
+"""The main window: the Wanted table, the decode table and the log as panels
+you arrange (four preset layouts), the command line, the status bar.  Engine
+events arrive on the Qt thread (one event loop, qasync).
+
+The window remembers its size, its panels and the tables' columns between runs
+(QSettings, not config.toml: they're the window's settings, not jtcon's)."""
 
 import asyncio
+import json
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QLabel, QMainWindow, QMessageBox, QSplitter,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QApplication, QDockWidget, QLabel, QMainWindow, QMessageBox,
+                               QToolBar)
 
+from jtcon.config import default_config_dir
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
 from jtcon.gui.models import DecodeRow, decode_columns
@@ -18,6 +24,21 @@ from jtcon.ui.commands import Commands
 from jtcon.ui.status import session_changes, status_badge, status_text
 
 TICK_MS = 250           # status bar and column refresh
+
+# Layouts, in the order Ctrl-arrows step through them, with their names.
+LAYOUTS = {"wanted": "Wanted", "decodes": "Decodes", "side": "Side by side",
+           "stacked": "Stacked"}
+AUTO_SIDE_PX = 2400     # auto layout: side by side on a screen this wide, else stacked
+STATE_VERSION = 1       # of the saved panel arrangement
+
+
+def auto_layout(screen_width: int) -> str:
+    return "side" if screen_width >= AUTO_SIDE_PX else "stacked"
+
+
+def window_settings() -> QSettings:
+    """Where the window keeps itself: window.ini beside config.toml."""
+    return QSettings(str(default_config_dir() / "window.ini"), QSettings.Format.IniFormat)
 
 _BADGE_STYLE = {
     "RX": "background: #2e7d32; color: white; font-weight: bold; padding: 1px 8px;",
@@ -32,9 +53,11 @@ class MainWindow(QMainWindow):
 
     closing = Signal()
 
-    def __init__(self, engine, start_engine: bool = True, dialogs: bool = True):
+    def __init__(self, engine, start_engine: bool = True, dialogs: bool = True,
+                 settings: QSettings | None = None):
         super().__init__()
         self.engine = engine
+        self.settings = settings if settings is not None else window_settings()
         self.config = engine.config
         self.start_engine = start_engine    # False in tests: the engine is set up
         self.dialogs = dialogs              # False in tests: no message boxes
@@ -47,29 +70,18 @@ class MainWindow(QMainWindow):
         self.configured = (self.config.scope.decodes, self.config.display.show)
 
         self.setWindowTitle("jtcon")
-        self.resize(1400, 820)
         self.wanted = WantedView(engine)
         self.decodes = DecodesView()
         self.log_view = LogView()
         self.cmd = CommandLine()
-        split = QSplitter(Qt.Orientation.Vertical)
-        for widget, stretch in ((self.wanted, 3), (self.decodes, 3), (self.log_view, 1)):
-            split.addWidget(widget)
-            split.setStretchFactor(split.count() - 1, stretch)
-        split.setSizes([330, 300, 130])
-        central = QWidget()
-        box = QVBoxLayout(central)
-        box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(0)
-        box.addWidget(split)
-        box.addWidget(self.cmd)
-        self.setCentralWidget(central)
+        self.layout_name = ""
+        self._panels()
         self._status_bar()
 
         self.commands = Commands(engine, out=self.log_view.add, quit=self.close,
                                  clear=self._clear)
         self.cmd.submitted.connect(self._command)
-        self.cmd.edit.arrow.connect(self.wanted.move)
+        self.cmd.edit.arrow.connect(self._arrow)
         self.wanted.answer.connect(self.answer)
         self.wanted.ignore.connect(self.ignore)
         self.wanted.sort_changed.connect(lambda name: self.log_view.add(f"[wanted] Sorted by {name}"))
@@ -77,14 +89,140 @@ class MainWindow(QMainWindow):
                            ("Ctrl+S", self.wanted.cycle_sort),
                            ("PgUp", lambda: self.decodes.page(-1)),
                            ("PgDown", lambda: self.decodes.page(1)),
-                           ("Esc", self.decodes.to_end)):
+                           ("Esc", self.decodes.to_end),
+                           ("F2", lambda: self.set_layout("wanted")),
+                           ("F3", lambda: self.set_layout("decodes")),
+                           ("F4", lambda: self.set_layout("side")),
+                           ("F5", lambda: self.set_layout("stacked")),
+                           ("Ctrl+Right", lambda: self.step_layout(1)),
+                           ("Ctrl+Down", lambda: self.step_layout(1)),
+                           ("Ctrl+Left", lambda: self.step_layout(-1)),
+                           ("Ctrl+Up", lambda: self.step_layout(-1))):
             QShortcut(QKeySequence(keys), self, activated=slot)
+        self._tick()                    # the columns, before restoring their state
+        self._restore()
         self.cmd.setFocus()
 
         self._timer = QTimer(self, interval=TICK_MS, timeout=self._tick)
         self._timer.start()
         self._tick()
         engine.subscribe(self._on_event)
+
+    # ── Panels and layouts ────────────────────────────────────────────────────
+
+    def _panels(self) -> None:
+        """Wanted, Decodes and Log as dock panels; the command line in a fixed
+        bar along the bottom.  There's no central widget: the panels fill it."""
+        self.docks = {}
+        for name, title, widget in (("wanted", "Wanted", self.wanted),
+                                    ("decodes", "Decodes", self.decodes),
+                                    ("log", "Log", self.log_view)):
+            dock = QDockWidget(title, self)
+            dock.setObjectName(f"{name}-panel")
+            dock.setWidget(widget)
+            self.docks[name] = dock
+        self.setDockNestingEnabled(True)
+        # The log runs the full width along the bottom.
+        for corner in (Qt.Corner.BottomLeftCorner, Qt.Corner.BottomRightCorner):
+            self.setCorner(corner, Qt.DockWidgetArea.BottomDockWidgetArea)
+        bar = QToolBar("Command line", self)
+        bar.setObjectName("command-bar")
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.toggleViewAction().setVisible(False)      # always there
+        bar.addWidget(self.cmd)
+        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, bar)
+
+    def set_layout(self, name: str) -> None:
+        """Arrange the panels as preset *name* (F2-F5): the Wanted table, the
+        decodes, both side by side, or stacked; the log along the bottom."""
+        docks = self.docks
+        wanted, decodes, log = docks["wanted"], docks["decodes"], docks["log"]
+        # Out and back in: Qt keeps placeholders where panels were, which would
+        # leave gaps in the new arrangement.
+        for dock in docks.values():
+            dock.setFloating(False)
+            self.removeDockWidget(dock)
+        top = Qt.DockWidgetArea.TopDockWidgetArea
+        self.addDockWidget(top, wanted)
+        if name in ("side", "stacked"):
+            self.splitDockWidget(wanted, decodes, Qt.Orientation.Horizontal if name == "side"
+                                 else Qt.Orientation.Vertical)
+        else:
+            self.addDockWidget(top, decodes)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, log)
+        wanted.setVisible(name != "decodes")
+        decodes.setVisible(name != "wanted")
+        log.setVisible(True)
+        width, height = max(self.width(), 800), max(self.height(), 500)
+        if name == "side":
+            self.resizeDocks([wanted, decodes], [width * 11 // 20, width * 9 // 20],
+                             Qt.Orientation.Horizontal)
+        elif name == "stacked":
+            self.resizeDocks([wanted, decodes], [height * 3 // 7, height * 2 // 7],
+                             Qt.Orientation.Vertical)
+        self.resizeDocks([log], [max(110, height // 6)], Qt.Orientation.Vertical)
+        self.layout_name = name
+        self.decodes.set_layout(name)
+        if name == "decodes" and self.wanted.hasFocus():
+            self.cmd.setFocus()
+
+    def step_layout(self, step: int) -> None:
+        names = list(LAYOUTS)
+        current = names.index(self.layout_name) if self.layout_name in names else 0
+        self.set_layout(names[(current + step) % len(names)])
+
+    def _arrow(self, step: int) -> None:
+        """↑↓ at CMD>: through the Wanted table; with only the decodes showing,
+        they scroll the decodes."""
+        if self.docks["wanted"].isVisible():
+            self.wanted.move(step)
+        else:
+            bar = self.decodes.verticalScrollBar()
+            bar.setValue(bar.value() + step)
+
+    # ── Remembering the window ────────────────────────────────────────────────
+
+    def _restore(self) -> None:
+        """The window as it was last time; the first time, the configured layout."""
+        s = self.settings
+        for view, key in ((self.wanted, "wanted_columns"), (self.decodes, "decode_columns")):
+            try:
+                view.restore(json.loads(s.value(key, "{}")))
+            except (TypeError, ValueError):
+                pass                    # unreadable: the defaults
+        geometry, state = s.value("geometry"), s.value("state")
+        if geometry is None or not self.restoreGeometry(geometry):
+            self.resize(1400, 820)
+        name = s.value("layout", "")
+        if state is not None and name in LAYOUTS and self.restoreState(state, STATE_VERSION):
+            self.layout_name = name
+            self.decodes.set_layout(name)
+        else:
+            self.set_layout(self.first_layout())
+
+    def first_layout(self) -> str:
+        name = self.config.display.layout
+        if name == "auto":
+            screen = QGuiApplication.primaryScreen()
+            return auto_layout(screen.availableGeometry().width() if screen else 0)
+        return name
+
+    def reset_layout(self) -> None:
+        """Forget the saved arrangement and columns: as the first time."""
+        self.wanted.hidden, self.decodes.hidden_by_layout = set(), {}
+        self.wanted.reset_columns()
+        self.decodes.reset_columns()
+        self.set_layout(self.first_layout())
+
+    def save_window(self) -> None:
+        s = self.settings
+        s.setValue("geometry", self.saveGeometry())
+        s.setValue("state", self.saveState(STATE_VERSION))
+        s.setValue("layout", self.layout_name)
+        s.setValue("wanted_columns", json.dumps(self.wanted.state()))
+        s.setValue("decode_columns", json.dumps(self.decodes.state()))
+        s.sync()
 
     def _status_bar(self) -> None:
         bar = self.statusBar()
@@ -218,5 +356,6 @@ class MainWindow(QMainWindow):
         self._timer.stop()
         if not self._closed:
             self._closed = True
+            self.save_window()
             self.closing.emit()
         event.accept()

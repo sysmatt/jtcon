@@ -35,13 +35,21 @@ def frozen_gui_today(monkeypatch):
     monkeypatch.setattr(jtcon.gui.models, "datetime", _FrozenDatetime)
 
 
+@pytest.fixture(autouse=True)
+def window_settings(tmp_path, monkeypatch):
+    """The window remembers itself in tmp_path/jtcon/window.ini, never the real one."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    return tmp_path / "jtcon" / "window.ini"
+
+
 @pytest.fixture
 def window(qtbot, make_engine):
     """A MainWindow on a ready Engine; make(*argv, **kw) as for make_engine."""
     made = []
 
-    def make(*argv, **kw):
+    def make(*argv, layout="stacked", **kw):
         engine = make_engine("--no-color", *argv, **kw)
+        engine.config.display.layout = layout
         win = MainWindow(engine, start_engine=False, dialogs=False)
         win.show()
         made.append(win)
@@ -445,3 +453,174 @@ def test_the_right_click_menu(window, monkeypatch):
     assert replies(tx) == ["CQ VK3XY/P QF22"]
     actions["Ignore for this session"].trigger()
     assert "VK3XY" in win.engine.ignored and wanted(win) == []
+
+
+# ── Panels, layouts, columns, remembering the window ─────────────────────────
+
+def shown(win) -> set:
+    return {name for name, dock in win.docks.items() if dock.isVisibleTo(win)}
+
+
+def visible_columns(view) -> list:
+    """Labels of the columns showing, in screen order."""
+    header, cols = view.horizontalHeader(), view.model().cols
+    logical = sorted(range(len(cols)), key=header.visualIndex)
+    return [cols[i][1] for i in logical if not header.isSectionHidden(i)]
+
+
+def test_the_layout_presets(window):
+    win = window(layout="decodes")
+    assert win.layout_name == "decodes" and shown(win) == {"decodes", "log"}
+    assert "Entity" in visible_columns(win.decodes)                  # all the columns
+    win.set_layout("stacked")
+    assert shown(win) == {"wanted", "decodes", "log"}
+    assert visible_columns(win.decodes) == ["##", "UTC", "dB", "dt", "Hz", "Message"]
+    w, d = win.docks["wanted"].geometry(), win.docks["decodes"].geometry()
+    assert d.top() > w.bottom() - 5                                   # one above the other
+    win.set_layout("side")
+    w, d = win.docks["wanted"].geometry(), win.docks["decodes"].geometry()
+    assert d.left() > w.right() - 5                                   # side by side
+    log = win.docks["log"].geometry()
+    assert log.top() > w.bottom() and log.width() >= w.width() + d.width()
+    win.set_layout("wanted")
+    assert shown(win) == {"wanted", "log"}
+
+
+def test_layout_keys_step_through_the_presets(window):
+    win = window(layout="wanted")
+    keys = {s.key().toString(): s for s in win.findChildren(QShortcut)}
+    keys["F4"].activated.emit()
+    assert win.layout_name == "side"
+    keys["Ctrl+Right"].activated.emit()
+    assert win.layout_name == "stacked"
+    keys["Ctrl+Down"].activated.emit()
+    assert win.layout_name == "wanted"                                # round again
+    keys["Ctrl+Left"].activated.emit()
+    assert win.layout_name == "stacked"
+    keys["F3"].activated.emit()
+    keys["Ctrl+Up"].activated.emit()
+    assert win.layout_name == "wanted"
+
+
+def test_ctrl_arrows_at_cmd_are_left_to_the_layout_keys(window):
+    from PySide6.QtGui import QKeyEvent
+    win = window()
+    for key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+        ev = QKeyEvent(QEvent.Type.ShortcutOverride, key, Qt.KeyboardModifier.ControlModifier)
+        win.cmd.edit.event(ev)
+        assert not ev.isAccepted()
+    ev = QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_Left, Qt.KeyboardModifier.NoModifier)
+    win.cmd.edit.event(ev)
+    assert ev.isAccepted()                       # plain ← still moves the cursor
+
+
+def test_arrows_scroll_the_decodes_when_the_table_is_hidden(window, qtbot):
+    win = window(layout="decodes")
+    for _ in range(80):
+        win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    bar = win.decodes.verticalScrollBar()
+    end = bar.value()
+    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Up)
+    assert bar.value() == end - 1 and win.wanted.selected_call is None
+
+
+def test_hiding_and_showing_columns(window):
+    win = window(layout="decodes")
+    view = win.decodes
+    menu = view.columns_menu()
+    actions = {a.text(): a for a in menu.actions() if a.text()}
+    assert actions["Mode"].isChecked()
+    actions["Mode"].trigger()                                         # hide Mode
+    assert "Mode" not in visible_columns(view)
+    actions = {a.text(): a for a in view.columns_menu().actions() if a.text()}
+    actions["Short: time, dB, dt, Hz, message"].trigger()
+    assert visible_columns(view) == ["##", "UTC", "dB", "dt", "Hz", "Message"]
+    # Each layout keeps its own decode columns.
+    win.set_layout("side")
+    view.set_hidden(view.hidden - {"call"})
+    assert visible_columns(view)[-1] == "Call"
+    win.set_layout("decodes")
+    assert visible_columns(view) == ["##", "UTC", "dB", "dt", "Hz", "Message"]
+    actions = {a.text(): a for a in view.columns_menu().actions() if a.text()}
+    actions["All columns"].trigger()
+    assert "Mode" in visible_columns(view) and "Wanted" in visible_columns(view)
+    win.set_layout("side")
+    assert visible_columns(view)[-1] == "Call"
+    # The last column can't go.
+    view.set_hidden(set(view.keys()))
+    assert visible_columns(view)[-1] == "Call"
+    # The Wanted table has no Short choice.
+    texts = [a.text() for a in win.wanted.columns_menu().actions()]
+    assert "All columns" in texts and not any(t.startswith("Short") for t in texts)
+
+
+def test_moved_columns_keep_their_places_as_columns_come_and_go(window):
+    win = window(layout="wanted")
+    view = win.wanted
+    header = view.horizontalHeader()
+    keys = view.keys()
+    header.moveSection(header.visualIndex(keys.index("grid")), 2)     # Grid after Call
+    assert visible_columns(view)[:3] == ["##", "Call", "Grid"]
+    assert view.order[:3] == ["idx", "call", "grid"]
+    # A rule goes off: its column goes, the rest stay put.
+    win.engine.set_rule_enabled("cqz", False)
+    win.refresh_wanted(force=True)
+    labels = visible_columns(view)
+    assert labels[:3] == ["##", "Call", "Grid"] and "CQZ" not in labels
+    win.engine.set_rule_enabled("cqz", True)
+    win.refresh_wanted(force=True)
+    labels = visible_columns(view)
+    assert labels[:3] == ["##", "Call", "Grid"] and "CQZ" in labels
+    view.reset_columns()
+    assert visible_columns(view)[:3] == ["##", "Call", "QSO"] and view.order == []
+
+
+def test_column_widths_are_the_users_only_when_dragged(window):
+    win = window(layout="wanted")
+    view = win.wanted
+    col = view.keys().index("entity")
+    view.setColumnWidth(col, 300)                     # Qt, not the user
+    assert view.widths == {}
+    view._dragging = True                             # as while the mouse is down
+    view.setColumnWidth(col, 280)
+    view._dragging = False
+    assert view.widths == {"entity": 280}
+
+
+def test_the_window_remembers_itself(window, window_settings):
+    win = window(layout="stacked")
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    win.set_layout("side")
+    win.resize(700, 560)                             # the offscreen screen is 800 wide
+    win.wanted.set_hidden({"ct"})
+    win.wanted.widths["entity"] = 250
+    win.wanted.sort_by("call", reverse=True)
+    win.decodes.set_hidden(win.decodes.hidden - {"call"})
+    win.close()
+    assert window_settings.exists()
+    win = window(layout="stacked")                    # the config's layout: not used now
+    assert win.layout_name == "side"
+    assert win.size().width() == 700
+    assert "ct" in win.wanted.hidden and win.wanted.widths == {"entity": 250}
+    assert win.wanted.columnWidth(win.wanted.keys().index("entity")) == 250
+    assert (win.wanted.wanted.source.sort_name, win.wanted.wanted.source.reverse) == ("call", True)
+    assert visible_columns(win.decodes)[-1] == "Call"
+    # Reset: as the first time, the configured layout.
+    win.reset_layout()
+    assert win.layout_name == "stacked"
+    assert win.wanted.hidden == set() and win.wanted.widths == {}
+    assert visible_columns(win.decodes) == ["##", "UTC", "dB", "dt", "Hz", "Message"]
+
+
+def test_unreadable_window_settings_are_ignored(window, window_settings):
+    window_settings.parent.mkdir(parents=True)
+    window_settings.write_text('[General]\nwanted_columns=not json\nlayout=bogus\nstate=xyz\n')
+    win = window(layout="decodes")
+    assert win.layout_name == "decodes" and win.wanted.hidden == set()
+
+
+def test_the_first_layout(window, monkeypatch):
+    import jtcon.gui.window as gw
+    assert gw.auto_layout(2560) == "side" and gw.auto_layout(1920) == "stacked"
+    monkeypatch.setattr(gw, "auto_layout", lambda width: "decodes")
+    assert window(layout="auto").layout_name == "decodes"

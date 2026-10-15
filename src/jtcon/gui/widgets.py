@@ -4,7 +4,7 @@ command line."""
 import re
 from urllib.parse import quote
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFontDatabase, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QMenu, QPlainTextEdit, QTableView, QWidget)
@@ -100,33 +100,189 @@ class LogView(QPlainTextEdit):
         self._last_key = None
 
 
-class DecodesView(QTableView):
-    """The decode table: follows new decodes while scrolled to the bottom,
-    stays put while scrolled back."""
+class Table(QTableView):
+    """A table with the columns' widths, order and visibility the user's to
+    change, kept by column key so they survive columns coming and going (the
+    status columns follow the rules).  Right-click the header to hide or show
+    columns; drag a header to move it.  state() and restore() save them."""
+
+    _WIDTHS: dict = {}              # typical widths, in characters
+    SHORT: set = set()              # the "Short" column choice; empty: none
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.decodes = DecodeModel(self)
-        self.setModel(self.decodes)
-        self.setFont(fixed_font())
         self.setWordWrap(False)
         self.setShowGrid(False)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         rows = self.verticalHeader()
         rows.hide()
         rows.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        rows.setDefaultSectionSize(self.fontMetrics().height() + 4)
         header = self.horizontalHeader()
         header.setStretchLastSection(True)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setSectionsMovable(True)
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(
+            lambda pos: self.columns_menu().popup(header.mapToGlobal(pos)))
+        header.sectionResized.connect(self._resized)
+        header.sectionMoved.connect(self._moved)
+        self.hidden: set = set()        # keys of hidden columns
+        self.widths: dict = {}          # key -> width the user dragged it to
+        self.order: list = []           # keys in the order the user moved them to
+        self._applying = False
+        self._dragging = False
+        header.viewport().installEventFilter(self)
+
+    def keys(self) -> list:
+        return [key for key, _ in self.model().cols]
+
+    def _row_height(self, extra: int) -> None:
+        self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + extra)
+
+    # ── Applying the user's choices ───────────────────────────────────────────
+
+    def apply_columns(self) -> None:
+        """Widths, visibility and order, for the columns there are now."""
+        self._applying = True
+        try:
+            char = self.fontMetrics().averageCharWidth()
+            labels = dict(self.model().cols)
+            keys = self.keys()
+            for i, key in enumerate(keys):
+                chars = max(self._WIDTHS.get(key, max(len(labels[key]), 6)), len(labels[key]))
+                self.setColumnWidth(i, self.widths.get(key, (chars + 2) * char))
+                self.setColumnHidden(i, key in self.hidden)
+            # The moved columns in the user's order, in the places they occupy;
+            # others (new rule columns) stay where they are.
+            moved = iter([k for k in self.order if k in keys])
+            target = [next(moved) if k in self.order else k for k in keys]
+            header = self.horizontalHeader()
+            for visual, key in enumerate(target):
+                header.moveSection(header.visualIndex(keys.index(key)), visual)
+        finally:
+            self._applying = False
+
+    def eventFilter(self, obj, event) -> bool:
+        """Note when the mouse is down on the header: only then is a column
+        resized by the user rather than by Qt (the last column stretching, which
+        isn't kept either)."""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._dragging = True
+        elif event.type() == QEvent.Type.MouseButtonRelease:
+            self._dragging = False
+        return False
+
+    def _resized(self, logical: int, old: int, new: int) -> None:
+        if self._dragging and not self._applying and new > 0 and logical != self._stretched():
+            self.widths[self.keys()[logical]] = new
+
+    def _stretched(self) -> int:
+        """The last column showing, which stretches to fill the table."""
+        header = self.horizontalHeader()
+        shown = [i for i in range(header.count()) if not header.isSectionHidden(i)]
+        return max(shown, key=header.visualIndex) if shown else -1
+
+    def _moved(self, *_) -> None:
+        if not self._applying:
+            header, keys = self.horizontalHeader(), self.keys()
+            self.order = [keys[header.logicalIndex(v)] for v in range(len(keys))]
+
+    def set_hidden(self, hidden: set) -> None:
+        keys = set(self.keys())
+        if keys and keys <= set(hidden):
+            return                      # always keep one column
+        self.hidden = set(hidden)
+        self.apply_columns()
+
+    def columns_menu(self) -> QMenu:
+        """A check item per column, plus All (and Short, where there is one)."""
+        menu = QMenu(self)
+        for key, label in self.model().cols:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key not in self.hidden)
+            action.toggled.connect(lambda on, key=key: self.set_hidden(
+                self.hidden - {key} if on else self.hidden | {key}))
+        menu.addSeparator()
+        menu.addAction("All columns", lambda: self.set_hidden(set()))
+        if self.SHORT:
+            menu.addAction("Short: time, dB, dt, Hz, message",
+                           lambda: self.set_hidden(set(self.keys()) - self.SHORT))
+        menu.addAction("Reset widths and order", self.reset_columns)
+        return menu
+
+    def reset_columns(self) -> None:
+        self.widths, self.order = {}, []
+        header = self.horizontalHeader()
+        self._applying = True
+        for logical in range(header.count()):
+            header.moveSection(header.visualIndex(logical), logical)
+        self._applying = False
+        self.apply_columns()
+
+    # ── Saving ────────────────────────────────────────────────────────────────
+
+    def state(self) -> dict:
+        return {"hidden": sorted(self.hidden), "widths": self.widths, "order": self.order}
+
+    def restore(self, state: dict) -> None:
+        self.hidden = set(state.get("hidden", []))
+        self.widths = {k: int(v) for k, v in state.get("widths", {}).items()}
+        self.order = list(state.get("order", []))
+        if self.model().cols:
+            self.apply_columns()
+
+
+class DecodesView(Table):
+    """The decode table: follows new decodes while scrolled to the bottom,
+    stays put while scrolled back.
+
+    Which columns show is kept per layout: the split layouts start with the
+    short columns (the Wanted table has the facts), the others with all."""
+
+    SHORT = {"idx", "local", "time", "db", "dt", "hz", "msg"}
+    SPLIT = ("side", "stacked")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.decodes = DecodeModel(self)
+        self.setModel(self.decodes)
+        self.setFont(fixed_font())
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self._row_height(4)
+        self.layout_name = "decodes"
+        self.hidden_by_layout: dict = {}    # layout -> hidden keys, once chosen
         self._follow = True
         self.decodes.rowsAboutToBeInserted.connect(self._before_insert)
         self.decodes.rowsInserted.connect(self._after_insert)
-        self.decodes.modelReset.connect(self._size_columns)
+        self.decodes.modelReset.connect(self._columns_changed)
+
+    def set_layout(self, name: str) -> None:
+        """Show the columns chosen for layout *name*."""
+        self.layout_name = name
+        self._columns_changed()
+
+    def _columns_changed(self) -> None:
+        hidden = self.hidden_by_layout.get(self.layout_name)
+        if hidden is None:              # not chosen yet: the layout's default
+            hidden = set(self.keys()) - self.SHORT if self.layout_name in self.SPLIT else set()
+        self.hidden = set(hidden)
+        self.apply_columns()
+
+    def set_hidden(self, hidden: set) -> None:
+        super().set_hidden(hidden)
+        self.hidden_by_layout[self.layout_name] = sorted(self.hidden)
+
+    def state(self) -> dict:
+        return {**super().state(), "hidden_by_layout": self.hidden_by_layout}
+
+    def restore(self, state: dict) -> None:
+        self.hidden_by_layout = dict(state.get("hidden_by_layout", {}))
+        super().restore(state)
+        self._columns_changed()
 
     @property
     def at_end(self) -> bool:
@@ -145,12 +301,6 @@ class DecodesView(QTableView):
                "msg": 22, "call": 10, "grid": 6, "days": 5, "st": 3, "entity": 22, "cqz": 4,
                "ituz": 4, "ct": 3, "qrz": 4, "lotw": 4}
 
-    def _size_columns(self) -> None:
-        char = self.fontMetrics().averageCharWidth()
-        for i, (key, label) in enumerate(self.decodes.cols):
-            chars = self._WIDTHS.get(key, max(len(label), 6))
-            self.setColumnWidth(i, (max(chars, len(label)) + 2) * char)
-
     def page(self, direction: int) -> None:
         bar = self.verticalScrollBar()
         bar.setValue(bar.value() + direction * max(1, bar.pageStep()))
@@ -159,7 +309,7 @@ class DecodesView(QTableView):
         self.scrollToBottom()
 
 
-class WantedView(QTableView):
+class WantedView(Table):
     """The Wanted table.  A click selects; a double-click or Enter answers
     (*answer(call)*); i ignores (*ignore(call)*); a header click sorts
     (*sort_changed(name)*); right-click for the rest."""
@@ -172,21 +322,10 @@ class WantedView(QTableView):
         super().__init__(parent)
         self.wanted = WantedModel(engine, self)
         self.setModel(self.wanted)
-        self.setWordWrap(False)
-        self.setShowGrid(False)
-        self.setAlternatingRowColors(True)
-        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        rows = self.verticalHeader()
-        rows.hide()
-        rows.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        rows.setDefaultSectionSize(self.fontMetrics().height() + 6)
+        self._row_height(6)
         header = self.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.setSortIndicatorShown(True)
         header.setSectionsClickable(True)
         header.sectionClicked.connect(self._header_clicked)
@@ -265,11 +404,18 @@ class WantedView(QTableView):
                "lotw": 4}
 
     def _columns_changed(self) -> None:
-        char = self.fontMetrics().averageCharWidth()
-        for i, (key, label) in enumerate(self.wanted.cols):
-            chars = self._WIDTHS.get(key, max(len(label), 6))
-            self.setColumnWidth(i, (max(chars, len(label)) + 2) * char)
+        self.apply_columns()
         self._show_sort()
+
+    def state(self) -> dict:
+        source = self.wanted.source
+        return {**super().state(), "sort": source.sort_name, "reverse": source.reverse}
+
+    def restore(self, state: dict) -> None:
+        super().restore(state)
+        if "sort" in state:
+            self.wanted.source.set_sort(state["sort"], bool(state.get("reverse")))
+            self._show_sort()
 
     # ── Right-click menu ──────────────────────────────────────────────────────
 
@@ -301,6 +447,18 @@ class CommandEdit(QLineEdit):
     there's no command history to walk."""
 
     arrow = Signal(int)
+
+    _LAYOUT_KEYS = (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down)
+
+    def event(self, event) -> bool:
+        # Ctrl-arrows change the layout, as on the Textual screen, rather than
+        # moving a word at a time: let the window's shortcuts have them.
+        if (event.type() == QEvent.Type.ShortcutOverride
+                and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() in self._LAYOUT_KEYS):
+            event.ignore()
+            return False
+        return super().event(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Up:

@@ -166,7 +166,7 @@ up, run the suite on 3.11; the check is a loop of `bar.setValue(0)` watching
    cleanup (upload retry, highlight clearing); fatal errors in a message box.
 2. **Wanted panel.** ✅ (2026-10-15)  Model and view, columns, colours, sorting, selection, answer,
    ignore, right-click menu, changed rows.
-3. **Panels and layouts.**  Docking, presets and their keys, hide and show
+3. **Panels and layouts.** ✅ (2026-10-15)  Docking, presets and their keys, hide and show
    columns, the window remembering itself.
 4. **Menus and live controls.**  File, View, Rules (rules, scope, show), Logbook,
    Help; the keys.
