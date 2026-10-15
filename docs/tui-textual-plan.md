@@ -180,8 +180,12 @@ by Matt.
    in `Config.rules_off` (session only, never in `--show-config`), and
    `Config.active_wanted` drives the status columns.  The status line shows
    what differs from the config file (`scope:all show:all off:CQZ`)
-5. **Polish.**  F1 help, mouse, the docs (README section, screenshot), then
-   daily use to decide when it becomes the default.
+5. **Polish.** ✅  F1 help (a pop-up of every key and command), a keys hint in
+   the log strip at startup, a changed row's `##` shown reversed for 2 seconds,
+   the session badge moved to the end of the status line (Matt), the README
+   section and the configuration reference.  Mouse: Textual handles it, so
+   click and double-click work; Shift-drag selects text in most terminals.
+   Next: daily use, then decide when it becomes the default
 
 ## Testing
 

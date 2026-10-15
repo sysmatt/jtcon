@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("textual", minversion="8.2")
 
 from jtcon.core.events import Fatal, LogLine, Ready
-from jtcon.tui.textual_app import JtconApp, RulesScreen
+from jtcon.tui.textual_app import HelpScreen, JtconApp, RulesScreen
 import wsjtx_packets as pk
 
 ADDR = ("127.0.0.1", 2237)
@@ -28,6 +28,8 @@ def run(make_engine, test, *argv, layout="stacked", size=SIZE, **kw):
         app = JtconApp(engine, start_engine=False)
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
+            run.first_log = lines(app.log_strip)
+            app.log_strip.reset()                  # tests start with an empty log strip
             await test(app, pilot)
         return app
     return asyncio.run(main())
@@ -362,7 +364,7 @@ def test_rules_panel_switches_rules_live(make_engine):
         await pilot.pause()
         assert not isinstance(app.screen, RulesScreen)
         app._show_status()
-        assert " off:CQZ " in str(app.status.render())
+        assert str(app.status.render()).endswith(" off:CQZ ")          # at the end
         await pilot.press("f6", "down", "space", "f6")      # back on
         await pilot.pause()
         assert app.config.rules_off == set()
@@ -382,7 +384,7 @@ def test_scope_and_show_toggles(make_engine):
         await pilot.pause()
         assert app.config.display.show == "all"
         app._show_status()
-        assert " scope:all show:all " in str(app.status.render())
+        assert str(app.status.render()).endswith(" scope:all show:all ")
         await hear(app, pilot, "W1ABC VK3XY -12")            # non-CQ: now checked, wanted
         assert [r["Call"] for r in table(app)] == ["VK3XY"]
         await pilot.press("f7", "f8")
@@ -400,4 +402,34 @@ def test_ctrl_q_quits_from_the_rules_panel(make_engine):
         await pilot.press("ctrl+q")
         await pilot.pause()
         assert app._exit
+    run(make_engine, test)
+
+
+
+def test_help_and_the_keys_hint(make_engine):
+    async def test(app, pilot):
+        assert run.first_log[0].startswith("[keys] F1 help · F2–F5 layouts")
+        await pilot.press("f1")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        text = str(app.screen.query_one("#help").render())
+        assert "Ctrl-S" in text and "sync [full]" in text and "📣 calling CQ" in text
+        await pilot.press("down")                         # main-screen keys stay off
+        await pilot.press("f1")
+        await pilot.pause()
+        assert not isinstance(app.screen, HelpScreen)
+    run(make_engine, test)
+
+
+def test_a_changed_row_is_highlighted_briefly(make_engine):
+    async def test(app, pilot):
+        await hear(app, pilot, "CQ VK3XY QF22")
+        st = app.engine.stations.find("VK3XY")
+        rows = lambda now: [(r.call, r.changed) for r in app.wanted.wanted_rows(now)]
+        t = st.heard
+        assert rows(t + 0.5) == [("VK3XY", True)]         # new
+        assert rows(t + 3) == [("VK3XY", False)]          # settled
+        st.stage = "report"                               # its QSO moved on
+        assert rows(t + 4) == [("VK3XY", True)]
+        assert rows(t + 7) == [("VK3XY", False)]
     run(make_engine, test)

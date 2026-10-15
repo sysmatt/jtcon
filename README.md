@@ -7,12 +7,12 @@ your logs and the awards you're chasing, and tells you which stations you want a
 why.  Type a station's number to answer it in WSJT-X.
 
 ```
-##  HHMMSSZ    dB    dt(s)     Hz  mode  message                   callsign      grid     days  ST  | entity                          CQz   ITUz   ct  | DXCC     CQZ   WAS   QRZ  LoW
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-00  123015z   -12    +0.2s   1234  FT8   CQ W1ABC FN42             W1ABC         FN42     590d  MA  | United States                   CQ5   ITU8   NA  | ✅K      ✅5   ✅MA  ⭐  🌎
-01  123015z    -7    +0.1s    842  FT8   CQ VK3XY QF22             VK3XY         QF22               | Australia                       CQ30  ITU59  OC  | ❌VK     ❌30
+##  HHMMSSZ    dB    dt(s)     Hz  mode  message                   callsign      grid     days  ST  | entity                    CQz   ITUz   ct  | DXCC     CQZ   WAS   QRZ  LoW
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+00  123015z   -12    +0.2s   1234  FT8   CQ W1ABC FN42             W1ABC         FN42     590d  MA  | United States             CQ5   ITU8   NA  | ✅K      ✅5   ✅MA  ⭐  🌎
+01  123015z    -7    +0.1s    842  FT8   CQ VK3XY QF22             VK3XY         QF22               | Australia                 CQ30  ITU59  OC  | ❌VK     ❌30
   *** WANTED: ❌DXCC(VK) · ❌CQZ(30) ***
-02  123015z   +03    -0.3s   2210  FT8   CQ POTA K5TX EM10         K5TX          EM10      41d  TX  | United States                   CQ5   ITU8   NA  | ✅K      ✅5   ❓TX
+02  123015z   +03    -0.3s   2210  FT8   CQ POTA K5TX EM10         K5TX          EM10      41d  TX  | United States             CQ5   ITU8   NA  | ✅K      ✅5   ❓TX
   *** WANTED: ❓WAS(TX) · POTA ***
 CMD> 01
 ```
@@ -181,6 +181,53 @@ The status line at the bottom shows RX or TX, where you are in the current
 cycle, decode and CQ counts, your call as WSJT-X reports it, and `ign:N` when
 you're ignoring stations.  `SCROLL` means you've scrolled back; `UDP DOWN` means
 jtcon lost its network socket.
+
+## The new screen (`--ui textual`)
+
+jtcon has a second, newer screen.  Its main view is a live **Wanted table**: one
+row per station you want right now, updated in place, so a wanted station never
+scrolls away.  Try it with `jtcon --ui textual`, or make it your default with
+`ui = "textual"` under `[display]`.  The classic screen above stays the default
+for now.
+
+```
+ ##  Call   QSO  Entity         CQz  ITUz  ct  ST  Grid  dB   Seen  ×   days  DXCC  CQZ   WAS  QRZ  LoW  Wanted
+ 22  K0AU   👋   United States  4    7     NA  CO  DN70  -20  4s    3         ✅K   ❌4   ✅CO            CQZ
+ 02  VK4AB  📶   Australia      30   55    OC      QG62  -14  12s   9         ❌VK  ❌30                  DXCC CQZ
+ 07  K5TX   📣   United States  5    8     NA  TX  EM10  +03  15s   2    41d  ✅K   ✅5   ❓TX            WAS POTA
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+##  HHMMSSZ    dB     dt     Hz  message
+02  123015z   -14   +0.2   1234  W1XYZ VK4AB -12           ★
+07  123015z    +3   -0.3   2210  CQ POTA K5TX EM10         ★
+21  123015z   -19   +0.2    940  CQ K9AT EN52
+─────────────────────────────────────────────────────────────
+[wanted] ✅ Now confirmed: WAS CO
+CMD>
+ RX  14.074 MHz 20m [████████░░░░░░] odd  FT8  dec=42 cq=18 …  de=K2TTA
+```
+
+- **QSO** shows where each station is in a QSO, from its own latest message: 📣
+  calling CQ, 🤝 answering a CQ, 📶 sending reports, 👋 signing off.  👋 means it
+  will probably be free in a cycle or two.
+- **Answer without leaving the command line:** ↑↓ select a station, then Enter on
+  an empty `CMD>` line answers it.  A double-click answers too; a single click only
+  selects.  Ctrl-S changes the sort order (last heard, SNR, call, entity).
+- **Four layouts** of the table and the decode stream: F2 the table, F3 the
+  decodes (today's full lines), F4 side by side, F5 stacked.  Ctrl-arrows step
+  through them.  The split layouts use a short decode line, ★ marking a wanted
+  station, since the table already has the details.  Without a `layout` setting,
+  jtcon picks one from your terminal's size.
+- **Live controls** for this session only: F6 switches rules on and off, F7 checks
+  CQs only or every decode, F8 shows CQs only or every decode.  The end of the
+  status line lists what you've changed, e.g. `off:CQZ`.
+- **jtcon's own messages** (QRZ, confirmations, command replies) have their own
+  strip above the command line, so they never scroll past in the decodes.
+- **F1** lists every key.  The commands are the same as on the classic screen.
+
+A station leaves the table when no rule wants it any more, when you ignore it,
+or after 10 minutes unheard (`wanted_timeout_minutes`).  The screen uses the mouse,
+so to select text for copying, hold Shift while dragging (Option in iTerm2 and
+macOS Terminal); most terminals then select as usual.
 
 ## Commands
 

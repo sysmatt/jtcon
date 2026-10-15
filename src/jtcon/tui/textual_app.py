@@ -141,6 +141,50 @@ class RulesScreen(ModalScreen):
         self.app.rules_changed()
 
 
+HELP = """\
+[b]Layouts[/b]
+  F2  Wanted          F3  Decodes          F4  Side by side      F5  Stacked
+  Ctrl-→ Ctrl-↓  next layout              Ctrl-← Ctrl-↑  previous layout
+
+[b]Wanted table[/b]
+  ↑ ↓        select a station (while typing at CMD>)
+  Enter      on an empty CMD> line: answer the selected station
+  Ctrl-S     sort: last heard, SNR, call, entity (or click a column header)
+  Tab        focus the table; then Enter answers and i ignores
+  Mouse      a click selects, a double-click answers
+
+  QSO        📣 calling CQ   🤝 answering a CQ   📶 sending reports   👋 signing off
+
+[b]Decodes[/b]
+  PgUp PgDn  scroll back          Esc  back to the newest
+
+[b]Live controls[/b] (this session only; the config file isn't changed)
+  F6  rules on and off       F7  scope: CQs or all decodes       F8  show: CQs or all
+
+[b]Commands at CMD>[/b] (any unique start works: l, s, un)
+  07, W1ABC        answer that station
+  list             the wanted stations
+  ignore 07|CALL   ignore a station for this session; ignore alone lists them
+  unignore CALL    stop ignoring it
+  sync \\[full]      fetch online logbook changes, retry waiting uploads
+  clear            clear the screen
+  quit, Ctrl-Q     quit
+
+Esc or F1 closes this."""
+
+
+class HelpScreen(ModalScreen):
+    CSS = """
+    HelpScreen { align: center middle; }
+    #help { width: auto; height: auto; padding: 1 2; border: round $primary;
+            background: $surface; }
+    """
+    BINDINGS = [Binding("escape,f1", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        yield Static(HELP, id="help")
+
+
 class JtconApp(App):
     """The Textual screen.  JtconTextual runs it together with the Engine."""
 
@@ -179,6 +223,7 @@ class JtconApp(App):
         Binding("f5", "layout('stacked')", "Stacked", priority=True),
         Binding("ctrl+right,ctrl+down", "step_layout(1)", show=False, priority=True),
         Binding("ctrl+left,ctrl+up", "step_layout(-1)", show=False, priority=True),
+        Binding("f1", "help", "Help", priority=True),
         Binding("f6", "rules", "Rules", priority=True),
         Binding("f7", "toggle_scope", "Scope", priority=True),
         Binding("f8", "toggle_show", "Show", priority=True),
@@ -187,7 +232,7 @@ class JtconApp(App):
     # Keys the main screen takes even while typing; with the rules panel open
     # they go to the panel instead.
     _MAIN_SCREEN_ACTIONS = {"arrow", "sort", "page_decodes", "decodes_to_live", "layout",
-                            "step_layout", "rules"}
+                            "step_layout", "rules", "help"}
 
     def __init__(self, engine: Engine, start_engine: bool = True):
         super().__init__()
@@ -235,6 +280,8 @@ class JtconApp(App):
         self.set_interval(0.25, self._show_table)
         self._show_header()
         self._show_status()
+        self.log_strip.add("[keys] F1 help · F2–F5 layouts · F6 rules · F7 scope · F8 show"
+                           " · Enter on an empty CMD> answers the selected station")
         self.engine.subscribe(self._on_event)
         # The Engine starts once the screen is up to show what it reports.
         if self.start_engine:
@@ -291,10 +338,10 @@ class JtconApp(App):
             line.append(f" {eng.dial_freq / 1e6:.3f} MHz {band}", style="bold")
         if not self.decodes.is_vertical_scroll_end:
             line.append(" SCROLL ", style="black on yellow")
-        changes = self.session_changes()
+        line.append(status_text(eng))
+        changes = self.session_changes()          # last, out of the way (Matt)
         if changes:
             line.append(f" {changes} ", style="black on cyan")
-        line.append(status_text(eng))
         self.status.update(line)
         # The header depends on the logbook, which loads after startup.
         if (self.engine.logbook is not None and not self.decodes.compact
@@ -353,6 +400,9 @@ class JtconApp(App):
         if action in self._MAIN_SCREEN_ACTIONS and isinstance(self.screen, ModalScreen):
             return False
         return True
+
+    def action_help(self) -> None:
+        self.push_screen(HelpScreen())
 
     def action_rules(self) -> None:
         self.push_screen(RulesScreen(self.engine))

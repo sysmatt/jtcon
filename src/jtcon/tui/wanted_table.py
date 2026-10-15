@@ -30,14 +30,17 @@ SORTS = [
 # Where the station is in a QSO, from its latest message.
 STAGE_MARKS = {STAGE_CQ: "📣", STAGE_ANSWER: "🤝", STAGE_REPORT: "📶", STAGE_73: "👋"}
 
+CHANGE_SHOWN_S = 2.0    # a row that just changed is highlighted this long
+
 _SORT_BY_COLUMN = {"call": "call", "entity": "entity", "db": "SNR", "seen": "last heard"}
 
 
 class Row:
     """One station's line in the table, from its newest evaluated decode."""
 
-    def __init__(self, station, result, ctx):
+    def __init__(self, station, result, ctx, changed: bool = False):
         self.station, self.result, self.ctx = station, result, ctx
+        self.changed   = changed        # just heard again, or its stage or reasons changed
         self.call      = station.callsign
         self.last_seen = max(station.heard, station.last_seen)   # heard sending anything
         self.snr       = result.decoded.snr
@@ -59,7 +62,7 @@ class Row:
             delta = (datetime.now(timezone.utc).date() - calls.last_worked[self.call]).days
             days = f"{delta}d"
         cells = [
-            f"{self.station.idx:02d}",
+            Text(f"{self.station.idx:02d}", style="reverse" if self.changed else ""),
             Text(self.call, style=self.style),
             STAGE_MARKS.get(self.station.stage, ""),
             ei.get("entity", ""),
@@ -118,6 +121,7 @@ class WantedTable(DataTable):
         self.sort_index = 0
         self._columns: list = []
         self._in_click = False
+        self._seen: dict = {}           # call -> (signature, monotonic time it changed)
 
     @property
     def sort_name(self) -> str:
@@ -135,11 +139,17 @@ class WantedTable(DataTable):
         for st in self.engine.stations.hits():
             if now - max(st.heard, st.last_seen) > timeout or st.callsign not in self.latest:
                 continue
-            out.append(Row(st, *self.latest[st.callsign]))
+            sig = (st.heard, st.stage, tuple(h.mark() for h in st.wanted))
+            old = self._seen.get(st.callsign)
+            changed_at = now if old is None or old[0] != sig else old[1]
+            self._seen[st.callsign] = (sig, changed_at)
+            out.append(Row(st, *self.latest[st.callsign],
+                           changed=now - changed_at < CHANGE_SHOWN_S))
         live = {r.call for r in out}
         for call in [c for c in self.latest if c not in live and
                      self.engine.stations.find(c) is None]:
             del self.latest[call]          # gone from the buffer
+            self._seen.pop(call, None)
         return sorted(out, key=SORTS[self.sort_index][1])
 
     def refresh_rows(self) -> None:

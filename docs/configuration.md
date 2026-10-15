@@ -84,6 +84,9 @@ Settings are applied in order, later ones winning: built-in defaults, then
 | `color` | `true` | |
 | `mouse` | `false` | jtcon handles the mouse: the wheel scrolls the decode pane.  Hold Shift to select text |
 | `debug` | `false` | Show raw packets |
+| `ui` | `"classic"` | Which screen: `"classic"`, or `"textual"` for the newer one with the Wanted table (see the README) |
+| `layout` | `"auto"` | The newer screen's starting layout: `"wanted"`, `"decodes"`, `"side"` (side by side) or `"stacked"`.  `"auto"` picks from the terminal size: side by side from 200 columns wide, stacked from 50 rows tall, otherwise the Wanted table |
+| `wanted_timeout_minutes` | `10` | The newer screen: a station unheard this long leaves the Wanted table |
 
 ### `[scope]`
 
@@ -196,6 +199,7 @@ Options override the config file for one run.
 | `--port PORT` | UDP port |
 | `--save FILE` | Write the JSON log to FILE |
 | `--mouse` | Turn on mouse support |
+| `--ui classic\|textual` | Which screen to use |
 | `--no-color` | No colours |
 | `--debug` | Show raw packets |
 | `--version` | Print the version |
