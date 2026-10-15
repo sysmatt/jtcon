@@ -12,7 +12,7 @@ from pathlib import Path
 from jtcon import __version__
 from jtcon.config import (CONFIG_FILE, CONFIG_TEMPLATE, RULES, ConfigError,
                           default_config_dir, list_rules, load_config, profile_from_config,
-                          profile_path, show_config)
+                          profile_path, show_config, write_private)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -114,14 +114,6 @@ def cli_overrides(args: argparse.Namespace) -> dict:
     return layer
 
 
-def _write_private(path: Path, text: str) -> None:
-    """Create *path* readable by its owner only: it may come to hold an API key."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-
-
 def _config_file(args: argparse.Namespace) -> Path:
     return Path(args.config).expanduser() if args.config else default_config_dir() / CONFIG_FILE
 
@@ -130,7 +122,7 @@ def _init_config(path: Path) -> int:
     if path.exists():
         print(f"jtcon: {path} already exists; not overwriting it", file=sys.stderr)
         return 1
-    _write_private(path, CONFIG_TEMPLATE)
+    write_private(path, CONFIG_TEMPLATE)
     print(f"Wrote {path}")
     return 0
 
@@ -154,13 +146,13 @@ def _edit_config(args: argparse.Namespace) -> int:
         return 1
     main_file = _config_file(args)
     if not main_file.exists():
-        _write_private(main_file, CONFIG_TEMPLATE)
+        write_private(main_file, CONFIG_TEMPLATE)
         print(f"Wrote a starter config: {main_file}")
     target = main_file
     if args.profile:
         target = profile_path(args.profile, main_file)
         if not target.exists():
-            _write_private(target, profile_from_config(
+            write_private(target, profile_from_config(
                 main_file.read_text(encoding="utf-8"), args.profile, main_file.name,
                 date.today().isoformat()))
             print(f"Made profile {target} from {main_file.name}")

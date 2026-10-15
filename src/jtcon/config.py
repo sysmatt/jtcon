@@ -32,6 +32,14 @@ class ConfigError(Exception):
     """A config file or override that can't be used; the message says why and where."""
 
 
+def write_private(path: Path, text: str) -> None:
+    """Create *path* readable by its owner only: it may come to hold an API key."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def default_config_dir() -> Path:
     xdg = os.environ.get("XDG_CONFIG_HOME")
     return (Path(xdg) if xdg else Path.home() / ".config") / "jtcon"

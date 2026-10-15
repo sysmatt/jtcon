@@ -9,14 +9,15 @@ import asyncio
 import json
 import time
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QDockWidget, QLabel, QMainWindow, QMessageBox,
-                               QToolBar)
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QDockWidget, QLabel, QMainWindow,
+                               QMessageBox, QToolBar, QToolTip)
 
 from jtcon.config import default_config_dir
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
+from jtcon.gui.menus import Menus
 from jtcon.gui.models import DecodeRow, decode_columns
 from jtcon.gui.widgets import CommandLine, DecodesView, LogView, WantedView, fixed_font
 from jtcon.tui.render import _render
@@ -85,23 +86,19 @@ class MainWindow(QMainWindow):
         self.wanted.answer.connect(self.answer)
         self.wanted.ignore.connect(self.ignore)
         self.wanted.sort_changed.connect(lambda name: self.log_view.add(f"[wanted] Sorted by {name}"))
-        for keys, slot in (("Ctrl+Q", self.close),
-                           ("Ctrl+S", self.wanted.cycle_sort),
+        self.menus = Menus(self)        # with the keys F1-F8, Ctrl-arrows, Ctrl-Q
+        for keys, slot in (("Ctrl+S", self.wanted.cycle_sort),
                            ("PgUp", lambda: self.decodes.page(-1)),
                            ("PgDown", lambda: self.decodes.page(1)),
                            ("Esc", self.decodes.to_end),
-                           ("F2", lambda: self.set_layout("wanted")),
-                           ("F3", lambda: self.set_layout("decodes")),
-                           ("F4", lambda: self.set_layout("side")),
-                           ("F5", lambda: self.set_layout("stacked")),
-                           ("Ctrl+Right", lambda: self.step_layout(1)),
-                           ("Ctrl+Down", lambda: self.step_layout(1)),
-                           ("Ctrl+Left", lambda: self.step_layout(-1)),
-                           ("Ctrl+Up", lambda: self.step_layout(-1))):
+                           ("F6", self.menus.popup_rules)):
             QShortcut(QKeySequence(keys), self, activated=slot)
         self._tick()                    # the columns, before restoring their state
         self._restore()
         self.cmd.setFocus()
+        self.log_view.add("[keys] F1 help · F2–F5 layouts (or the buttons along the top) ·"
+                          " F6 rules · F7 scope · F8 show · Enter on an empty CMD> answers the"
+                          " selected station · drag a panel by its title to move it")
 
         self._timer = QTimer(self, interval=TICK_MS, timeout=self._tick)
         self._timer.start()
@@ -120,6 +117,7 @@ class MainWindow(QMainWindow):
             dock = QDockWidget(title, self)
             dock.setObjectName(f"{name}-panel")
             dock.setWidget(widget)
+            self._title_tips(dock)
             self.docks[name] = dock
         self.setDockNestingEnabled(True)
         # The log runs the full width along the bottom.
@@ -132,6 +130,34 @@ class MainWindow(QMainWindow):
         bar.toggleViewAction().setVisible(False)      # always there
         bar.addWidget(self.cmd)
         self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, bar)
+
+    _TITLE_TIP = ("Drag this title to move the panel: beside, above or below another,"
+                  " or onto one for tabs.  Double-click it to float the panel as its own"
+                  " window, and again to put it back.  F2–F5 or the buttons along the top"
+                  " lay the panels out for you.")
+    _BUTTON_TIPS = {
+        "qt_dockwidget_floatbutton": "Float this panel as its own window, or put it back",
+        "qt_dockwidget_closebutton": "Close this panel (the View menu, F2–F5 or the layout"
+                                     " buttons bring it back)",
+    }
+
+    def _title_tips(self, dock) -> None:
+        """Tooltips on a panel's title bar and its buttons, which Qt draws
+        itself: they're how the panels move, and easy to miss."""
+        for button in dock.findChildren(QAbstractButton):
+            tip = self._BUTTON_TIPS.get(button.objectName())
+            if tip:
+                button.setToolTip(tip)
+        dock.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        # A tooltip over a panel's title bar (above its content); elsewhere in
+        # the panel, the content's own tooltips.
+        if (event.type() == QEvent.Type.ToolTip and isinstance(obj, QDockWidget)
+                and obj.widget() is not None and event.pos().y() < obj.widget().y()):
+            QToolTip.showText(event.globalPos(), self._TITLE_TIP, obj)
+            return True
+        return super().eventFilter(obj, event)
 
     def set_layout(self, name: str) -> None:
         """Arrange the panels as preset *name* (F2-F5): the Wanted table, the
@@ -164,6 +190,7 @@ class MainWindow(QMainWindow):
         self.resizeDocks([log], [max(110, height // 6)], Qt.Orientation.Vertical)
         self.layout_name = name
         self.decodes.set_layout(name)
+        self.menus.show_layout()
         if name == "decodes" and self.wanted.hasFocus():
             self.cmd.setFocus()
 
@@ -198,6 +225,7 @@ class MainWindow(QMainWindow):
         if state is not None and name in LAYOUTS and self.restoreState(state, STATE_VERSION):
             self.layout_name = name
             self.decodes.set_layout(name)
+            self.menus.show_layout()
         else:
             self.set_layout(self.first_layout())
 
@@ -305,6 +333,12 @@ class MainWindow(QMainWindow):
             self.engine.reply(station)
         else:
             self.log_view.add("[cmd] No station selected in the Wanted table.")
+
+    def rules_changed(self) -> None:
+        """A rule, the scope or the show setting changed: the status columns
+        and the rows follow."""
+        self._tick()
+        self.refresh_wanted(force=True)
 
     def ignore(self, call: str) -> None:
         self.engine.ignore(call)

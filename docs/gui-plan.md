@@ -168,7 +168,7 @@ up, run the suite on 3.11; the check is a loop of `bar.setValue(0)` watching
    ignore, right-click menu, changed rows.
 3. **Panels and layouts.** ✅ (2026-10-15)  Docking, presets and their keys, hide and show
    columns, the window remembering itself.
-4. **Menus and live controls.**  File, View, Rules (rules, scope, show), Logbook,
+4. **Menus and live controls.** ✅ (2026-10-15)  File, View, Rules (rules, scope, show), Logbook,
    Help; the keys.  A toolbar along the top with a button per layout preset
    (Matt, 2026-10-15: the panels' drag-and-drop and F2–F5 weren't easy to find),
    and a hint in the log at startup, as on the Textual screen.

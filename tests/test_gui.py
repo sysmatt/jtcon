@@ -14,8 +14,8 @@ pytest.importorskip("pytestqt")
 pytest.importorskip("qasync")
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtWidgets import QApplication, QLabel
 
 import jtcon.gui.models
 from jtcon.core.events import Fatal, LogLine, Ready
@@ -52,6 +52,8 @@ def window(qtbot, make_engine):
         engine.config.display.layout = layout
         win = MainWindow(engine, start_engine=False, dialogs=False)
         win.show()
+        win.first_log = win.log_view.lines()
+        win.log_view.reset()                    # tests start with an empty log
         made.append(win)
         return win
     yield make
@@ -74,6 +76,21 @@ def cell(win, row: int, label: str, role=Qt.ItemDataRole.DisplayRole):
     model = win.decodes.decodes
     col = [c[1] for c in model.cols].index(label)
     return model.data(model.index(row, col), role)
+
+
+def press(win, keys: str) -> None:
+    """Run what *keys* does in the window: a menu action's or a shortcut's.
+    (Offscreen the window never has the keyboard, so keys can't be sent.)"""
+    seq = QKeySequence(keys)
+    for action in win.findChildren(QAction):
+        if seq in action.shortcuts():
+            action.trigger()
+            return
+    for shortcut in win.findChildren(QShortcut):
+        if shortcut.key() == seq:
+            shortcut.activated.emit()
+            return
+    raise KeyError(keys)
 
 
 def command(win, text: str) -> None:
@@ -232,9 +249,8 @@ def test_quit_command_and_ctrl_q_close_the_window(window, qtbot):
         command(win, "quit")
     assert not win.isVisible()
     win = window()
-    ctrl_q = [s for s in win.findChildren(QShortcut) if s.key() == QKeySequence("Ctrl+Q")]
     with qtbot.waitSignal(win.closing):
-        ctrl_q[0].activated.emit()      # offscreen, the window never has key focus
+        press(win, "Ctrl+Q")
 
 
 def test_fatal_closes_the_window(window, qtbot):
@@ -389,8 +405,7 @@ def test_sorting_by_header_and_ctrl_s(window):
     header.sectionClicked.emit(col("Grid"))                               # doesn't sort
     assert win.wanted.wanted.source.sort_name == "SNR"
     assert header.sortIndicatorSection() == col("dB")
-    ctrl_s = [s for s in win.findChildren(QShortcut) if s.key() == QKeySequence("Ctrl+S")]
-    ctrl_s[0].activated.emit()
+    press(win, "Ctrl+S")
     assert win.log_view.lines()[-1] == "[wanted] Sorted by call"
     assert [r["Call"] for r in wanted(win)] == ["VK3XY", "ZL2ABC"]
     assert header.sortIndicatorSection() == col("Call")
@@ -488,18 +503,20 @@ def test_the_layout_presets(window):
 
 def test_layout_keys_step_through_the_presets(window):
     win = window(layout="wanted")
-    keys = {s.key().toString(): s for s in win.findChildren(QShortcut)}
-    keys["F4"].activated.emit()
+    press(win, "F4")
     assert win.layout_name == "side"
-    keys["Ctrl+Right"].activated.emit()
+    press(win, "Ctrl+Right")
     assert win.layout_name == "stacked"
-    keys["Ctrl+Down"].activated.emit()
+    press(win, "Ctrl+Down")
     assert win.layout_name == "wanted"                                # round again
-    keys["Ctrl+Left"].activated.emit()
+    press(win, "Ctrl+Left")
     assert win.layout_name == "stacked"
-    keys["F3"].activated.emit()
-    keys["Ctrl+Up"].activated.emit()
+    press(win, "F3")
+    press(win, "Ctrl+Up")
     assert win.layout_name == "wanted"
+    press(win, "F2")
+    press(win, "F5")
+    assert win.layout_name == "stacked"
 
 
 def test_ctrl_arrows_at_cmd_are_left_to_the_layout_keys(window):
@@ -624,3 +641,162 @@ def test_the_first_layout(window, monkeypatch):
     assert gw.auto_layout(2560) == "side" and gw.auto_layout(1920) == "stacked"
     monkeypatch.setattr(gw, "auto_layout", lambda width: "decodes")
     assert window(layout="auto").layout_name == "decodes"
+
+
+# ── Menus, toolbar, live controls ────────────────────────────────────────────
+
+def menu(win, title: str):
+    for action in win.menuBar().actions():
+        if action.text().replace("&", "") == title:
+            return action.menu()
+    raise KeyError(title)
+
+
+def items(m) -> dict:
+    return {a.text().replace("&", ""): a for a in m.actions() if a.text()}
+
+
+def test_the_menus_and_the_startup_hint(window):
+    win = window()
+    assert [a.text().replace("&", "") for a in win.menuBar().actions()] == [
+        "File", "View", "Rules", "Logbook", "Help"]
+    assert win.first_log[0].startswith("[keys] F1 help · F2–F5 layouts")
+    assert list(items(menu(win, "View")))[:6] == [
+        "Wanted", "Decodes", "Side by side", "Stacked", "Next layout", "Previous layout"]
+
+
+def test_the_layout_toolbar(window):
+    win = window(layout="stacked")
+    bar = win.menus.toolbar
+    buttons = [a for a in bar.actions() if a.text()]
+    assert [a.text().replace("&", "") for a in buttons] == [
+        "Wanted", "Decodes", "Side by side", "Stacked"]
+    assert win.menus.layout_actions["stacked"].isChecked()
+    win.menus.layout_actions["side"].trigger()
+    assert win.layout_name == "side" and win.menus.layout_actions["side"].isChecked()
+    press(win, "F3")                                  # the keys tick the buttons too
+    assert win.menus.layout_actions["decodes"].isChecked()
+    assert not win.menus.layout_actions["side"].isChecked()
+    assert "F4" in win.menus.layout_actions["side"].toolTip()
+
+
+def test_panels_can_be_closed_and_brought_back(window):
+    win = window(layout="stacked")
+    view = items(menu(win, "View"))
+    view["Decodes panel"].trigger()
+    assert shown(win) == {"wanted", "log"}
+    view["Decodes panel"].trigger()
+    assert shown(win) == {"wanted", "decodes", "log"}
+    win.docks["log"].close()
+    press(win, "F5")
+    assert shown(win) == {"wanted", "decodes", "log"}
+    win.set_layout("side")
+    view["Reset window layout"].trigger()
+    assert win.layout_name == "stacked"
+
+
+def test_panel_titles_and_buttons_have_tooltips(window, qtbot):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QAbstractButton, QToolTip
+    win = window()
+    dock = win.docks["wanted"]
+    tips = {b.objectName(): b.toolTip() for b in dock.findChildren(QAbstractButton)}
+    assert tips["qt_dockwidget_floatbutton"].startswith("Float this panel")
+    assert tips["qt_dockwidget_closebutton"].startswith("Close this panel")
+    title = QHelpEvent(QEvent.Type.ToolTip, QPoint(20, 3), dock.mapToGlobal(QPoint(20, 3)))
+    assert win.eventFilter(dock, title)
+    assert QToolTip.text().startswith("Drag this title to move the panel")
+    QToolTip.hideText()
+    below = QPoint(20, dock.widget().y() + 20)
+    inside = QHelpEvent(QEvent.Type.ToolTip, below, dock.mapToGlobal(below))
+    assert not win.eventFilter(dock, inside)          # the table's own tooltips there
+
+
+def test_the_rules_menu_switches_rules_for_the_session(window):
+    win = window()
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    rules = items(menu(win, "Rules"))
+    assert [t for t in rules][:3] == ["DXCC", "CQZ", "CTRY  (country)"]
+    assert all(rules[t].isChecked() for t in ("DXCC", "CQZ", "CTRY  (country)"))
+    rules["CQZ"].trigger()                                            # off
+    assert "cqz" in win.config.rules_off and not rules["CQZ"].isChecked()
+    assert "CQZ" not in [label for _, label in win.wanted.wanted.cols]
+    assert "CQZ" not in [label for _, label in win.decodes.decodes.cols]
+    assert wanted(win)[0]["Wanted"] == "DXCC CTRY"
+    win._tick()
+    assert win.changes.text() == "off:CQZ"
+    rules["CQZ"].trigger()                                            # on again
+    assert win.config.rules_off == set() and rules["CQZ"].isChecked()
+    assert "CQZ" in [label for _, label in win.wanted.wanted.cols]
+
+
+def test_scope_and_show_f7_f8(window):
+    win = window()
+    rules = items(menu(win, "Rules"))
+    press(win, "F7")
+    assert win.config.scope.decodes == "all" and rules["Check all decodes"].isChecked()
+    press(win, "F8")
+    assert win.config.display.show == "all" and rules["Show all decodes"].isChecked()
+    win._tick()
+    assert win.changes.text() == "scope:all show:all"
+    press(win, "F7")
+    press(win, "F8")
+    assert not rules["Check all decodes"].isChecked() and not rules["Show all decodes"].isChecked()
+    assert win.log_view.lines()[-1] == "[show] Showing CQs and wanted stations"
+
+
+def test_f6_pops_up_the_rules_menu(window, qtbot):
+    win = window()
+    press(win, "F6")
+    assert win.menus.rules_menu.isVisible()
+    win.menus.rules_menu.close()
+
+
+def test_the_logbook_menu(window, monkeypatch):
+    win = window()
+    logbook = menu(win, "Logbook")
+    logbook.aboutToShow.emit()
+    assert not items(logbook)["Sync"].isEnabled()                    # QRZ isn't set up
+    calls = []
+    win.engine.qrz = object()
+    monkeypatch.setattr(win.engine, "sync", lambda full=False: calls.append(full))
+    logbook.aboutToShow.emit()
+    assert items(logbook)["Sync"].isEnabled()
+    items(logbook)["Sync"].trigger()
+    items(logbook)["Sync, full download"].trigger()
+    assert calls == [False, True]
+
+
+def test_help_keys_and_about(window):
+    from jtcon import __version__
+    win = window()
+    press(win, "F1")
+    keys = win.menus.dialogs["keys"]
+    assert keys.isVisible() and "F2" in keys.findChild(QLabel).text()
+    items(menu(win, "Help"))["About jtcon"].trigger()
+    about = win.menus.dialogs["about"]
+    assert about.isVisible() and f"jtcon {__version__}" in about.findChild(QLabel).text()
+    press(win, "F1")                                  # the same box, not another
+    assert win.menus.dialogs["keys"] is keys
+
+
+def test_edit_config_file(window, monkeypatch, tmp_path):
+    import jtcon.gui.menus as gm
+    opened = []
+    monkeypatch.setattr(gm, "open_in_editor", lambda path: opened.append(path) or True)
+    win = window()
+    edit = items(menu(win, "File"))["Edit config file"]
+    # No config file yet: a starter one, private, then opened.
+    edit.trigger()
+    path = tmp_path / "jtcon" / "config.toml"
+    assert opened == [str(path)] and path.exists() and (path.stat().st_mode & 0o777) == 0o600
+    assert win.log_view.lines()[-1].startswith(f"[config] Opened {path}")
+    assert "restart jtcon" in win.log_view.lines()[-1]
+    # With a profile in use, the profile.
+    win.config.sources = [path, tmp_path / "jtcon" / "profiles" / "pota.toml"]
+    edit.trigger()
+    assert opened[-1].endswith("pota.toml")
+    monkeypatch.setattr(gm, "open_in_editor", lambda path: False)
+    edit.trigger()
+    assert win.log_view.lines()[-1].startswith("[config] Couldn't open an editor")
