@@ -232,9 +232,15 @@ macOS Terminal); most terminals then select as usual.
 ## The desktop window (`--ui gui`, in progress)
 
 A third front end is on its way: a desktop window, on Qt, for Linux, Windows and
-macOS ([the plan](docs/gui-plan.md)).  So far it has the decode stream as a
-table, the log, the command line and the status bar; the Wanted table, panels
-you can arrange, and menus come next.
+macOS ([the plan](docs/gui-plan.md)).  So far it has the Wanted table, the
+decode stream as a table, the log, the command line and the status bar; panels
+you can arrange, and menus, come next.
+
+The Wanted table works as on the Textual screen: click a column header to sort
+(again to reverse), or Ctrl-S; double-click a station, or select it and press
+Enter, to answer it; ↑↓ at `CMD>` select, and Enter on an empty line answers.
+Right-click a station to answer it, ignore it, copy its call, or look it up on
+QRZ.com.
 
 It needs Qt, which the plain install leaves out (it's a big download), so add it
 with the `gui` extra and start jtcon with `--ui gui`:

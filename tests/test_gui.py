@@ -14,13 +14,14 @@ pytest.importorskip("pytestqt")
 pytest.importorskip("qasync")
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication
 
 import jtcon.gui.models
 from jtcon.core.events import Fatal, LogLine, Ready
 from jtcon.gui.app import JtconGui
 from jtcon.gui.models import COLOURS, DECODE_ROWS
+from jtcon.ui.wanted import CHANGE_SHOWN_S
 from jtcon.gui.widgets import ansi_segments
 from jtcon.gui.window import MainWindow
 from conftest import _FrozenDatetime, FakeSock
@@ -70,6 +71,25 @@ def cell(win, row: int, label: str, role=Qt.ItemDataRole.DisplayRole):
 def command(win, text: str) -> None:
     win.cmd.edit.setText(text)
     win.cmd.edit.returnPressed.emit()
+
+
+def wanted(win) -> list:
+    """The Wanted table as {label: text} per row, after a refresh."""
+    win.refresh_wanted(force=True)
+    model = win.wanted.wanted
+    return [{label: model.text(r, key) for key, label in model.cols}
+            for r in range(model.rowCount())]
+
+
+def wanted_cell(win, row: int, label: str, role=Qt.ItemDataRole.DisplayRole):
+    model = win.wanted.wanted
+    col = [c[1] for c in model.cols].index(label)
+    return model.data(model.index(row, col), role)
+
+
+def replies(tx) -> list:
+    return [pk.parse_reply(data)["message"] for data, _ in tx.sent
+            if data[8:12] == b"\x00\x00\x00\x04"]
 
 
 def test_spots_go_to_the_decode_table(window):
@@ -169,8 +189,8 @@ def test_commands(window):
     assert "ign:1" in win.status.text()
     command(win, "clear")
     assert win.log_view.lines() == [] and table(win) == []
-    command(win, "   ")                              # nothing happens
-    assert win.log_view.lines() == []
+    command(win, "   ")                  # a blank line answers the selected station
+    assert win.log_view.lines() == ["[cmd] No station selected in the Wanted table."]
 
 
 def test_answering_by_index_and_call(window):
@@ -179,8 +199,7 @@ def test_answering_by_index_and_call(window):
     win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
     command(win, "00")
     command(win, "vk3xy")
-    replies = [pk.parse_reply(data) for data, _ in tx.sent if data[8:12] == b"\x00\x00\x00\x04"]
-    assert [r["message"] for r in replies] == ["CQ VK3XY QF22"] * 2
+    assert replies(tx) == ["CQ VK3XY QF22"] * 2
 
 
 def test_status_bar_and_title(window):
@@ -277,3 +296,152 @@ def _no_dialogs(init):
     def wrapped(self, engine, start_engine=True, dialogs=True):
         init(self, engine, start_engine, dialogs=False)
     return wrapped
+
+
+# ── The Wanted table ──────────────────────────────────────────────────────────
+
+def test_the_wanted_table_shows_only_wanted_stations(window):
+    win = window()
+    win.engine.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)      # worked: not wanted
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22", snr=-12), ADDR)
+    rows = wanted(win)
+    assert [r["Call"] for r in rows] == ["VK3XY"]
+    vk = rows[0]
+    assert (vk["##"], vk["QSO"], vk["Entity"], vk["CQz"], vk["dB"], vk["DXCC"], vk["Wanted"]) == (
+        "01", "📣", "Australia", "30", "-12", "❌VK", "DXCC CQZ CTRY")
+    labels = [label for _, label in win.wanted.wanted.cols]
+    assert labels[:3] == ["##", "Call", "QSO"] and labels[-1] == "Wanted"
+    assert wanted_cell(win, 0, "Call", Qt.ItemDataRole.ForegroundRole) == COLOURS["red"]
+    assert wanted_cell(win, 0, "Wanted", Qt.ItemDataRole.FontRole).bold()
+    assert wanted_cell(win, 0, "Grid", Qt.ItemDataRole.ToolTipRole).startswith("❌DXCC(VK)")
+    # Heard sending reports: the QSO column follows.
+    win.engine.datagram_received(pk.decode("W1ABC VK3XY -10"), ADDR)
+    assert wanted(win)[0]["QSO"] == "📶"
+
+
+def test_a_changed_row_lights_up_for_a_moment(window):
+    win = window()
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    model = win.wanted.wanted
+    model.refresh()
+    idx = model.index(0, 0)
+    assert model.data(idx, Qt.ItemDataRole.BackgroundRole) == COLOURS["red"]
+    model.refresh(model.rows[0].last_seen + CHANGE_SHOWN_S + 0.1)
+    assert model.data(idx, Qt.ItemDataRole.BackgroundRole) is None
+
+
+def test_stations_leave_the_table_after_the_timeout(window):
+    win = window()
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    model = win.wanted.wanted
+    st = win.engine.stations.find("VK3XY")
+    model.refresh(st.last_seen + 599)
+    assert model.rowCount() == 1
+    model.refresh(st.last_seen + 601)
+    assert model.rowCount() == 0
+
+
+def test_the_selection_follows_the_station_as_rows_move(window):
+    win = window()
+    for call in ("CQ VK3XY QF22", "CQ ZL2ABC RF80", "CQ ZS6AA KG33"):
+        win.engine.datagram_received(pk.decode(call), ADDR)
+    wanted(win)
+    win.wanted.select_call("VK3XY")
+    win.wanted.sort_by("call")
+    assert [r["Call"] for r in wanted(win)] == ["VK3XY", "ZL2ABC", "ZS6AA"]
+    assert win.wanted.selected_call == "VK3XY"
+    win.wanted.sort_by("call", reverse=True)
+    assert [r["Call"] for r in wanted(win)] == ["ZS6AA", "ZL2ABC", "VK3XY"]
+    assert win.wanted.selected_call == "VK3XY"
+    # A station leaves; the selection stays on VK3XY.
+    command(win, "ignore ZS6AA")
+    assert [r["Call"] for r in wanted(win)] == ["ZL2ABC", "VK3XY"]
+    assert win.wanted.selected_call == "VK3XY"
+    # A new one arrives.
+    win.engine.datagram_received(pk.decode("CQ PY2AA GG66"), ADDR)
+    assert [r["Call"] for r in wanted(win)] == ["ZL2ABC", "VK3XY", "PY2AA"]
+    assert win.wanted.selected_call == "VK3XY"
+
+
+def test_sorting_by_header_and_ctrl_s(window):
+    win = window()
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22", snr=-20), ADDR)
+    win.engine.datagram_received(pk.decode("CQ ZL2ABC RF80", snr=-5), ADDR)
+    header = win.wanted.horizontalHeader()
+    col = lambda label: [c[1] for c in win.wanted.wanted.cols].index(label)
+    assert header.sortIndicatorSection() == col("Seen")                   # last heard
+    header.sectionClicked.emit(col("dB"))
+    assert [r["Call"] for r in wanted(win)] == ["ZL2ABC", "VK3XY"]       # strongest first
+    assert win.log_view.lines()[-1] == "[wanted] Sorted by SNR"
+    assert header.sortIndicatorSection() == col("dB")
+    header.sectionClicked.emit(col("dB"))                                 # again: reversed
+    assert [r["Call"] for r in wanted(win)] == ["VK3XY", "ZL2ABC"]
+    assert win.log_view.lines()[-1] == "[wanted] Sorted by SNR, reversed"
+    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+    header.sectionClicked.emit(col("Grid"))                               # doesn't sort
+    assert win.wanted.wanted.source.sort_name == "SNR"
+    assert header.sortIndicatorSection() == col("dB")
+    ctrl_s = [s for s in win.findChildren(QShortcut) if s.key() == QKeySequence("Ctrl+S")]
+    ctrl_s[0].activated.emit()
+    assert win.log_view.lines()[-1] == "[wanted] Sorted by call"
+    assert [r["Call"] for r in wanted(win)] == ["VK3XY", "ZL2ABC"]
+    assert header.sortIndicatorSection() == col("Call")
+
+
+def test_answering_from_the_table(window, qtbot):
+    tx = FakeSock()
+    win = window(tx_sock=tx)
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    win.engine.datagram_received(pk.decode("CQ ZL2ABC RF80"), ADDR)
+    wanted(win)                                     # newest first: ZL2ABC, VK3XY
+    # ↑↓ at CMD> select; Enter on an empty line answers.
+    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Down)
+    assert win.wanted.selected_call == "ZL2ABC"
+    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Down)
+    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Down)    # stops at the last row
+    assert win.wanted.selected_call == "VK3XY"
+    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Return)
+    assert replies(tx) == ["CQ VK3XY QF22"]
+    # Enter in the table answers; a double-click too.
+    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Up)
+    qtbot.keyClick(win.wanted, Qt.Key.Key_Return)
+    assert replies(tx)[-1] == "CQ ZL2ABC RF80"
+    rect = win.wanted.visualRect(win.wanted.wanted.index(1, 1))
+    qtbot.mouseClick(win.wanted.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    qtbot.mouseDClick(win.wanted.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    assert replies(tx)[-1] == "CQ VK3XY QF22"
+    # A single click only selects.
+    rect = win.wanted.visualRect(win.wanted.wanted.index(0, 1))
+    qtbot.mouseClick(win.wanted.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    assert win.wanted.selected_call == "ZL2ABC" and len(replies(tx)) == 3
+
+
+def test_i_ignores_the_selected_station(window, qtbot):
+    win = window()
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    wanted(win)
+    win.wanted.select_call("VK3XY")
+    qtbot.keyClick(win.wanted, Qt.Key.Key_I)
+    assert "VK3XY" in win.engine.ignored and wanted(win) == []
+    assert win.log_view.lines()[-1].startswith("[ignore] VK3XY ignored for this session")
+
+
+def test_the_right_click_menu(window, monkeypatch):
+    tx = FakeSock()
+    win = window(tx_sock=tx)
+    win.engine.datagram_received(pk.decode("CQ VK3XY/P QF22"), ADDR)
+    wanted(win)
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
+    menu = win.wanted.menu_for("VK3XY/P")
+    actions = {a.text(): a for a in menu.actions() if a.text()}
+    assert list(actions) == ["Answer VK3XY/P", "Ignore for this session", "Copy call",
+                             "Look up on QRZ.com"]
+    actions["Copy call"].trigger()
+    assert QApplication.clipboard().text() == "VK3XY/P"
+    actions["Look up on QRZ.com"].trigger()
+    assert opened == ["https://www.qrz.com/db/VK3XY"]          # the home call
+    actions["Answer VK3XY/P"].trigger()
+    assert replies(tx) == ["CQ VK3XY/P QF22"]
+    actions["Ignore for this session"].trigger()
+    assert "VK3XY" in win.engine.ignored and wanted(win) == []

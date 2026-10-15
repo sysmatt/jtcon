@@ -164,7 +164,7 @@ up, run the suite on 3.11; the check is a loop of `bar.setValue(0)` watching
    (and the message when PySide6 is missing); the window on a `qasync` loop with
    the Engine; Decodes panel, Log panel, command line, status bar; quit and exit
    cleanup (upload retry, highlight clearing); fatal errors in a message box.
-2. **Wanted panel.**  Model and view, columns, colours, sorting, selection, answer,
+2. **Wanted panel.** ✅ (2026-10-15)  Model and view, columns, colours, sorting, selection, answer,
    ignore, right-click menu, changed rows.
 3. **Panels and layouts.**  Docking, presets and their keys, hide and show
    columns, the window remembering itself.

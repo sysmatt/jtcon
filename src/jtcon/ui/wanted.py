@@ -114,17 +114,19 @@ class WantedRows:
         self.engine = engine
         self.latest: dict = {}          # call -> (result, ctx), newest evaluated decode
         self.sort_index = 0
+        self.reverse = False            # the sort order backwards
         self._seen: dict = {}           # call -> (signature, monotonic time it changed)
 
     @property
     def sort_name(self) -> str:
         return SORTS[self.sort_index][0]
 
-    def set_sort(self, name: str | None = None) -> str:
+    def set_sort(self, name: str | None = None, reverse: bool = False) -> str:
         """Sort by *name*, or the next sort order; return its name."""
         names = [n for n, _ in SORTS]
         self.sort_index = (names.index(name) if name in names
                            else (self.sort_index + 1) % len(SORTS))
+        self.reverse = reverse
         return self.sort_name
 
     def note(self, result, ctx, station) -> None:
@@ -149,4 +151,4 @@ class WantedRows:
                      self.engine.stations.find(c) is None]:
             del self.latest[call]          # gone from the buffer
             self._seen.pop(call, None)
-        return sorted(out, key=SORTS[self.sort_index][1])
+        return sorted(out, key=SORTS[self.sort_index][1], reverse=self.reverse)

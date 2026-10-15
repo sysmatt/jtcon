@@ -1,7 +1,8 @@
-"""The main window: the decode table and the log, the command line, the
-status bar.  Engine events arrive on the Qt thread (one event loop, qasync)."""
+"""The main window: the Wanted table, the decode table and the log, the
+command line, the status bar.  Engine events arrive on the Qt thread (one event loop, qasync)."""
 
 import asyncio
+import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -11,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QLabel, QMainWindow, QMessageBox, Q
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
 from jtcon.gui.models import DecodeRow, decode_columns
-from jtcon.gui.widgets import CommandLine, DecodesView, LogView, fixed_font
+from jtcon.gui.widgets import CommandLine, DecodesView, LogView, WantedView, fixed_font
 from jtcon.tui.render import _render
 from jtcon.ui.commands import Commands
 from jtcon.ui.status import session_changes, status_badge, status_text
@@ -40,20 +41,22 @@ class MainWindow(QMainWindow):
         self.fatal_msg: str | None = None
         self.engine_task: asyncio.Future | None = None
         self._closed = False
+        self._wanted_dirty = True
+        self._wanted_shown = 0.0        # monotonic time of the last refresh
         # As configured, to show on the status bar when changed for the session.
         self.configured = (self.config.scope.decodes, self.config.display.show)
 
         self.setWindowTitle("jtcon")
         self.resize(1400, 820)
+        self.wanted = WantedView(engine)
         self.decodes = DecodesView()
         self.log_view = LogView()
         self.cmd = CommandLine()
         split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(self.decodes)
-        split.addWidget(self.log_view)
-        split.setStretchFactor(0, 4)
-        split.setStretchFactor(1, 1)
-        split.setSizes([620, 140])
+        for widget, stretch in ((self.wanted, 3), (self.decodes, 3), (self.log_view, 1)):
+            split.addWidget(widget)
+            split.setStretchFactor(split.count() - 1, stretch)
+        split.setSizes([330, 300, 130])
         central = QWidget()
         box = QVBoxLayout(central)
         box.setContentsMargins(0, 0, 0, 0)
@@ -66,7 +69,12 @@ class MainWindow(QMainWindow):
         self.commands = Commands(engine, out=self.log_view.add, quit=self.close,
                                  clear=self._clear)
         self.cmd.submitted.connect(self._command)
+        self.cmd.edit.arrow.connect(self.wanted.move)
+        self.wanted.answer.connect(self.answer)
+        self.wanted.ignore.connect(self.ignore)
+        self.wanted.sort_changed.connect(lambda name: self.log_view.add(f"[wanted] Sorted by {name}"))
         for keys, slot in (("Ctrl+Q", self.close),
+                           ("Ctrl+S", self.wanted.cycle_sort),
                            ("PgUp", lambda: self.decodes.page(-1)),
                            ("PgDown", lambda: self.decodes.page(1)),
                            ("Esc", self.decodes.to_end)):
@@ -131,13 +139,38 @@ class MainWindow(QMainWindow):
         # The columns depend on the logbook and hamdat, which load after startup.
         self.decodes.decodes.set_columns(decode_columns(
             self.config, has_log=eng.logbook is not None, has_hamdat=eng.hamdat is not None))
+        self.refresh_wanted()
+
+    def refresh_wanted(self, force: bool = False) -> None:
+        """Update the Wanted table when something changed, and every second
+        for the "Seen" times and the changed-row highlight."""
+        now = time.monotonic()
+        if force or self._wanted_dirty or now - self._wanted_shown >= 1.0:
+            self._wanted_dirty = False
+            self._wanted_shown = now
+            self.wanted.wanted.refresh(now)
 
     # ── Commands ──────────────────────────────────────────────────────────────
 
     def _command(self, text: str) -> None:
+        """A command; or, on an empty line, answer the selected station."""
         if text.strip():
             self.decodes.to_end()
             self.commands.handle(text)
+            self.refresh_wanted(force=True)
+        else:
+            self.answer(self.wanted.selected_call)
+
+    def answer(self, call: str | None) -> None:
+        station = self.engine.stations.find(call) if call else None
+        if station:
+            self.engine.reply(station)
+        else:
+            self.log_view.add("[cmd] No station selected in the Wanted table.")
+
+    def ignore(self, call: str) -> None:
+        self.engine.ignore(call)
+        self.refresh_wanted(force=True)
 
     def _clear(self) -> None:
         self.decodes.decodes.clear()
@@ -150,6 +183,8 @@ class MainWindow(QMainWindow):
             self._show_spot(ev)
         elif isinstance(ev, StationUpdated):
             ev.station.display = _render(ev.ctx, ev.result)     # for "list"
+            self.wanted.wanted.note(ev.result, ev.ctx, ev.station)
+            self._wanted_dirty = True
         elif isinstance(ev, LogLine):
             self.log_view.add(ev.text, ev.key)
         elif isinstance(ev, (Ready, UdpDown)):
@@ -162,6 +197,8 @@ class MainWindow(QMainWindow):
             QApplication.beep()
         if ev.station is not None:
             ev.station.display = _render(ev.ctx, ev.result)     # for "list"
+            self.wanted.wanted.note(ev.result, ev.ctx, ev.station)
+            self._wanted_dirty = True
         self.decodes.decodes.add(DecodeRow(ev.ctx, ev.result, ev.station))
 
     # ── Closing ───────────────────────────────────────────────────────────────
