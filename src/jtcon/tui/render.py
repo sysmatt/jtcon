@@ -1,4 +1,4 @@
-"""Fixed-width, ANSI-coloured text for the decode pane and status line."""
+"""Fixed-width, ANSI-coloured text for the decode pane."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from jtcon.core.wanted import MARKS, RULE_CLASSES, AwardRule, rule_label
 
 if TYPE_CHECKING:
     from jtcon.config import Config
-    from jtcon.core.cycle import CycleTracker
     from jtcon.core.decode import DecodeContext, DecodeResult
 
 
@@ -34,9 +33,6 @@ _BMAG = "\033[1;35m"  # bold magenta — WANTED, non-CQ (scope all)
 
 def _col(text: str, code: str, on: bool) -> str:
     return f"{code}{text}{_RST}" if on else text
-
-
-_BAR_WIDTH = 14   # characters wide for the cycle bargraph
 
 
 def _status_columns(cfg: Config) -> list:
@@ -194,62 +190,3 @@ def _header_line(cfg: Config, has_log: bool = False,
     header = "  ".join(parts)
     sep    = "─" * min(len(header), 160)
     return header + "\n" + sep
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Status line
-# ══════════════════════════════════════════════════════════════════════════════
-
-def status_badge(engine) -> str:
-    """"UDP DOWN", "TX" or "RX"."""
-    return "UDP DOWN" if engine.udp_down else "TX" if engine.transmitting else "RX"
-
-
-def status_text(engine) -> str:
-    """The status line after its badge: the cycle bargraph, parity, decode
-    counts and averages, your call and the ignore count."""
-    ct  = engine.cycle_tracker
-    bar = _bargraph(ct)
-    if ct and ct.current_time_ms is not None:
-        parity = ct._parity
-        ev, od = ct._sums["even"], ct._sums["odd"]
-        all_n   = ev[2] + od[2]
-        avg_dec = (ev[0] + od[0]) / all_n if all_n else 0.0
-        avg_cq  = (ev[1] + od[1]) / all_n if all_n else 0.0
-        ev_d = ev[0] / ev[2] if ev[2] else 0.0
-        od_d = od[0] / od[2] if od[2] else 0.0
-        ev_c = ev[1] / ev[2] if ev[2] else 0.0
-        od_c = od[1] / od[2] if od[2] else 0.0
-        stats = (
-            f"  {ct.current_mode}"
-            f"  dec={ct.cycle_total} cq={ct.cycle_cq}"
-            f"  avg dec={avg_dec:.1f} cq={avg_cq:.1f}"
-            f"  even dec={ev_d:.1f} cq={ev_c:.1f}"
-            f"  odd dec={od_d:.1f} cq={od_c:.1f}"
-        )
-    else:
-        parity = "even"
-        stats  = "  (waiting for decodes…)"
-    de  = f"  de={engine.de_call}" if engine.de_call else ""
-    ign = f"  ign:{len(engine.ignored)}" if engine.ignored else ""
-    return f" [{bar}] {parity}{stats}{de}{ign} "
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Cycle bargraph helper
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _bargraph(cycle_tracker: CycleTracker | None) -> str:
-    """Return a bargraph string showing position within the current TX cycle."""
-    now = datetime.now(timezone.utc)
-    ms = (
-        now.hour   * 3_600_000
-        + now.minute *    60_000
-        + now.second *     1_000
-        + now.microsecond // 1_000
-    )
-    mode = cycle_tracker.current_mode if cycle_tracker else "FT8"
-    cycle_ms = 7500 if mode == "FT4" else 15000
-    fraction = (ms % cycle_ms) / cycle_ms
-    filled   = int(fraction * _BAR_WIDTH)
-    return "█" * filled + "░" * (_BAR_WIDTH - filled)

@@ -23,7 +23,8 @@ classifiers = [
 dependencies = ["prompt-toolkit>=3.0", "textual==8.2.8"]   # textual: --ui textual
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+gui = ["PySide6-Essentials==6.11.2", "qasync==0.28.0"]   # --ui gui; 6.12.0 breaks on 3.11 (docs/gui-plan.md)
+test = ["pytest>=7", "pytest-qt==4.5.0"]
 
 [project.urls]
 Homepage = "https://github.com/sysmatt/jtcon"
@@ -45,3 +46,5 @@ fallback_version = "0+unknown"   # source without git history (e.g. GitHub zip)
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# qasync 0.28 on Python 3.14; not ours to fix
+filterwarnings = ["ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning"]

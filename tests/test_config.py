@@ -129,9 +129,31 @@ def test_ui_choice(tmp_path):
     assert load_config(config_dir=tmp_path).display.ui == "textual"
     args = build_parser().parse_args(["--ui", "classic"])
     assert load_config(overrides=cli_overrides(args), config_dir=tmp_path).display.ui == "classic"
+    write(tmp_path / "config.toml", '[display]\nui = "gui"\n')
+    assert load_config(config_dir=tmp_path).display.ui == "gui"
     write(tmp_path / "config.toml", '[display]\nui = "fancy"\n')
     with pytest.raises(ConfigError, match="display.ui"):
         load_config(config_dir=tmp_path)
+
+
+def test_the_gui_without_pyside6_says_how_to_add_it(tmp_path, monkeypatch, capsys):
+    import importlib
+    import jtcon.cli
+    import jtcon.gui
+
+    def no_qt(name):
+        if name.startswith(("PySide6", "qasync")):
+            raise ImportError(f"No module named {name.split('.')[0]!r}")
+        return importlib.import_module(name)
+    monkeypatch.setattr(jtcon.gui.importlib, "import_module", no_qt)
+    monkeypatch.setattr(jtcon.cli.socket, "socket", None)       # never gets that far
+    config = write(tmp_path / "config.toml", "")
+    with pytest.raises(SystemExit) as exit:
+        jtcon.cli.main(["--config", str(config), "--ui", "gui"])
+    assert exit.value.code == 1
+    err = capsys.readouterr().err
+    assert "needs PySide6 and qasync" in err and "No module named 'PySide6'" in err
+    assert 'pipx install --force "jtcon[gui] @ git+https://github.com/sysmatt/jtcon"' in err
 
 
 def test_absent_cli_flags_override_nothing():

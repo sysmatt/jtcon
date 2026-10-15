@@ -23,7 +23,7 @@ driver); Windows is the main target after that; macOS best effort.
 | G2 | Native or browser | Native window |
 | G3 | Platforms | Linux first; then Windows (the main target); macOS best effort |
 | G4 | Alongside the other screens | Yes: `--ui gui` or `[display] ui = "gui"`; the classic screen stays the default |
-| G5 | Install size | **Optional**: `pipx install "jtcon[gui]"`.  The plain install stays as it is (PySide6-Essentials is ~75 MB to download, 200+ MB installed).  `--ui gui` without it says how to add it |
+| G5 | Install size | **Optional**: `pipx install "jtcon[gui] @ git+https://github.com/sysmatt/jtcon"`.  The plain install stays as it is (PySide6-Essentials is ~75 MB to download, 200+ MB installed).  `--ui gui` without it says how to add it |
 | G6 | Joining Qt to asyncio | `qasync`: one event loop that runs both Qt and the Engine, so the Engine needs no threads or changes.  `PySide6.QtAsyncio` (official) is the fallback if `qasync` gives trouble |
 | G7 | The decode stream | A **table** (sortable columns that line up by themselves) rather than text lines; the facts columns can be hidden and shown, which replaces the Textual screen's compact line |
 | G8 | Layout | Dockable panels: Wanted, Decodes, Log.  Drag them anywhere, tab them together, or float them; presets for the four Textual layouts; the window remembers its arrangement |
@@ -135,12 +135,19 @@ None expected beyond what the Textual screen added.  If the GUI needs something
 
 ```toml
 [project.optional-dependencies]
-gui = ["PySide6-Essentials==6.12.0", "qasync==0.28.0"]
+gui = ["PySide6-Essentials==6.11.2", "qasync==0.28.0"]
 ```
 
-Exact versions, current today (2026-10-14), with wheels for Python 3.11–3.14 on
-Linux, Windows and macOS.  Tests add `pytest-qt`.  The classic and Textual screens
-never import Qt.
+Exact versions.  PySide6's wheels are abi3, one per platform for every Python
+from 3.10, on Linux, Windows and macOS (13 and later).  Tests add `pytest-qt==4.5.0`.
+The classic and Textual screens never import Qt.
+
+**Not 6.12.0** (2026-10-08, the newest): on Python 3.11 every Qt call that
+returns nothing takes a reference from `None`, and the interpreter aborts
+("deallocating None") within minutes.  Python 3.12 and later aren't affected
+(their `None` is immortal), and 6.11.2 is fine on all of them.  Before moving
+up, run the suite on 3.11; the check is a loop of `bar.setValue(0)` watching
+`sys.getrefcount(None)`.
 
 ## Testing
 
@@ -153,7 +160,7 @@ never import Qt.
 
 ## Stages
 
-1. **Shared code and skeleton.**  Move the shared pieces to `jtcon/ui/`.  `--ui gui`
+1. **Shared code and skeleton.** ✅ (2026-10-15)  Move the shared pieces to `jtcon/ui/`.  `--ui gui`
    (and the message when PySide6 is missing); the window on a `qasync` loop with
    the Engine; Decodes panel, Log panel, command line, status bar; quit and exit
    cleanup (upload retry, highlight clearing); fatal errors in a message box.

@@ -83,8 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="UDP port matching WSJT-X Settings → Reporting (default 2237)")
     run.add_argument("--save", metavar="FILE",
                      help="Append each CQ record as a JSON line to FILE")
-    run.add_argument("--ui", choices=("classic", "textual"),
-                     help="Front end: the classic screen, or the new Textual one")
+    run.add_argument("--ui", choices=("classic", "textual", "gui"),
+                     help="Front end: the classic screen, the new Textual one, or a desktop "
+                          "window (gui, which needs the jtcon[gui] install)")
     run.add_argument("--mouse", action="store_const", const=True,
                      help="Mouse wheel scrolls the decode pane; hold Shift to select text")
     run.add_argument("--no-color", dest="color", action="store_const", const=False,
@@ -211,8 +212,14 @@ def main(argv: list | None = None) -> None:
         print(show_config(cfg), end="")
         sys.exit(0)
 
+    if cfg.display.ui == "gui":
+        from jtcon.gui import missing
+        problem = missing()
+        if problem:
+            print(problem, file=sys.stderr)
+            sys.exit(1)
+
     from jtcon.core.engine import Engine
-    from jtcon.tui.app import JtconTUI   # prompt_toolkit only when the TUI runs
 
     # ── UDP sockets (must bind before TUI starts so the port is held) ─────────
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -225,10 +232,15 @@ def main(argv: list | None = None) -> None:
     tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
     # ── Launch TUI — all remaining startup happens inside, logged to the pane ─
-    if cfg.display.ui == "textual":
+    # (each front end's toolkit is imported only when it runs)
+    if cfg.display.ui == "gui":
+        from jtcon.gui.app import JtconGui
+        tui = JtconGui(Engine(cfg, sock, tx_sock))
+    elif cfg.display.ui == "textual":
         from jtcon.tui.textual_app import JtconTextual
         tui = JtconTextual(Engine(cfg, sock, tx_sock))
     else:
+        from jtcon.tui.app import JtconTUI
         tui = JtconTUI(Engine(cfg, sock, tx_sock))
     try:
         status = tui.run()

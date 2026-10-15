@@ -6,3 +6,7 @@
 
 prompt-toolkit>=3.0
 textual==8.2.8
+
+# The desktop window (--ui gui) also needs these; pip install ".[gui]" adds them.
+# PySide6-Essentials==6.11.2
+# qasync==0.28.0

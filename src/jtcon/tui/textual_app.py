@@ -20,11 +20,11 @@ from textual.widgets import Input, Label, RichLog, SelectionList, Static
 from jtcon.core.bands import _freq_to_band
 from jtcon.core.engine import Engine
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
-from jtcon.tui.commands import Commands
-from jtcon.tui.render import (_header_compact, _header_line, _render, _render_compact,
-                              status_badge, status_text)
+from jtcon.tui.render import _header_compact, _header_line, _render, _render_compact
 from jtcon.tui.wanted_table import WantedTable
 from jtcon.core.wanted import rule_label
+from jtcon.ui.commands import Commands
+from jtcon.ui.status import session_changes, status_badge, status_text
 
 DECODE_LINES = 5000     # decode pane lines kept
 LOG_LINES    = 500      # log strip lines kept
@@ -423,15 +423,7 @@ class JtconApp(App):
 
     def session_changes(self) -> str:
         """What differs from the config file for this session, for the status line."""
-        cfg, out = self.config, []
-        if cfg.scope.decodes != self.configured[0]:
-            out.append(f"scope:{cfg.scope.decodes}")
-        if cfg.display.show != self.configured[1]:
-            out.append(f"show:{cfg.display.show}")
-        if cfg.rules_off:
-            out.append("off:" + ",".join(rule_label(w) for w in cfg.wanted
-                                         if w.name in cfg.rules_off))
-        return " ".join(out)
+        return session_changes(self.config, self.configured)
 
     def action_quit_jtcon(self) -> None:
         self.exit()

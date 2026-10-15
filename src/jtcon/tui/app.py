@@ -21,8 +21,9 @@ from prompt_toolkit.widgets import TextArea
 from jtcon.core.engine import Engine
 from jtcon.core.events import (Fatal, LogLine, Ready, SpotEvent, StationUpdated, StatusChanged,
                                UdpDown)
-from jtcon.tui.commands import COMMANDS, Commands, match_command
-from jtcon.tui.render import _header_line, _render, status_badge, status_text
+from jtcon.tui.render import _header_line, _render
+from jtcon.ui.commands import COMMANDS, Commands, match_command
+from jtcon.ui.status import status_badge, status_text
 
 _MAX_OUTPUT_LINES = 5000   # output pane is trimmed when it grows past this…
 _TRIM_OUTPUT_TO   = 4000   # …down to this many lines

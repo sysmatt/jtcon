@@ -229,6 +229,24 @@ or after 10 minutes unheard (`wanted_timeout_minutes`).  The screen uses the mou
 so to select text for copying, hold Shift while dragging (Option in iTerm2 and
 macOS Terminal); most terminals then select as usual.
 
+## The desktop window (`--ui gui`, in progress)
+
+A third front end is on its way: a desktop window, on Qt, for Linux, Windows and
+macOS ([the plan](docs/gui-plan.md)).  So far it has the decode stream as a
+table, the log, the command line and the status bar; the Wanted table, panels
+you can arrange, and menus come next.
+
+It needs Qt, which the plain install leaves out (it's a big download), so add it
+with the `gui` extra and start jtcon with `--ui gui`:
+
+```
+pipx install --force "jtcon[gui] @ git+https://github.com/sysmatt/jtcon"
+jtcon --ui gui
+```
+
+On Linux, if it says it can't load the Qt platform plugin "xcb", install
+`libxcb-cursor0` (Debian, Ubuntu) or `xcb-util-cursor` (Fedora, Arch).
+
 ## Commands
 
 Type at the `CMD>` prompt and press Enter.  Any unique start of a command works:
