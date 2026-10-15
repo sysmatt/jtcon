@@ -169,7 +169,9 @@ up, run the suite on 3.11; the check is a loop of `bar.setValue(0)` watching
 3. **Panels and layouts.** ✅ (2026-10-15)  Docking, presets and their keys, hide and show
    columns, the window remembering itself.
 4. **Menus and live controls.**  File, View, Rules (rules, scope, show), Logbook,
-   Help; the keys.
+   Help; the keys.  A toolbar along the top with a button per layout preset
+   (Matt, 2026-10-15: the panels' drag-and-drop and F2–F5 weren't easy to find),
+   and a hint in the log at startup, as on the Textual screen.
 5. **Look and feel.**  Themes (`[display] theme` and the View menu), fonts,
    icon, About.
 6. **Windows and macOS.**  Run and fix on Windows with pipx (Matt tests);
