@@ -23,7 +23,7 @@ classifiers = [
 dependencies = ["prompt-toolkit>=3.0", "textual==8.2.8"]   # textual: --ui textual
 
 [project.optional-dependencies]
-gui = ["PySide6-Essentials==6.11.2", "qasync==0.28.0"]   # --ui gui; 6.12.0 breaks on 3.11 (docs/gui-plan.md)
+gui = ["PySide6-Essentials==6.11.2", "qasync==0.28.0", "tomlkit==0.15.1"]   # --ui gui; 6.12.0 breaks on 3.11 (docs/gui-plan.md)
 test = ["pytest>=7", "pytest-qt==4.5.0"]
 
 [project.urls]

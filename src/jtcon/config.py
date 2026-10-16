@@ -40,6 +40,15 @@ def write_private(path: Path, text: str) -> None:
         f.write(text)
 
 
+def replace_private(path: Path, text: str) -> None:
+    """Write *path* anew, private, in one step: a new file beside it, then
+    renamed over it, so a crash can't leave half a file."""
+    new = path.with_name(path.name + ".new")
+    new.unlink(missing_ok=True)
+    write_private(new, text)
+    os.replace(new, path)
+
+
 def default_config_dir() -> Path:
     xdg = os.environ.get("XDG_CONFIG_HOME")
     return (Path(xdg) if xdg else Path.home() / ".config") / "jtcon"

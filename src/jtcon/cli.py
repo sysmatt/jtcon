@@ -183,6 +183,23 @@ def _edit_args(args: argparse.Namespace) -> str:
     return out
 
 
+def bind_udp(cfg) -> socket.socket:
+    """The socket WSJT-X sends to.  Shared with other listeners (GridTracker,
+    and the next Engine when the window reloads its config)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except AttributeError:
+        pass
+    try:
+        sock.bind((cfg.udp.host, cfg.udp.port))
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
 def main(argv: list | None = None) -> None:
     args = build_parser().parse_args(argv)
 
@@ -214,20 +231,16 @@ def main(argv: list | None = None) -> None:
     from jtcon.core.engine import Engine
 
     # ── UDP sockets (must bind before TUI starts so the port is held) ─────────
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    except AttributeError:
-        pass
-    sock.bind((cfg.udp.host, cfg.udp.port))
+    sock = bind_udp(cfg)
     tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
     # ── Launch TUI — all remaining startup happens inside, logged to the pane ─
     # (each front end's toolkit is imported only when it runs)
     if cfg.display.ui == "gui":
         from jtcon.gui.app import JtconGui
-        tui = JtconGui(Engine(cfg, sock, tx_sock))
+        # File › Reload config reads the config again with this command line.
+        tui = JtconGui(Engine(cfg, sock, tx_sock), reload=lambda: load_config(
+            args.config, args.profile, cli_overrides(args), args.wanted, ignore=args.ignore))
     elif cfg.display.ui == "textual":
         from jtcon.tui.textual_app import JtconTextual
         tui = JtconTextual(Engine(cfg, sock, tx_sock))

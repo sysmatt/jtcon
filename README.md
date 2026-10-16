@@ -256,7 +256,10 @@ closed, and "Reset window layout" starts afresh.
 
 The Rules menu (or F6) switches rules on and off for the session, and has the
 scope (F7) and show (F8) switches; the Logbook menu runs a QRZ sync; File › Edit
-config file opens the config in your editor (restart jtcon to use the changes).
+config file opens the config in your editor, and File › Reload config (Ctrl-R)
+uses your changes without quitting: jtcon restarts in the same window, with the
+command line's options still winning, and the stations you ignored and the rules
+you switched off this session staying so.
 
 It's dark by default.  `theme = "light"` under `[display]` makes it light, and
 `theme = "system"` takes your desktop's own look; View › Theme switches for the

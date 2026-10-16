@@ -66,6 +66,7 @@ KEYS_HELP = """\
 <h3>Other keys</h3>
 <table cellspacing="6">
 <tr><td><b>Ctrl-+ Ctrl-- Ctrl-0</b></td><td>text size (View › Text size)</td></tr>
+<tr><td><b>Ctrl-R</b></td><td>reload the config (File › Reload config)</td></tr>
 <tr><td><b>Ctrl-Q</b></td><td>quit</td></tr>
 </table>"""
 
@@ -105,7 +106,13 @@ class Menus:
 
     def _file(self, menu) -> None:
         self._action(menu, "&Edit config file", self.edit_config,
-                     tip="Open the config file in your editor; restart jtcon to use the changes")
+                     tip="Open the config file in your editor; File › Reload config uses"
+                         " your changes")
+        self.reload = self._action(menu, "&Reload config", self.window.reload_config,
+                                   keys=["Ctrl+R"],
+                                   tip="Read the config again and restart with it, in this"
+                                       " window (the command line's options still win)")
+        self.reload.setEnabled(self.window.reload is not None)
         menu.addSeparator()
         self.quit = self._action(menu, "&Quit", self.window.close, keys=["Ctrl+Q"])
 
@@ -125,8 +132,8 @@ class Menus:
         if not open_in_editor(str(path)):
             self.window.log_view.add(f"[config] Couldn't open an editor; the file is {path}")
             return
-        self.window.log_view.add(f"[config] Opened {path} in your editor.  jtcon reads it at"
-                                 " startup: restart jtcon to use your changes.")
+        self.window.log_view.add(f"[config] Opened {path} in your editor.  Save it, then"
+                                 " File › Reload config (Ctrl-R) to use your changes.")
 
     # ── View ──────────────────────────────────────────────────────────────────
 

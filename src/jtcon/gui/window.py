@@ -58,9 +58,13 @@ class MainWindow(QMainWindow):
     closing = Signal()
 
     def __init__(self, engine, start_engine: bool = True, dialogs: bool = True,
-                 settings: QSettings | None = None):
+                 settings: QSettings | None = None, reload=None, log: list | None = None):
+        """*reload()* restarts with the config read again (File › Reload
+        config), returning why not if it can't; *log* is the log so far, from
+        the window before a reload."""
         super().__init__()
         self.engine = engine
+        self.reload = reload
         self.settings = settings if settings is not None else window_settings()
         self.config = engine.config
         self.start_engine = start_engine    # False in tests: the engine is set up
@@ -104,10 +108,16 @@ class MainWindow(QMainWindow):
         self._tick()                    # the columns, before restoring their state
         self._restore()
         (self.wanted if self.docks["wanted"].isVisibleTo(self) else self.decodes).setFocus()
-        self.log_view.add("[keys] F1 help · F2–F5 layouts (View › Layout) · F6 rules ·"
-                          " F7 scope · F8 show · double-click or Enter answers a station,"
-                          " Delete ignores it · right-click for more · View › Lock panels"
-                          " off to move panels")
+        if log is None:
+            self.log_view.add("[keys] F1 help · F2–F5 layouts (View › Layout) · F6 rules ·"
+                              " F7 scope · F8 show · double-click or Enter answers a station,"
+                              " Delete ignores it · right-click for more · View › Lock panels"
+                              " off to move panels")
+        else:
+            for line in log:
+                self.log_view.add(line)
+            self.log_view.add("[config] Reloaded: the decodes start afresh; the stations"
+                              " ignored and the rules switched off this session still are.")
 
         self._timer = QTimer(self, interval=TICK_MS, timeout=self._tick)
         self._timer.start()
@@ -410,6 +420,18 @@ class MainWindow(QMainWindow):
         self.engine.ignore(call)
         self.refresh_wanted(force=True)
         self.menus.ignored_changed()
+
+    def reload_config(self) -> None:
+        """File › Reload config: restart with the config read again, or say
+        why not and carry on."""
+        if self.reload is None:
+            return
+        self.log_view.add("[config] Reloading the config …")
+        error = self.reload()
+        if error:
+            self.log_view.add(f"[config] {error}  (carrying on as before)")
+            if self.dialogs:
+                QMessageBox(QMessageBox.Icon.Warning, "jtcon", error, parent=self).open()
 
     # ── Engine events ─────────────────────────────────────────────────────────
 

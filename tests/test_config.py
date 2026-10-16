@@ -161,7 +161,7 @@ def test_the_gui_without_pyside6_says_how_to_add_it(tmp_path, monkeypatch, capsy
         jtcon.cli.main(["--config", str(config), "--ui", "gui"])
     assert exit.value.code == 1
     err = capsys.readouterr().err
-    assert "needs PySide6 and qasync" in err and "No module named 'PySide6'" in err
+    assert "needs PySide6, qasync and tomlkit" in err and "No module named 'PySide6'" in err
     assert 'pipx install --force "jtcon[gui] @ git+https://github.com/sysmatt/jtcon"' in err
 
 

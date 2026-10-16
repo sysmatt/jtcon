@@ -350,9 +350,101 @@ def test_a_fatal_error_exits_with_status_1(make_engine, qapp, monkeypatch, capsy
     assert "[fatal] cty.dat: can't download" in capsys.readouterr().err
 
 
+def test_reload_restarts_in_the_window(make_engine, qapp, monkeypatch, tmp_path):
+    """File › Reload config: the config read again, a new Engine in a new
+    window; the session's ignores and rule switches kept; the old Engine's
+    socket closed."""
+    import qasync
+    from jtcon.config import load_config
+    engine = make_engine("--no-color")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    engine.sock = sock
+    monkeypatch.setattr(engine, "_load_inputs", lambda: True)
+    conf = tmp_path / "config.toml"
+    free = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    free.bind(("127.0.0.1", 0))
+    port = free.getsockname()[1]
+    free.close()
+    conf.write_text(f'[udp]\nhost = "127.0.0.1"\nport = {port}\n'
+                    '[[wanted]]\nrule = "dxcc"\n[[wanted]]\nrule = "was"\n')
+
+    class Gui(JtconGui):
+        def new_engine(self, config, sock, tx_sock):
+            new = super().new_engine(config, sock, tx_sock)
+            monkeypatch.setattr(new, "_load_inputs", lambda: True)
+            return new
+
+    gui = Gui(engine, reload=lambda: load_config(conf))
+    seen = {}
+
+    def first():
+        win = seen["first"] = gui.window
+        win.ignore("VK3XY")
+        win.engine.set_rule_enabled("dxcc", False)
+        win.engine.set_rule_enabled("cqz", False)          # not in the new config
+        assert items(menu(win, "File"))["Reload config"].isEnabled()
+        press(win, "Ctrl+R")
+
+    def second():
+        win = seen["second"] = gui.window
+        seen["log"] = win.log_view.lines()
+        seen["engine"] = (win.engine, dict(win.engine.ignored), set(win.config.rules_off),
+                          [w.name for w in win.config.wanted])
+        seen["port"] = win.engine.sock.getsockname()[1]
+        win.close()
+
+    QTimer.singleShot(200, first)
+    QTimer.singleShot(600, second)
+    qapp.setQuitOnLastWindowClosed(False)               # as JtconGui.run sets it
+    loop = qasync.QEventLoop(qapp)
+    asyncio.set_event_loop(loop)
+    try:
+        with loop:
+            status = loop.run_until_complete(gui.run_async())
+    finally:
+        asyncio.set_event_loop(None)
+    assert status == 0
+    assert seen["second"] is not seen["first"]
+    new, ignored, off, rules = seen["engine"]
+    assert new is not engine and gui.engine is new
+    assert seen["port"] == port                                       # the new config's
+    assert ignored == {"VK3XY": "session"} and off == {"dxcc"} and rules == ["dxcc", "was"]
+    assert seen["log"][0].startswith("[keys] F1 help")                # the log carried over
+    assert "[config] Reloading the config …" in seen["log"]
+    reloaded = [i for i, line in enumerate(seen["log"]) if line.startswith("[config] Reloaded")]
+    assert reloaded and seen["log"][-1].startswith("[ready] Listening on 127.0.0.1")
+    assert sock.fileno() == -1 and new.sock.fileno() == -1           # both closed
+
+
+def test_reload_problems_leave_jtcon_as_it_was(window, tmp_path):
+    from jtcon.config import ConfigError, load_config
+    win = window()
+    assert not items(menu(win, "File"))["Reload config"].isEnabled()  # no reload given
+
+    def bad():
+        raise ConfigError("config.toml: udp.port must be an integer, not 'x'")
+    gui = JtconGui(win.engine, reload=bad)
+    gui.window, win.reload = win, gui.reload_config
+    win.reload_config()
+    assert win.isVisible() and gui._next is None
+    assert win.log_view.lines()[-1] == ("[config] Config error: config.toml: udp.port must be"
+                                        " an integer, not 'x'  (carrying on as before)")
+    # The port taken by another program.
+    taken = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    taken.bind(("127.0.0.1", 0))
+    conf = tmp_path / "config.toml"
+    conf.write_text(f'[udp]\nhost = "127.0.0.1"\nport = {taken.getsockname()[1]}\n')
+    gui.reload = lambda: load_config(conf)
+    win.reload_config()
+    taken.close()
+    assert win.isVisible() and gui._next is None
+    assert win.log_view.lines()[-1].startswith("[config] Can't listen on 127.0.0.1:")
+
+
 def _no_dialogs(init):
-    def wrapped(self, engine, start_engine=True, dialogs=True):
-        init(self, engine, start_engine, dialogs=False)
+    def wrapped(self, engine, start_engine=True, dialogs=True, **kw):
+        init(self, engine, start_engine, dialogs=False, **kw)
     return wrapped
 
 
@@ -897,7 +989,7 @@ def test_edit_config_file(window, monkeypatch, tmp_path):
     path = tmp_path / "jtcon" / "config.toml"
     assert opened == [str(path)] and path.exists() and (path.stat().st_mode & 0o777) == 0o600
     assert win.log_view.lines()[-1].startswith(f"[config] Opened {path}")
-    assert "restart jtcon" in win.log_view.lines()[-1]
+    assert "File › Reload config" in win.log_view.lines()[-1]
     # With a profile in use, the profile.
     win.config.sources = [path, tmp_path / "jtcon" / "profiles" / "pota.toml"]
     edit.trigger()
