@@ -93,11 +93,6 @@ def press(win, keys: str) -> None:
     raise KeyError(keys)
 
 
-def command(win, text: str) -> None:
-    win.cmd.edit.setText(text)
-    win.cmd.edit.returnPressed.emit()
-
-
 def wanted(win) -> list:
     """The Wanted table as {label: text} per row, after a refresh."""
     win.refresh_wanted(force=True)
@@ -201,30 +196,62 @@ def test_ansi_segments():
     assert ansi_segments("") == []
 
 
-def test_commands(window):
+def test_no_command_line_and_the_clear_items(window):
+    from PySide6.QtWidgets import QLineEdit
     win = window()
+    assert not win.findChildren(QLineEdit) and not win.findChildren(QToolBar)
     win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
-    command(win, "foo")
-    assert win.log_view.lines()[-1].startswith("[cmd] Unknown: 'foo'")
-    command(win, "l")
-    assert any(line.startswith("[list] 1 wanted") for line in win.log_view.lines())
-    command(win, "i 00")
-    assert win.log_view.lines()[-1].startswith("[ignore] VK3XY ignored for this session")
-    win._tick()
-    assert "ign:1" in win.status.text()
-    command(win, "clear")
-    assert win.log_view.lines() == [] and table(win) == []
-    command(win, "   ")                  # a blank line answers the selected station
-    assert win.log_view.lines() == ["[cmd] No station selected in the Wanted table."]
+    win.log_view.add("[test] a line")
+    view = items(menu(win, "View"))
+    view["Clear decodes"].trigger()
+    assert table(win) == [] and win.log_view.lines() == ["[test] a line"]
+    view["Clear log"].trigger()
+    assert win.log_view.lines() == []
+    # And on the panels' right-click menus.
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    win.log_view.add("[test] a line")
+    items(win.decodes.menu_for(None))["Clear decodes"].trigger()
+    assert table(win) == []
+    log_menu = items(win.log_view.menu())
+    assert "Select All" in "".join(log_menu)                    # Qt's own items too
+    log_menu["Clear log"].trigger()
+    assert win.log_view.lines() == []
 
 
-def test_answering_by_index_and_call(window):
+def test_answering_and_ignoring_from_the_decodes(window, qtbot):
     tx = FakeSock()
     win = window(tx_sock=tx)
-    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
-    command(win, "00")
-    command(win, "vk3xy")
-    assert replies(tx) == ["CQ VK3XY QF22"] * 2
+    win.engine.set_scope("all")
+    win.engine.set_show("all")
+    win.engine.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)       # not wanted
+    win.engine.datagram_received(pk.decode("K2TTA JA1ABC PM95"), ADDR)  # not a CQ
+    win.engine.datagram_received(pk.decode("73"), ADDR)                 # no call
+    assert [r["Call"] for r in table(win)] == ["W1ABC", "JA1ABC", ""]
+    # Double-click a CQ: answered, wanted or not.
+    rect = win.decodes.visualRect(win.decodes.decodes.index(0, 0))
+    qtbot.mouseClick(win.decodes.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    qtbot.mouseDClick(win.decodes.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    assert replies(tx) == ["CQ W1ABC FN42"]
+    win.decodes.selectRow(0)
+    qtbot.keyClick(win.decodes, Qt.Key.Key_Return)
+    assert replies(tx) == ["CQ W1ABC FN42"] * 2
+    # No CQ from JA1ABC: Answer is greyed out; Enter says why.
+    actions = items(win.decodes.menu_for("JA1ABC"))
+    assert not actions["Answer JA1ABC\tEnter"].isEnabled()
+    win.decodes.selectRow(1)
+    qtbot.keyClick(win.decodes, Qt.Key.Key_Return)
+    assert win.log_view.lines()[-1] == "[answer] No CQ from JA1ABC to answer."
+    # A row with no call has only Clear.
+    win.decodes.selectRow(2)
+    assert win.decodes.selected_call is None
+    assert list(items(win.decodes.menu_for(win.decodes.selected_call))) == ["Clear decodes"]
+    # Delete ignores.
+    win.decodes.selectRow(1)
+    qtbot.keyClick(win.decodes, Qt.Key.Key_Delete)
+    assert "JA1ABC" in win.engine.ignored
+    actions = items(win.decodes.menu_for("W1ABC"))
+    actions["Ignore W1ABC for this session\tDel"].trigger()
+    assert "W1ABC" in win.engine.ignored
 
 
 def test_status_bar_and_title(window):
@@ -243,10 +270,10 @@ def test_status_bar_and_title(window):
     assert win.changes.text() == "scope:all" and win.changes.isVisibleTo(win)
 
 
-def test_quit_command_and_ctrl_q_close_the_window(window, qtbot):
+def test_quit_and_ctrl_q_close_the_window(window, qtbot):
     win = window()
     with qtbot.waitSignal(win.closing):
-        command(win, "quit")
+        items(menu(win, "File"))["Quit"].trigger()
     assert not win.isVisible()
     win = window()
     with qtbot.waitSignal(win.closing):
@@ -385,7 +412,7 @@ def test_the_selection_follows_the_station_as_rows_move(window):
     assert [r["Call"] for r in wanted(win)] == ["ZS6AA", "ZL2ABC", "VK3XY"]
     assert win.wanted.selected_call == "VK3XY"
     # A station leaves; the selection stays on VK3XY.
-    command(win, "ignore ZS6AA")
+    win.ignore("ZS6AA")
     assert [r["Call"] for r in wanted(win)] == ["ZL2ABC", "VK3XY"]
     assert win.wanted.selected_call == "VK3XY"
     # A new one arrives.
@@ -424,16 +451,14 @@ def test_answering_from_the_table(window, qtbot):
     win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
     win.engine.datagram_received(pk.decode("CQ ZL2ABC RF80"), ADDR)
     wanted(win)                                     # newest first: ZL2ABC, VK3XY
-    # ↑↓ at CMD> select; Enter on an empty line answers.
-    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Down)
-    assert win.wanted.selected_call == "ZL2ABC"
-    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Down)
-    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Down)    # stops at the last row
+    # The arrow keys select; Enter answers; a double-click too.
+    assert win.focusWidget() is win.wanted          # where the keys go at first
+    win.wanted.selectRow(0)
+    qtbot.keyClick(win.wanted, Qt.Key.Key_Down)
     assert win.wanted.selected_call == "VK3XY"
-    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Return)
+    qtbot.keyClick(win.wanted, Qt.Key.Key_Return)
     assert replies(tx) == ["CQ VK3XY QF22"]
-    # Enter in the table answers; a double-click too.
-    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Up)
+    qtbot.keyClick(win.wanted, Qt.Key.Key_Up)
     qtbot.keyClick(win.wanted, Qt.Key.Key_Return)
     assert replies(tx)[-1] == "CQ ZL2ABC RF80"
     rect = win.wanted.visualRect(win.wanted.wanted.index(1, 1))
@@ -446,14 +471,18 @@ def test_answering_from_the_table(window, qtbot):
     assert win.wanted.selected_call == "ZL2ABC" and len(replies(tx)) == 3
 
 
-def test_i_ignores_the_selected_station(window, qtbot):
+def test_delete_or_i_ignores_the_selected_station(window, qtbot):
     win = window()
     win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    win.engine.datagram_received(pk.decode("CQ ZL2ABC RF80"), ADDR)
     wanted(win)
     win.wanted.select_call("VK3XY")
-    qtbot.keyClick(win.wanted, Qt.Key.Key_I)
-    assert "VK3XY" in win.engine.ignored and wanted(win) == []
+    qtbot.keyClick(win.wanted, Qt.Key.Key_Delete)
+    assert "VK3XY" in win.engine.ignored and [r["Call"] for r in wanted(win)] == ["ZL2ABC"]
     assert win.log_view.lines()[-1].startswith("[ignore] VK3XY ignored for this session")
+    win.wanted.select_call("ZL2ABC")
+    qtbot.keyClick(win.wanted, Qt.Key.Key_I)
+    assert wanted(win) == []
 
 
 def test_the_right_click_menu(window, monkeypatch):
@@ -463,17 +492,16 @@ def test_the_right_click_menu(window, monkeypatch):
     wanted(win)
     opened = []
     monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
-    menu = win.wanted.menu_for("VK3XY/P")
-    actions = {a.text(): a for a in menu.actions() if a.text()}
-    assert list(actions) == ["Answer VK3XY/P", "Ignore for this session", "Copy call",
-                             "Look up on QRZ.com"]
+    actions = items(win.wanted.menu_for("VK3XY/P"))
+    assert list(actions) == ["Answer VK3XY/P\tEnter", "Ignore VK3XY/P for this session\tDel",
+                             "Copy call", "Look up on QRZ.com"]
     actions["Copy call"].trigger()
     assert QApplication.clipboard().text() == "VK3XY/P"
     actions["Look up on QRZ.com"].trigger()
     assert opened == ["https://www.qrz.com/db/VK3XY"]          # the home call
-    actions["Answer VK3XY/P"].trigger()
+    actions["Answer VK3XY/P\tEnter"].trigger()
     assert replies(tx) == ["CQ VK3XY/P QF22"]
-    actions["Ignore for this session"].trigger()
+    actions["Ignore VK3XY/P for this session\tDel"].trigger()
     assert "VK3XY" in win.engine.ignored and wanted(win) == []
 
 
@@ -526,26 +554,15 @@ def test_layout_keys_step_through_the_presets(window):
     assert win.layout_name == "stacked"
 
 
-def test_ctrl_arrows_at_cmd_are_left_to_the_layout_keys(window):
+def test_ctrl_arrows_in_the_tables_are_left_to_the_layout_keys(window):
     from PySide6.QtGui import QKeyEvent
     win = window()
-    for key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
-        ev = QKeyEvent(QEvent.Type.ShortcutOverride, key, Qt.KeyboardModifier.ControlModifier)
-        win.cmd.edit.event(ev)
-        assert not ev.isAccepted()
-    ev = QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_Left, Qt.KeyboardModifier.NoModifier)
-    win.cmd.edit.event(ev)
-    assert ev.isAccepted()                       # plain ← still moves the cursor
-
-
-def test_arrows_scroll_the_decodes_when_the_table_is_hidden(window, qtbot):
-    win = window(layout="decodes")
-    for _ in range(80):
-        win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
-    bar = win.decodes.verticalScrollBar()
-    end = bar.value()
-    qtbot.keyClick(win.cmd.edit, Qt.Key.Key_Up)
-    assert bar.value() == end - 1 and win.wanted.selected_call is None
+    for view in (win.wanted, win.decodes):
+        for key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            ev = QKeyEvent(QEvent.Type.ShortcutOverride, key, Qt.KeyboardModifier.ControlModifier)
+            ev.ignore()
+            view.event(ev)
+            assert not ev.isAccepted()
 
 
 def test_hiding_and_showing_columns(window):
@@ -636,6 +653,85 @@ def test_the_window_remembers_itself(window, window_settings):
     assert visible_columns(win.decodes) == ["##", "UTC", "dB", "dt", "Hz", "Message"]
 
 
+def test_lock_panels(window, window_settings):
+    from PySide6.QtWidgets import QDockWidget
+    win = window()
+    lock = items(menu(win, "View"))["Lock panels"]
+    # Locked at first: no title bars, no dragging or floating.
+    assert win.locked and lock.isChecked()
+    for dock in win.docks.values():
+        assert dock.titleBarWidget() is not None
+        assert not dock.features() & QDockWidget.DockWidgetFeature.DockWidgetMovable
+    assert win.docks["decodes"].widget().y() < 5                       # no room taken
+    lock.trigger()
+    assert not win.locked
+    for dock in win.docks.values():
+        assert dock.titleBarWidget() is None
+        assert dock.features() & QDockWidget.DockWidgetFeature.DockWidgetMovable
+    # A floating panel keeps its title while locked, to be put back.
+    win.docks["log"].setFloating(True)
+    lock.trigger()
+    assert win.locked and win.docks["log"].titleBarWidget() is None
+    assert win.docks["wanted"].titleBarWidget() is not None
+    win.docks["log"].setFloating(False)
+    assert win.docks["log"].titleBarWidget() is not None
+    # Remembered.
+    lock.trigger()
+    win.close()
+    assert not window().locked
+
+
+def test_the_station_menu(window, monkeypatch):
+    tx = FakeSock()
+    win = window(tx_sock=tx)
+    station = menu(win, "Station")
+    win.menus.fill_station()
+    assert list(items(station)) == ["Select a station in the Wanted or Decodes panel",
+                                    "Ignored stations…"]
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    win.engine.datagram_received(pk.decode("CQ ZL2ABC RF80"), ADDR)
+    wanted(win)
+    win.wanted.select_call("VK3XY")
+    win.decodes.selectRow(1)                          # ZL2ABC
+    win.menus.fill_station()
+    assert list(items(station))[:2] == ["Answer VK3XY\tEnter", "Ignore VK3XY for this session\tDel"]
+    win.decodes.focused.emit()                        # the decodes used last
+    win.menus.fill_station()
+    items(station)["Answer ZL2ABC\tEnter"].trigger()
+    assert replies(tx) == ["CQ ZL2ABC RF80"]
+    win.set_layout("wanted")                          # the decodes hidden: the Wanted row
+    win.menus.fill_station()
+    items(station)["Ignore VK3XY for this session\tDel"].trigger()
+    assert "VK3XY" in win.engine.ignored
+
+
+def test_the_ignored_stations_box(window):
+    win = window()
+    win.engine.ignored["W1AW"] = "config"            # as from [filters] ignore
+    win.engine.datagram_received(pk.decode("CQ VK3XY QF22"), ADDR)
+    win.ignore("VK3XY")
+    items(menu(win, "Station"))["Ignored stations…"].trigger()
+    box = win.menus.dialogs["ignored"]
+    assert box.isVisible() and box.calls() == ["VK3XY", "W1AW"]
+    assert box.list.topLevelItem(1).text(1) == "the config file"
+    assert not box.unignore_button.isEnabled()
+    # Unignore; ignoring elsewhere shows up here; Add.
+    box.list.topLevelItem(0).setSelected(True)
+    assert box.unignore_button.isEnabled()
+    box.unignore_button.click()
+    assert box.calls() == ["W1AW"] and "VK3XY" not in win.engine.ignored
+    win.ignore("ZL2ABC")
+    assert box.calls() == ["W1AW", "ZL2ABC"]
+    box.entry.setText("k1abc")
+    box.entry.returnPressed.emit()
+    assert box.calls() == ["K1ABC", "W1AW", "ZL2ABC"] and box.entry.text() == ""
+    box.entry.setText("hello")
+    box.entry.returnPressed.emit()
+    assert box.message.text() == "HELLO isn't a callsign." and len(box.calls()) == 3
+    win._tick()
+    assert "ign:3" in win.status.text()
+
+
 def test_unreadable_window_settings_are_ignored(window, window_settings):
     window_settings.parent.mkdir(parents=True)
     window_settings.write_text('[General]\nwanted_columns=not json\nlayout=bogus\nstate=xyz\n')
@@ -666,10 +762,11 @@ def items(m) -> dict:
 def test_the_menus_and_the_startup_hint(window):
     win = window()
     assert [a.text().replace("&", "") for a in win.menuBar().actions()] == [
-        "File", "View", "Rules", "Logbook", "Help"]
+        "File", "View", "Station", "Rules", "Logbook", "Help"]
     assert win.first_log[0].startswith("[keys] F1 help · F2–F5 layouts")
-    assert list(items(menu(win, "View")))[:4] == [
-        "Layout", "Wanted panel", "Decodes panel", "Log panel"]
+    assert "double-click or Enter answers" in win.first_log[0]
+    assert list(items(menu(win, "View")))[:5] == [
+        "Layout", "Wanted panel", "Decodes panel", "Log panel", "Lock panels"]
 
 
 def test_the_layout_menu(window):
@@ -707,6 +804,7 @@ def test_panel_titles_and_buttons_have_tooltips(window, qtbot):
     from PySide6.QtGui import QHelpEvent
     from PySide6.QtWidgets import QAbstractButton, QToolTip
     win = window()
+    win.set_locked(False)                             # the titles show
     dock = win.docks["wanted"]
     tips = {b.objectName(): b.toolTip() for b in dock.findChildren(QAbstractButton)}
     assert tips["qt_dockwidget_floatbutton"].startswith("Float this panel")

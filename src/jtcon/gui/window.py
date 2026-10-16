@@ -1,6 +1,7 @@
 """The main window: the Wanted table, the decode table and the log as panels
-you arrange (four preset layouts), the command line, the status bar.  Engine
-events arrive on the Qt thread (one event loop, qasync).
+you arrange (four preset layouts), and the status bar.  No command line: the
+menus, the tables and their right-click menus do what CMD> does on the other
+screens.  Engine events arrive on the Qt thread (one event loop, qasync).
 
 The window remembers its size, its panels and the tables' columns between runs
 (QSettings, not config.toml: they're the window's settings, not jtcon's)."""
@@ -12,7 +13,7 @@ import time
 from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QDockWidget, QLabel, QMainWindow,
-                               QMessageBox, QToolBar, QToolTip)
+                               QMessageBox, QToolTip, QWidget)
 
 from jtcon.config import default_config_dir
 from jtcon.core.bands import _freq_to_band
@@ -20,9 +21,7 @@ from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, 
 from jtcon.gui.menus import Menus
 from jtcon.gui.models import DecodeRow, decode_columns
 from jtcon.gui.theme import app_icon, apply_theme
-from jtcon.gui.widgets import CommandLine, DecodesView, LogView, WantedView, fixed_font
-from jtcon.tui.render import _render
-from jtcon.ui.commands import Commands
+from jtcon.gui.widgets import DecodesView, LogView, WantedView, fixed_font
 from jtcon.ui.status import session_changes, status_badge, status_text
 
 TICK_MS = 250           # status bar and column refresh
@@ -81,19 +80,19 @@ class MainWindow(QMainWindow):
         self.wanted = WantedView(engine)
         self.decodes = DecodesView()
         self.log_view = LogView()
-        self.cmd = CommandLine()
         self.layout_name = ""
+        self.locked = False
+        self.last_table = self.wanted   # the Station menu acts on its selection
         self._panels()
         self._status_bar()
         self.text_size = 0
         self._fonts = {w: QFont(w.font()) for w in self._text_widgets()}
 
-        self.commands = Commands(engine, out=self.log_view.add, quit=self.close,
-                                 clear=self._clear)
-        self.cmd.submitted.connect(self._command)
-        self.cmd.edit.arrow.connect(self._arrow)
-        self.wanted.answer.connect(self.answer)
-        self.wanted.ignore.connect(self.ignore)
+        for view in (self.wanted, self.decodes):
+            view.answer.connect(self.answer)
+            view.ignore.connect(self.ignore)
+            view.can_answer = self.can_answer
+            view.focused.connect(lambda v=view: setattr(self, "last_table", v))
         self.wanted.sort_changed.connect(lambda name: self.log_view.add(f"[wanted] Sorted by {name}"))
         self.menus = Menus(self)        # with the keys F1-F8, Ctrl-arrows, Ctrl-Q
         for keys, slot in (("Ctrl+S", self.wanted.cycle_sort),
@@ -104,10 +103,11 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence(keys), self, activated=slot)
         self._tick()                    # the columns, before restoring their state
         self._restore()
-        self.cmd.setFocus()
-        self.log_view.add("[keys] F1 help · F2–F5 layouts (View › Layout) ·"
-                          " F6 rules · F7 scope · F8 show · Enter on an empty CMD> answers the"
-                          " selected station · drag a panel by its title to move it")
+        (self.wanted if self.docks["wanted"].isVisibleTo(self) else self.decodes).setFocus()
+        self.log_view.add("[keys] F1 help · F2–F5 layouts (View › Layout) · F6 rules ·"
+                          " F7 scope · F8 show · double-click or Enter answers a station,"
+                          " Delete ignores it · right-click for more · View › Lock panels"
+                          " off to move panels")
 
         self._timer = QTimer(self, interval=TICK_MS, timeout=self._tick)
         self._timer.start()
@@ -117,8 +117,8 @@ class MainWindow(QMainWindow):
     # ── Panels and layouts ────────────────────────────────────────────────────
 
     def _panels(self) -> None:
-        """Wanted, Decodes and Log as dock panels; the command line in a fixed
-        bar along the bottom.  There's no central widget: the panels fill it."""
+        """Wanted, Decodes and Log as dock panels.  There's no central widget:
+        the panels fill the window."""
         self.docks = {}
         for name, title, widget in (("wanted", "Wanted", self.wanted),
                                     ("decodes", "Decodes", self.decodes),
@@ -127,23 +127,42 @@ class MainWindow(QMainWindow):
             dock.setObjectName(f"{name}-panel")
             dock.setWidget(widget)
             self._title_tips(dock)
+            dock.topLevelChanged.connect(lambda _floating, d=dock: self._lock(d))
             self.docks[name] = dock
         self.setDockNestingEnabled(True)
         # The log runs the full width along the bottom.
         for corner in (Qt.Corner.BottomLeftCorner, Qt.Corner.BottomRightCorner):
             self.setCorner(corner, Qt.DockWidgetArea.BottomDockWidgetArea)
-        bar = QToolBar("Command line", self)
-        bar.setObjectName("command-bar")
-        bar.setMovable(False)
-        bar.setFloatable(False)
-        bar.toggleViewAction().setVisible(False)      # always there
-        bar.addWidget(self.cmd)
-        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, bar)
+
+    def set_locked(self, on: bool) -> None:
+        """Lock the panels (View › Lock panels): no title bars, so they can't
+        be dragged or floated by accident and take no room; the dividers
+        between them still resize."""
+        self.locked = on
+        self.menus.lock.setChecked(on)
+        for dock in self.docks.values():
+            self._lock(dock)
+
+    _UNLOCKED = (QDockWidget.DockWidgetFeature.DockWidgetClosable
+                 | QDockWidget.DockWidgetFeature.DockWidgetMovable
+                 | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+
+    def _lock(self, dock) -> None:
+        # A floating panel keeps its title bar, to be dragged back.
+        if self.locked and not dock.isFloating():
+            if dock.titleBarWidget() is None:
+                dock.setTitleBarWidget(QWidget(dock))
+            # Closable all the same: the View menu's panel items need it.
+            dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        else:
+            if dock.titleBarWidget() is not None:
+                dock.setTitleBarWidget(None)
+            dock.setFeatures(self._UNLOCKED)
 
     _TITLE_TIP = ("Drag this title to move the panel: beside, above or below another,"
                   " or onto one for tabs.  Double-click it to float the panel as its own"
                   " window, and again to put it back.  F2–F5 (View › Layout) lay the"
-                  " panels out for you.")
+                  " panels out for you; View › Lock panels hides these titles.")
     _BUTTON_TIPS = {
         "qt_dockwidget_floatbutton": "Float this panel as its own window, or put it back",
         "qt_dockwidget_closebutton": "Close this panel (the View menu or F2–F5 bring it"
@@ -201,21 +220,14 @@ class MainWindow(QMainWindow):
         self.decodes.set_layout(name)
         self.menus.show_layout()
         if name == "decodes" and self.wanted.hasFocus():
-            self.cmd.setFocus()
+            self.decodes.setFocus()
+        elif name == "wanted" and self.decodes.hasFocus():
+            self.wanted.setFocus()
 
     def step_layout(self, step: int) -> None:
         names = list(LAYOUTS)
         current = names.index(self.layout_name) if self.layout_name in names else 0
         self.set_layout(names[(current + step) % len(names)])
-
-    def _arrow(self, step: int) -> None:
-        """↑↓ at CMD>: through the Wanted table; with only the decodes showing,
-        they scroll the decodes."""
-        if self.docks["wanted"].isVisible():
-            self.wanted.move(step)
-        else:
-            bar = self.decodes.verticalScrollBar()
-            bar.setValue(bar.value() + step)
 
     # ── Remembering the window ────────────────────────────────────────────────
 
@@ -228,6 +240,7 @@ class MainWindow(QMainWindow):
             size = 0
         if size:
             self.set_text_size(size)
+        self.set_locked(str(s.value("locked", "true")).lower() != "false")
         for view, key in ((self.wanted, "wanted_columns"), (self.decodes, "decode_columns")):
             try:
                 view.restore(json.loads(s.value(key, "{}")))
@@ -253,12 +266,12 @@ class MainWindow(QMainWindow):
         self.theme = name
 
     def _text_widgets(self) -> list:
-        return [self.wanted, self.decodes, self.log_view, self.cmd.edit, self.status,
+        return [self.wanted, self.decodes, self.log_view, self.status,
                 self.badge, self.freq, self.scroll_note, self.changes]
 
     def set_text_size(self, size: int) -> None:
-        """Text *size* points bigger (or smaller) than normal, in the panels,
-        the command line and the status bar."""
+        """Text *size* points bigger (or smaller) than normal, in the panels
+        and the status bar."""
         self.text_size = min(max(size, TEXT_SIZES.start), TEXT_SIZES.stop - 1)
         for widget, base in self._fonts.items():
             font = QFont(base)
@@ -290,6 +303,7 @@ class MainWindow(QMainWindow):
         s.setValue("state", self.saveState(STATE_VERSION))
         s.setValue("layout", self.layout_name)
         s.setValue("text_size", self.text_size)
+        s.setValue("locked", self.locked)
         s.setValue("wanted_columns", json.dumps(self.wanted.state()))
         s.setValue("decode_columns", json.dumps(self.decodes.state()))
         s.sync()
@@ -362,23 +376,29 @@ class MainWindow(QMainWindow):
             self._wanted_shown = now
             self.wanted.wanted.refresh(now)
 
-    # ── Commands ──────────────────────────────────────────────────────────────
+    # ── Stations ──────────────────────────────────────────────────────────────
 
-    def _command(self, text: str) -> None:
-        """A command; or, on an empty line, answer the selected station."""
-        if text.strip():
-            self.decodes.to_end()
-            self.commands.handle(text)
-            self.refresh_wanted(force=True)
-        else:
-            self.answer(self.wanted.selected_call)
+    def current_call(self) -> str | None:
+        """The selected station for the Station menu: in the table used last,
+        else in the other one."""
+        other = self.decodes if self.last_table is self.wanted else self.wanted
+        for view in (self.last_table, other):
+            if view.isVisibleTo(self) and view.selected_call:
+                return view.selected_call
+        return None
+
+    def can_answer(self, call: str) -> bool:
+        """Answering needs a CQ from *call* in the buffer."""
+        return self.engine.stations.find(call) is not None
 
     def answer(self, call: str | None) -> None:
         station = self.engine.stations.find(call) if call else None
         if station:
             self.engine.reply(station)
+        elif call:
+            self.log_view.add(f"[answer] No CQ from {call} to answer.")
         else:
-            self.log_view.add("[cmd] No station selected in the Wanted table.")
+            self.log_view.add("[answer] Select a station in the Wanted or Decodes panel.")
 
     def rules_changed(self) -> None:
         """A rule, the scope or the show setting changed: the status columns
@@ -389,10 +409,7 @@ class MainWindow(QMainWindow):
     def ignore(self, call: str) -> None:
         self.engine.ignore(call)
         self.refresh_wanted(force=True)
-
-    def _clear(self) -> None:
-        self.decodes.decodes.clear()
-        self.log_view.reset()
+        self.menus.ignored_changed()
 
     # ── Engine events ─────────────────────────────────────────────────────────
 
@@ -400,7 +417,6 @@ class MainWindow(QMainWindow):
         if isinstance(ev, SpotEvent):
             self._show_spot(ev)
         elif isinstance(ev, StationUpdated):
-            ev.station.display = _render(ev.ctx, ev.result)     # for "list"
             self.wanted.wanted.note(ev.result, ev.ctx, ev.station)
             self._wanted_dirty = True
         elif isinstance(ev, LogLine):
@@ -414,7 +430,6 @@ class MainWindow(QMainWindow):
         if ev.result.new_alert:
             QApplication.beep()
         if ev.station is not None:
-            ev.station.display = _render(ev.ctx, ev.result)     # for "list"
             self.wanted.wanted.note(ev.result, ev.ctx, ev.station)
             self._wanted_dirty = True
         self.decodes.decodes.add(DecodeRow(ev.ctx, ev.result, ev.station))

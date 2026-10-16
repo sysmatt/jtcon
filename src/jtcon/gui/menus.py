@@ -1,4 +1,4 @@
-"""The window's menus, and the Keys and About boxes.
+"""The window's menus, and the Keys, About and Ignored stations boxes.
 
 Every menu item with a key works from anywhere in the window (Qt runs an
 action's shortcut whether or not its menu is open)."""
@@ -12,7 +12,9 @@ from PySide6.QtWidgets import QDialog, QLabel, QScrollArea, QVBoxLayout
 from jtcon import __version__
 from jtcon.config import CONFIG_FILE, CONFIG_TEMPLATE, default_config_dir, write_private
 from jtcon.core.wanted import rule_label
+from jtcon.gui.ignored import IgnoredDialog
 from jtcon.gui.theme import THEMES
+from jtcon.gui.widgets import station_items
 
 HOMEPAGE = "https://github.com/sysmatt/jtcon"
 
@@ -29,17 +31,21 @@ KEYS_HELP = """\
 <table cellspacing="6">
 <tr><td><b>F2 F3 F4 F5</b></td><td>Wanted, Decodes, Side by side, Stacked (View › Layout)</td></tr>
 <tr><td><b>Ctrl-arrows</b></td><td>the next or previous layout</td></tr>
+<tr><td>View › Lock panels</td><td>off: the panels get title bars to drag them by</td></tr>
 <tr><td>Drag a panel's title</td><td>beside, above or below another panel, or onto one for tabs</td></tr>
 <tr><td>Double-click a panel's title</td><td>float it as its own window, and back</td></tr>
 <tr><td>Right-click a table's headers</td><td>hide or show columns; drag a header to move it</td></tr>
 </table>
+<h3>Stations</h3>
+<p>In the Wanted and Decodes panels; the Station menu does the same for the selected row.</p>
+<table cellspacing="6">
+<tr><td>Double-click, or <b>Enter</b></td><td>answer the station (any station calling CQ)</td></tr>
+<tr><td><b>Delete</b> or <b>i</b></td><td>ignore it for this session</td></tr>
+<tr><td>Right-click a station</td><td>answer, ignore, copy its call, look it up on QRZ.com</td></tr>
+<tr><td>Station › Ignored stations</td><td>see what's ignored, unignore, add a call</td></tr>
+</table>
 <h3>Wanted table</h3>
 <table cellspacing="6">
-<tr><td><b>↑ ↓</b> at CMD&gt;</td><td>select a station</td></tr>
-<tr><td><b>Enter</b> on an empty CMD&gt;</td><td>answer the selected station</td></tr>
-<tr><td>Double-click, or <b>Enter</b> in the table</td><td>answer that station</td></tr>
-<tr><td><b>i</b> in the table</td><td>ignore the selected station for this session</td></tr>
-<tr><td>Right-click a station</td><td>answer, ignore, copy its call, look it up on QRZ.com</td></tr>
 <tr><td><b>Ctrl-S</b>, or click a header</td><td>sort: last heard, SNR, call, entity (again: reversed)</td></tr>
 <tr><td>QSO column</td><td>📣 calling CQ &nbsp; 🤝 answering a CQ &nbsp; 📶 sending reports
  &nbsp; 👋 signing off</td></tr>
@@ -48,6 +54,7 @@ KEYS_HELP = """\
 <table cellspacing="6">
 <tr><td><b>PgUp PgDn</b></td><td>scroll back</td></tr>
 <tr><td><b>Esc</b></td><td>back to the newest</td></tr>
+<tr><td>Right-click</td><td>clear the decodes (and in the log: clear the log)</td></tr>
 </table>
 <h3>Live controls</h3>
 <p>For this session only; the config file isn't changed.  The Rules menu has them too.</p>
@@ -56,16 +63,10 @@ KEYS_HELP = """\
 <tr><td><b>F7</b></td><td>scope: check CQs only, or all decodes</td></tr>
 <tr><td><b>F8</b></td><td>show: CQs and wanted stations, or all decodes</td></tr>
 </table>
-<h3>Commands at CMD&gt;</h3>
-<p>Any unique start works: l, s, un.</p>
+<h3>Other keys</h3>
 <table cellspacing="6">
-<tr><td><b>07</b>, <b>W1ABC</b></td><td>answer that station</td></tr>
-<tr><td><b>list</b></td><td>the wanted stations</td></tr>
-<tr><td><b>ignore</b> 07|CALL</td><td>ignore a station for this session; alone, list them</td></tr>
-<tr><td><b>unignore</b> CALL</td><td>stop ignoring it</td></tr>
-<tr><td><b>sync</b> [full]</td><td>fetch online logbook changes, retry waiting uploads</td></tr>
-<tr><td><b>clear</b></td><td>clear the decodes and the log</td></tr>
-<tr><td><b>quit</b>, <b>Ctrl-Q</b></td><td>quit</td></tr>
+<tr><td><b>Ctrl-+ Ctrl-- Ctrl-0</b></td><td>text size (View › Text size)</td></tr>
+<tr><td><b>Ctrl-Q</b></td><td>quit</td></tr>
 </table>"""
 
 
@@ -76,10 +77,13 @@ class Menus:
         self.window = window
         self.engine = window.engine
         self.config = window.config
-        self.dialogs: dict = {}         # "keys", "about": kept while open
+        self.dialogs: dict = {}         # "keys", "about", "ignored": kept while open
         bar = window.menuBar()
         self._file(bar.addMenu("&File"))
         self._view(bar.addMenu("&View"))
+        self.station_menu = bar.addMenu("&Station")
+        self.station_menu.aboutToShow.connect(self.fill_station)
+        self.fill_station()
         self.rules_menu = bar.addMenu("&Rules")
         self._rules(self.rules_menu)
         self._logbook(bar.addMenu("&Logbook"))
@@ -147,6 +151,9 @@ class Menus:
             action = dock.toggleViewAction()
             action.setText(f"{dock.windowTitle()} panel")
             menu.addAction(action)
+        self.lock = self._action(menu, "Lock pa&nels", lambda on: win.set_locked(on),
+                                 tip="Hide the panels' title bars; off to drag panels around",
+                                 checkable=True)
         menu.addSeparator()
         themes = menu.addMenu("&Theme")
         self.themes = QActionGroup(win)
@@ -168,6 +175,9 @@ class Menus:
                      keys=["Ctrl+-"])
         self._action(sizes, "&Normal", lambda: win.set_text_size(0), keys=["Ctrl+0"])
         menu.addSeparator()
+        self._action(menu, "&Clear decodes", win.decodes.decodes.clear)
+        self._action(menu, "C&lear log", win.log_view.reset)
+        menu.addSeparator()
         self.reset = self._action(menu, "&Reset window layout", win.reset_layout,
                                   tip="Panels, columns and size as the first time")
 
@@ -176,6 +186,35 @@ class Menus:
         action = self.layout_actions.get(self.window.layout_name)
         if action:
             action.setChecked(True)
+
+    # ── Station ───────────────────────────────────────────────────────────────
+
+    def fill_station(self) -> None:
+        """The selected station's items, as on its right-click menu."""
+        win, menu = self.window, self.station_menu
+        menu.clear()
+        call = win.current_call()
+        if call:
+            station_items(menu, call, win.answer, win.ignore, win.can_answer(call))
+        else:
+            none = menu.addAction("Select a station in the Wanted or Decodes panel")
+            none.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Ignored &stations…", self.show_ignored)
+
+    def show_ignored(self) -> None:
+        box = self.dialogs.get("ignored")
+        if box is None:
+            box = self.dialogs["ignored"] = IgnoredDialog(self.window)
+        box.refresh()
+        box.show()
+        box.raise_()
+        box.activateWindow()
+
+    def ignored_changed(self) -> None:
+        box = self.dialogs.get("ignored")
+        if box is not None:
+            box.refresh()
 
     # ── Rules ─────────────────────────────────────────────────────────────────
 
@@ -246,11 +285,11 @@ class Menus:
     # ── Help ──────────────────────────────────────────────────────────────────
 
     def _help(self, menu) -> None:
-        self.keys = self._action(menu, "&Keys and commands", self.show_keys, keys=["F1"])
+        self.keys = self._action(menu, "&Keys", self.show_keys, keys=["F1"])
         self._action(menu, "&About jtcon", self.show_about)
 
     def show_keys(self) -> None:
-        self._box("keys", "jtcon: keys and commands", KEYS_HELP)
+        self._box("keys", "jtcon: keys", KEYS_HELP)
 
     def show_about(self) -> None:
         self._box("about", "About jtcon",

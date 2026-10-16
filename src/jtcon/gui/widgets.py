@@ -1,13 +1,12 @@
-"""The window's parts: the Wanted table, the decode table, the log, the
-command line."""
+"""The window's parts: the Wanted table, the decode table, the log."""
 
 import re
 from urllib.parse import quote
 
 from PySide6.QtCore import QEvent, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFontDatabase, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QMenu, QPlainTextEdit, QTableView, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHeaderView, QMenu,
+                               QPlainTextEdit, QTableView)
 
 from jtcon.core.messages import base_call
 from jtcon.gui.models import COLOURS, DecodeModel, WantedModel
@@ -99,18 +98,43 @@ class LogView(QPlainTextEdit):
         self.clear()
         self._last_key = None
 
+    def menu(self) -> QMenu:
+        """Right-click: Copy and Select all, and Clear log."""
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        menu.addAction("C&lear log", self.reset)
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        self.menu().popup(event.globalPos())
+
 
 class Table(QTableView):
-    """A table with the columns' widths, order and visibility the user's to
-    change, kept by column key so they survive columns coming and going (the
-    status columns follow the rules).  Right-click the header to hide or show
-    columns; drag a header to move it.  state() and restore() save them."""
+    """A table of stations, with the columns' widths, order and visibility the
+    user's to change, kept by column key so they survive columns coming and
+    going (the status columns follow the rules).  Right-click the header to
+    hide or show columns; drag a header to move it.  state() and restore()
+    save them.
+
+    A row is a station: a double-click or Enter answers it (*answer(call)*),
+    Delete or i ignores it (*ignore(call)*), right-click for the rest.
+    *focused* when the table gets the keyboard: the Station menu acts on the
+    table used last."""
+
+    answer = Signal(str)
+    ignore = Signal(str)
+    focused = Signal()
 
     _WIDTHS: dict = {}              # typical widths, in characters
     SHORT: set = set()              # the "Short" column choice; empty: none
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.can_answer = lambda call: True     # the window's: is there a CQ to answer
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
+        self.doubleClicked.connect(lambda index: self._answer_row(index.row()))
         self.setWordWrap(False)
         self.setShowGrid(False)
         self.setAlternatingRowColors(True)
@@ -138,6 +162,53 @@ class Table(QTableView):
 
     def keys(self) -> list:
         return [key for key, _ in self.model().cols]
+
+    # ── Stations ──────────────────────────────────────────────────────────────
+
+    def call_at(self, row: int) -> str | None:
+        """The call on *row*, if it has one."""
+        raise NotImplementedError
+
+    @property
+    def selected_call(self) -> str | None:
+        rows = self.selectionModel().selectedRows()
+        return self.call_at(rows[0].row()) if rows else None
+
+    def _answer_row(self, row: int) -> None:
+        call = self.call_at(row)
+        if call:
+            self.answer.emit(call)
+
+    def keyPressEvent(self, event) -> None:
+        call = self.selected_call
+        key, plain = event.key(), not event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and call:
+            self.answer.emit(call)
+        elif key in (Qt.Key.Key_Delete, Qt.Key.Key_I) and plain and call:
+            self.ignore.emit(call)
+        else:
+            super().keyPressEvent(event)
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self.focused.emit()
+
+    def _menu(self, pos) -> None:
+        index = self.indexAt(pos)
+        call = None
+        if index.isValid():
+            self.selectRow(index.row())
+            call = self.call_at(index.row())
+        menu = self.menu_for(call)
+        if not menu.isEmpty():
+            menu.popup(self.viewport().mapToGlobal(pos))
+
+    def menu_for(self, call: str | None) -> QMenu:
+        """The right-click menu, for a row with *call* (None: elsewhere)."""
+        menu = QMenu(self)
+        if call:
+            station_items(menu, call, self.answer.emit, self.ignore.emit, self.can_answer(call))
+        return menu
 
     def _row_height(self, extra: int) -> None:
         self._extra = extra
@@ -258,7 +329,6 @@ class DecodesView(Table):
         self.decodes = DecodeModel(self)
         self.setModel(self.decodes)
         self.setFont(fixed_font())
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._row_height(4)
         self.layout_name = "decodes"
         self.hidden_by_layout: dict = {}    # layout -> hidden keys, once chosen
@@ -291,6 +361,17 @@ class DecodesView(Table):
         super().restore(state)
         self._columns_changed()
 
+    def call_at(self, row: int) -> str | None:
+        if 0 <= row < len(self.decodes.rows):
+            return self.decodes.rows[row].cells.get("call") or None
+        return None
+
+    def menu_for(self, call: str | None) -> QMenu:
+        menu = super().menu_for(call)
+        menu.addSeparator()
+        menu.addAction("C&lear decodes", self.decodes.clear)
+        return menu
+
     @property
     def at_end(self) -> bool:
         bar = self.verticalScrollBar()
@@ -317,61 +398,29 @@ class DecodesView(Table):
 
 
 class WantedView(Table):
-    """The Wanted table.  A click selects; a double-click or Enter answers
-    (*answer(call)*); i ignores (*ignore(call)*); a header click sorts
-    (*sort_changed(name)*); right-click for the rest."""
+    """The Wanted table: answer, ignore and right-click as in Table; a header
+    click sorts (*sort_changed(name)*)."""
 
-    answer = Signal(str)
-    ignore = Signal(str)
     sort_changed = Signal(str)
 
     def __init__(self, engine, parent=None):
         super().__init__(parent)
         self.wanted = WantedModel(engine, self)
         self.setModel(self.wanted)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._row_height(6)
         header = self.horizontalHeader()
         header.setSortIndicatorShown(True)
         header.setSectionsClickable(True)
         header.sectionClicked.connect(self._header_clicked)
-        self.doubleClicked.connect(lambda index: self._answer_row(index.row()))
-        self.customContextMenuRequested.connect(self._menu)
         self.wanted.modelReset.connect(self._columns_changed)
 
-    @property
-    def selected_call(self) -> str | None:
-        rows = self.selectionModel().selectedRows()
-        return self.wanted.rows[rows[0].row()].call if rows else None
+    def call_at(self, row: int) -> str | None:
+        return self.wanted.rows[row].call if 0 <= row < len(self.wanted.rows) else None
 
     def select_call(self, call: str) -> None:
         row = self.wanted.row_of(call)
         if row is not None:
             self.selectRow(row)
-
-    def move(self, step: int) -> None:
-        """Select the row *step* away (↑↓ at CMD>); the first row if none is."""
-        n = self.wanted.rowCount()
-        if not n:
-            return
-        rows = self.selectionModel().selectedRows()
-        row = min(max(rows[0].row() + step, 0), n - 1) if rows else 0
-        self.selectRow(row)
-        self.scrollTo(self.wanted.index(row, 0))
-
-    def keyPressEvent(self, event) -> None:
-        call = self.selected_call
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and call:
-            self.answer.emit(call)
-        elif event.key() == Qt.Key.Key_I and not event.modifiers() and call:
-            self.ignore.emit(call)
-        else:
-            super().keyPressEvent(event)
-
-    def _answer_row(self, row: int) -> None:
-        if 0 <= row < len(self.wanted.rows):
-            self.answer.emit(self.wanted.rows[row].call)
 
     # ── Sorting ───────────────────────────────────────────────────────────────
 
@@ -424,78 +473,17 @@ class WantedView(Table):
             self.wanted.source.set_sort(state["sort"], bool(state.get("reverse")))
             self._show_sort()
 
-    # ── Right-click menu ──────────────────────────────────────────────────────
 
-    def _menu(self, pos) -> None:
-        index = self.indexAt(pos)
-        if not index.isValid():
-            return
-        self.selectRow(index.row())
-        self.menu_for(self.wanted.rows[index.row()].call).popup(
-            self.viewport().mapToGlobal(pos))
-
-    def menu_for(self, call: str) -> QMenu:
-        menu = QMenu(self)
-        menu.addAction(f"Answer {call}", lambda: self.answer.emit(call))
-        menu.addAction("Ignore for this session", lambda: self.ignore.emit(call))
-        menu.addSeparator()
-        menu.addAction("Copy call", lambda: QApplication.clipboard().setText(call))
-        menu.addAction("Look up on QRZ.com", lambda: lookup(call))
-        return menu
+def station_items(menu: QMenu, call: str, answer, ignore, can_answer: bool = True) -> None:
+    """A station's items, on a right-click menu and the Station menu."""
+    action = menu.addAction(f"&Answer {call}\tEnter", lambda: answer(call))
+    action.setEnabled(can_answer)
+    menu.addAction(f"&Ignore {call} for this session\tDel", lambda: ignore(call))
+    menu.addSeparator()
+    menu.addAction("&Copy call", lambda: QApplication.clipboard().setText(call))
+    menu.addAction("Look up on &QRZ.com", lambda: lookup(call))
 
 
 def lookup(call: str) -> None:
     """Open the station's QRZ.com page (its home call) in the browser."""
     QDesktopServices.openUrl(QUrl(QRZ_LOOKUP.format(call=quote(base_call(call), safe=""))))
-
-
-class CommandEdit(QLineEdit):
-    """The line you type at.  ↑↓ move through the Wanted table (*arrow(step)*):
-    there's no command history to walk."""
-
-    arrow = Signal(int)
-
-    _LAYOUT_KEYS = (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down)
-
-    def event(self, event) -> bool:
-        # Ctrl-arrows change the layout, as on the Textual screen, rather than
-        # moving a word at a time: let the window's shortcuts have them.
-        if (event.type() == QEvent.Type.ShortcutOverride
-                and event.modifiers() == Qt.KeyboardModifier.ControlModifier
-                and event.key() in self._LAYOUT_KEYS):
-            event.ignore()
-            return False
-        return super().event(event)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Up:
-            self.arrow.emit(-1)
-        elif event.key() == Qt.Key.Key_Down:
-            self.arrow.emit(1)
-        else:
-            super().keyPressEvent(event)
-
-
-class CommandLine(QWidget):
-    """CMD> and the line you type at; *submitted(text)* on Enter."""
-
-    submitted = Signal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        prompt = QLabel("CMD>")
-        prompt.setFont(fixed_font())
-        self.edit = CommandEdit()
-        self.edit.setFont(fixed_font())
-        self.edit.setPlaceholderText("a command (list, ignore, sync…), an index or a callsign")
-        layout.addWidget(prompt)
-        layout.addWidget(self.edit)
-        self.edit.returnPressed.connect(self._submit)
-        self.setFocusProxy(self.edit)
-
-    def _submit(self) -> None:
-        text = self.edit.text()
-        self.edit.clear()
-        self.submitted.emit(text)

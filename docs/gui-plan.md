@@ -37,7 +37,7 @@ driver); Windows is the main target after that; macOS best effort.
 
 ```
 ┌ jtcon ─ 14.074 MHz 20m FT8 ─ K2TTA ─────────────────────────────────────── _ □ × ┐
-│ File  View  Rules  Logbook  Help                                                  │
+│ File  View  Station  Rules  Logbook  Help                                         │
 ├───────────────────────────────────────────────────────┬───────────────────────────┤
 │ Wanted                                                │ Decodes                   │
 │ ##  Call   QSO Entity        CQz ITUz ST Grid dB Seen │ Time    dB  dt   Hz  Msg  │
@@ -48,8 +48,6 @@ driver); Windows is the main target after that; macOS best effort.
 │ Log                                                                               │
 │ [qrz] Updates: 3 changed, 1 newly confirmed (LoTW)                                │
 │ [wanted] ✅ Now confirmed: WAS TX                                                  │
-├───────────────────────────────────────────────────────────────────────────────────┤
-│ CMD> _                                                                            │
 ├───────────────────────────────────────────────────────────────────────────────────┤
 │ ● RX  [██████░░░░] odd  FT8  dec=42 cq=18 …  de=K2TTA  ign:2        off:CQZ       │
 └───────────────────────────────────────────────────────────────────────────────────┘
@@ -62,10 +60,10 @@ QSO stage marks and status columns.
 
 - Click a column header to sort, again to reverse; the selected station stays
   selected when rows move.
-- **Double-click or Enter answers**; a single click selects.  ↑↓ and Enter on an
-  empty command line work too, as on the Textual screen.
+- **Double-click or Enter answers**; a single click selects; Delete (or i)
+  ignores the station for the session.
 - **Right-click menu** on a row: Answer, Ignore for this session, Copy call,
-  Look up on QRZ.com.
+  Look up on QRZ.com.  The Station menu has the same for the selected row.
 - A changed row flashes briefly.
 - Columns can be hidden, shown and reordered (right-click the header).
 
@@ -75,13 +73,37 @@ A table of decodes, newest at the bottom, following new ones until you scroll
 back.  Columns: index, time, dB, dt, Hz, mode, message, call, grid, entity, zones,
 state, the award status columns.  Wanted rows are tinted (red, yellow, magenta),
 with the reasons as a tooltip and in a column.  Hide the columns you don't want;
-narrow, it's the Textual compact line.
+narrow, it's the Textual compact line.  A CQ row answers like a Wanted row
+(double-click, Enter, right-click), so any station calling CQ can be answered,
+wanted or not; any row with a call can be ignored.  Right-click › Clear decodes.
 
-### Log panel and command line
+### Log panel
 
-The log panel is the Textual log strip: jtcon's own messages, with the QRZ
-download ticks on one line.  The command line takes the same commands (shared
-code).
+The Textual log strip: jtcon's own messages, with the QRZ download ticks on one
+line.  Right-click › Copy, Select all, Clear log.
+
+### No command line (Matt, 2026-10-15)
+
+The window has no CMD>: it's a terminal idea, and every command has a desktop
+way instead.  The classic and Textual screens keep theirs.
+
+| CMD> | In the window |
+|---|---|
+| Enter, an index or a call: answer | Double-click or Enter on a Wanted or Decodes row; right-click › Answer; Station › Answer |
+| `ignore NN/CALL` | Delete or i on a row; right-click › Ignore; Station › Ignore |
+| `ignore` (list), `unignore CALL` | Station › Ignored stations…: the list (from the config or this session), Unignore, Add |
+| `sync`, `sync full` | Logbook › Sync, Sync full download |
+| `clear` | Right-click › Clear on the Decodes and Log panels |
+| `list` | Not needed: the Decodes panel shows it |
+| `quit` | File › Quit, Ctrl-Q |
+| ↑↓ through Wanted | Click or Tab into a table, then the arrow keys |
+
+### Locked panels (Matt, 2026-10-15)
+
+The panels' title bars take room once the panels are where you want them.
+**View › Lock panels** (on by default, remembered) hides them: the panels sit
+flush and can't be dragged or floated by accident; the dividers between them
+still resize.  Unlock to move panels, then lock again.
 
 ### Status bar
 
@@ -93,7 +115,8 @@ end what differs from the config file this session (`scope:all off:CQZ`).
 | Menu | Items |
 |---|---|
 | File | Edit config file (opens it in the system's editor), Quit |
-| View | Layout presets (Wanted, Decodes, Side by side, Stacked), show or hide each panel, font size, theme (dark, light, system; for this session), reset the window layout |
+| View | Layout presets (Wanted, Decodes, Side by side, Stacked), show or hide each panel, lock panels, font size, theme (dark, light, system; for this session), clear decodes and log, reset the window layout |
+| Station | For the selected row (Wanted or Decodes): Answer, Ignore for this session, Copy call, Look up on QRZ.com; Ignored stations… |
 | Rules | A check item per `[[wanted]]` rule; Check all decodes (scope); Show all decodes (show).  For this session only, as on the Textual screen |
 | Logbook | Sync, Sync full download (shown when QRZ is set up) |
 | Help | Keys, About (version, licence, links) |
@@ -101,7 +124,8 @@ end what differs from the config file this session (`scope:all off:CQZ`).
 ### Keys
 
 As close to the Textual screen as the desktop allows: F2–F5 and Ctrl-arrows for
-layouts, F6 rules menu, F7 scope, F8 show, Ctrl-S sort, F1 keys, Ctrl-Q quit.
+layouts, F6 rules menu, F7 scope, F8 show, Ctrl-S sort, F1 keys, Ctrl-Q quit;
+Enter answers and Delete ignores in the tables.
 
 ### Look and feel
 
@@ -115,7 +139,7 @@ layouts, F6 rules menu, F7 scope, F8 show, Ctrl-S sort, F1 keys, Ctrl-Q quit.
 
 Some of the Textual screen's code isn't Textual-specific and the GUI needs it
 too: the Wanted table's rows (`Row`, columns, sort orders, QSO stage marks), the
-status line text, and the commands.  Stage 1 moves those into a package both use,
+status line text, and the commands (which the window ended up not using).  Stage 1 moves those into a package both use,
 `src/jtcon/ui/` (with `tui/commands.py` and the status helpers in `tui/render.py`),
 leaving the Textual and classic screens behaving exactly as now; their tests
 show it.
@@ -156,7 +180,7 @@ up, run the suite on 3.11; the check is a loop of `bar.setValue(0)` watching
   selection, menus and layouts.
 - The table models are tested directly, without a window.
 - GUI tests skip where PySide6 isn't installed.
-- Live checks by Matt on Linux at each stage; on Windows from stage 6.
+- Live checks by Matt on Linux at each stage; on Windows and macOS in stage 7.
 
 ## Stages
 
@@ -175,8 +199,13 @@ up, run the suite on 3.11; the check is a loop of `bar.setValue(0)` watching
    does the job without taking up room (Matt).
 5. **Look and feel.** ✅ (2026-10-15)  Themes (`[display] theme` and the View menu), fonts,
    icon, About.
-6. **Windows and macOS.**  Run and fix on Windows with pipx (Matt tests);
-   macOS as far as it goes without a Mac to test on; docs (README, configuration).
+6. **A desktop app, not a terminal.** ✅ (2026-10-15)  No command line (Matt: "make
+   the gui work more like a native gui app"): answering and ignoring from the
+   Decodes panel too, a Station menu, Station › Ignored stations…, Clear on the
+   panels' right-click menus, Delete to ignore.  View › Lock panels hides the
+   panels' title bars.
+7. **Windows and macOS.**  Deferred until Matt has a Windows machine and a Mac
+   to test on: run and fix with pipx; docs (README, configuration).
 
 ## Parking lot
 

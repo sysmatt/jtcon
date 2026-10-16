@@ -233,19 +233,25 @@ macOS Terminal); most terminals then select as usual.
 
 A third front end is on its way: a desktop window, on Qt, for Linux, Windows and
 macOS ([the plan](docs/gui-plan.md)).  It has the Wanted table, the decode
-stream as a table and the log, as panels you arrange, plus menus, the command
-line and the status bar.  **F1** lists every key.
+stream as a table and the log, as panels you arrange, plus menus and the status
+bar.  It works like a desktop app: there's no `CMD>` line; the tables, the menus
+and right-click do what the commands do on the other screens.  **F1** lists
+every key.
 
-The Wanted table works as on the Textual screen: click a column header to sort
-(again to reverse), or Ctrl-S; double-click a station, or select it and press
-Enter, to answer it; ↑↓ at `CMD>` select, and Enter on an empty line answers.
-Right-click a station to answer it, ignore it, copy its call, or look it up on
-QRZ.com.
+Double-click a station, or select it and press Enter, to answer it, in the
+Wanted table or in the decodes (any station calling CQ, wanted or not).  Delete
+ignores it for the session.  Right-click a station to answer it, ignore it, copy
+its call, or look it up on QRZ.com; the Station menu does the same for the
+selected one, and Station › Ignored stations lists what's ignored, to unignore
+a call or add one.  Click a Wanted column header to sort (again to reverse), or
+Ctrl-S.  Right-click the decodes or the log to clear them.
 
 View › Layout (or F2–F5) lays the panels out in the Textual screen's four
-layouts: Wanted, Decodes, Side by side, Stacked; Ctrl-arrows step through them.  You can also arrange them yourself: drag a panel
-by its title to put it beside, above or below another, onto one (as tabs), or
-out on its own (on a second screen, say).  The View menu brings back a panel you
+layouts: Wanted, Decodes, Side by side, Stacked; Ctrl-arrows step through them.
+You can also arrange them yourself: the panels are locked at first, with no
+title bars to take up room; turn View › Lock panels off, then drag a panel by
+its title to put it beside, above or below another, onto one (as tabs), or out
+on its own (on a second screen, say), and lock them again.  The View menu brings back a panel you
 closed, and "Reset window layout" starts afresh.
 
 The Rules menu (or F6) switches rules on and off for the session, and has the
