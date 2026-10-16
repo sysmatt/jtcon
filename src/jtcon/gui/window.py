@@ -58,13 +58,16 @@ class MainWindow(QMainWindow):
     closing = Signal()
 
     def __init__(self, engine, start_engine: bool = True, dialogs: bool = True,
-                 settings: QSettings | None = None, reload=None, log: list | None = None):
+                 settings: QSettings | None = None, reload=None, log: list | None = None,
+                 startup=None):
         """*reload()* restarts with the config read again (File › Reload
         config), returning why not if it can't; *log* is the log so far, from
-        the window before a reload."""
+        the window before a reload; *startup* how jtcon was started (the
+        settings editor's file and command line)."""
         super().__init__()
         self.engine = engine
         self.reload = reload
+        self.startup = startup
         self.settings = settings if settings is not None else window_settings()
         self.config = engine.config
         self.start_engine = start_engine    # False in tests: the engine is set up

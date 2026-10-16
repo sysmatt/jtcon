@@ -114,7 +114,7 @@ end what differs from the config file this session (`scope:all off:CQZ`).
 
 | Menu | Items |
 |---|---|
-| File | Edit config file (opens it in the system's editor), Reload config (Ctrl-R; see the [config editor plan](config-editor-plan.md)), Quit |
+| File | Settings (Ctrl-,), Edit config file (opens it in the system's editor), Reload config (Ctrl-R; see the [config editor plan](config-editor-plan.md)), Quit |
 | View | Layout presets (Wanted, Decodes, Side by side, Stacked), show or hide each panel, lock panels, font size, theme (dark, light, system; for this session), clear decodes and log, reset the window layout |
 | Station | For the selected row (Wanted or Decodes): Answer, Ignore for this session, Copy call, Look up on QRZ.com; Ignored stations… |
 | Rules | A check item per `[[wanted]]` rule; Check all decodes (scope); Show all decodes (show).  For this session only, as on the Textual screen |

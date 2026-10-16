@@ -18,12 +18,13 @@ from jtcon.gui.window import MainWindow
 
 
 class JtconGui:
-    """Runs the Engine and the window together.  *reload()* reads the config
-    again, as at startup (None: no reloading)."""
+    """Runs the Engine and the window together.  *startup* is how jtcon was
+    started, to read the config again the same way (None: no reloading, no
+    settings editor)."""
 
-    def __init__(self, engine: Engine, reload=None):
+    def __init__(self, engine: Engine, startup=None):
         self.engine = engine
-        self.reload = reload
+        self.startup = startup
         self.window: MainWindow | None = None
         self._next = None               # (config, socket) to restart with
 
@@ -32,7 +33,8 @@ class JtconGui:
         while True:
             closed = asyncio.get_running_loop().create_future()
             self.window = window = MainWindow(
-                self.engine, reload=self.reload_config if self.reload else None, log=log)
+                self.engine, reload=self.reload_config if self.startup else None, log=log,
+                startup=self.startup)
             window.closing.connect(lambda: closed.done() or closed.set_result(None))
             # Ctrl-C in the terminal closes the window as Ctrl-Q does.
             signal.signal(signal.SIGINT, lambda *_: window.close())
@@ -70,7 +72,7 @@ class JtconGui:
         """Read the config again and restart with it; or why not (jtcon then
         carries on as it was)."""
         try:
-            config = self.reload()
+            config = self.startup.load()
         except ConfigError as exc:
             return f"Config error: {exc}"
         from jtcon.cli import bind_udp

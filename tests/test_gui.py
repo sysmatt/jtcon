@@ -15,7 +15,7 @@ pytest.importorskip("qasync")
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QLabel, QToolBar
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QToolBar
 
 import jtcon.gui.models
 from jtcon.core.events import Fatal, LogLine, Ready
@@ -355,7 +355,7 @@ def test_reload_restarts_in_the_window(make_engine, qapp, monkeypatch, tmp_path)
     window; the session's ignores and rule switches kept; the old Engine's
     socket closed."""
     import qasync
-    from jtcon.config import load_config
+    from jtcon.config import Startup
     engine = make_engine("--no-color")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))
@@ -375,7 +375,7 @@ def test_reload_restarts_in_the_window(make_engine, qapp, monkeypatch, tmp_path)
             monkeypatch.setattr(new, "_load_inputs", lambda: True)
             return new
 
-    gui = Gui(engine, reload=lambda: load_config(conf))
+    gui = Gui(engine, startup=Startup(conf))
     seen = {}
 
     def first():
@@ -418,24 +418,21 @@ def test_reload_restarts_in_the_window(make_engine, qapp, monkeypatch, tmp_path)
 
 
 def test_reload_problems_leave_jtcon_as_it_was(window, tmp_path):
-    from jtcon.config import ConfigError, load_config
+    from jtcon.config import Startup
     win = window()
     assert not items(menu(win, "File"))["Reload config"].isEnabled()  # no reload given
-
-    def bad():
-        raise ConfigError("config.toml: udp.port must be an integer, not 'x'")
-    gui = JtconGui(win.engine, reload=bad)
+    conf = tmp_path / "config.toml"
+    conf.write_text('[udp]\nport = "x"\n')
+    gui = JtconGui(win.engine, startup=Startup(conf))
     gui.window, win.reload = win, gui.reload_config
     win.reload_config()
     assert win.isVisible() and gui._next is None
-    assert win.log_view.lines()[-1] == ("[config] Config error: config.toml: udp.port must be"
+    assert win.log_view.lines()[-1] == (f"[config] Config error: {conf}: udp.port must be"
                                         " an integer, not 'x'  (carrying on as before)")
     # The port taken by another program.
     taken = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     taken.bind(("127.0.0.1", 0))
-    conf = tmp_path / "config.toml"
     conf.write_text(f'[udp]\nhost = "127.0.0.1"\nport = {taken.getsockname()[1]}\n')
-    gui.reload = lambda: load_config(conf)
     win.reload_config()
     taken.close()
     assert win.isVisible() and gui._next is None
@@ -1054,3 +1051,161 @@ def test_the_icon(window):
     win = window()
     assert not win.windowIcon().isNull()
     assert win.windowIcon().pixmap(32).width() == 32
+
+
+# ── Settings (File › Settings) ────────────────────────────────────────────────
+
+SHACK = """\
+# My shack.
+[udp]
+port = 2238   # WSJT-X sends here
+
+[display]
+theme = "light"
+
+[filters]
+ignore = ["W1AW"]
+
+[inputs]
+adif = ["~/logs/old.adi", "~/logs/older.adi"]
+"""
+
+
+def settings(win, tmp_path, text=SHACK, **startup):
+    from jtcon.config import Startup
+    from jtcon.gui.settings import SettingsDialog
+    conf = tmp_path / "config.toml"
+    if text is not None:
+        conf.write_text(text)
+    win.startup = Startup(conf, **startup)
+    reloads = win.reloads = []
+    win.reload = lambda: reloads.append(1)
+    return SettingsDialog(win), conf
+
+
+def test_every_setting_has_a_field_on_one_page():
+    from jtcon.gui.settings import FIELDS, PAGES, schema_keys
+    on_pages = [keys for _, keys in PAGES for keys in keys]
+    assert sorted(on_pages) == sorted(FIELDS) == sorted(schema_keys())
+
+
+def test_the_settings_show_the_file_and_the_defaults(window, tmp_path):
+    win = window()
+    box, _ = settings(win, tmp_path)
+    f = box.fields
+    assert f["udp", "port"].value() == 2238 and f["udp", "host"].value() == "0.0.0.0"
+    assert f["display", "theme"].value() == "light" and f["display", "show"].value() == "cq"
+    assert f["filters", "ignore"].edit.text() == "W1AW"
+    assert f["inputs", "adif"].value() == ["~/logs/old.adi", "~/logs/older.adi"]
+    assert f["actions", "highlight", "background"].value() == "#ffa500"
+    assert f["actions", "highlight", "enabled"].value() is True
+    assert f["inputs", "qrz", "api_key"].value() is None
+    assert not box.changes() and box.save_button.isEnabled()
+    assert [box.pages.item(i).text() for i in range(box.pages.count())] == [
+        "WSJT-X", "Display", "Checking", "Logs and data", "QRZ logbook", "Actions"]
+    assert str(tmp_path / "config.toml") in box.windowTitle()
+
+
+def test_saving_writes_only_the_changes_then_reloads(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path)
+    f = box.fields
+    f["udp", "port"].set(2240)
+    f["udp", "proxy"].edit.setText("2238, 2239")
+    f["filters", "ignore"].edit.setText("")                 # empty: back to the default
+    f["actions", "highlight", "background"].set("#00ff00")
+    f["inputs", "qrz", "api_key"].edit.setText("ABCD-1234")
+    box.save()
+    text = conf.read_text()
+    assert text.startswith("# My shack.\n[udp]\nport = 2240   # WSJT-X sends here\n")
+    assert "proxy = [2238, 2239]" in text and "ignore" not in text
+    assert '[actions.highlight]\nbackground = "#00ff00"' in text
+    assert 'api_key = "ABCD-1234"' in text
+    assert 'theme = "light"' in text and "host" not in text      # untouched: not written
+    from jtcon.config import load_config
+    cfg = load_config(conf)
+    assert (cfg.udp.port, cfg.udp.proxy, cfg.filters.ignore) == (2240, [2238, 2239], [])
+    assert box.result() == QDialog.DialogCode.Accepted
+    assert win.reloads == [1]
+    backup = next(tmp_path.glob("config.toml.*.bak"))
+    assert backup.read_text() == SHACK
+    assert win.log_view.lines()[-2] == f"[config] Saved {conf} (the old one: {backup.name})"
+    assert "ABCD" not in "\n".join(win.log_view.lines())       # the key never logged
+
+
+def test_nothing_changed_saves_nothing(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path)
+    box.save()
+    assert win.log_view.lines()[-1] == "[config] Settings: nothing changed."
+    assert win.reloads == [] and not list(tmp_path.glob("*.bak"))
+
+
+def test_no_config_file_yet(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path, text=None)
+    assert box.fields["udp", "port"].value() == 2237
+    box.fields["display", "theme"].set("system")
+    box.save()
+    assert conf.read_text().startswith("# jtcon configuration.")    # the starter, commented
+    from jtcon.config import load_config
+    assert load_config(conf).display.theme == "system"
+    assert win.reloads == [1]
+
+
+def test_bad_values_are_shown_and_nothing_is_written(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path)
+    box.fields["udp", "proxy"].edit.setText("2238 abc")
+    box.save()
+    assert box.message.text() == "Forward to ports: 'abc' isn't a port number"
+    assert box.pages.currentRow() == 0
+    box.fields["udp", "proxy"].edit.setText("")
+    box.fields["display", "wanted_timeout_minutes"].set(0)
+    box.save()
+    assert "display.wanted_timeout_minutes must be 1 or more" in box.message.text()
+    assert box.pages.currentRow() == 1                          # the Display page
+    box.fields["display", "wanted_timeout_minutes"].set(10)
+    box.fields["filters", "ignore"].edit.setText("W1AW hello")
+    box.save()
+    assert box.message.text() == "Ignore: HELLO isn't a callsign"
+    assert conf.read_text() == SHACK and win.reloads == []
+    assert box.result() != QDialog.DialogCode.Accepted
+
+
+def test_a_file_edited_meanwhile_keeps_those_edits(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path)
+    conf.write_text(SHACK + '\n[scope]\ndecodes = "all"\n')        # in an editor, say
+    box.fields["udp", "port"].set(2241)
+    box.save()
+    text = conf.read_text()
+    assert "port = 2241" in text and 'decodes = "all"' in text
+
+
+def test_settings_the_command_line_or_a_profile_sets_are_marked(window, tmp_path):
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "profiles" / "pota.toml").write_text('[display]\ntheme = "dark"\n')
+    win = window()
+    box, _ = settings(win, tmp_path, profile="pota",
+                      flags={("udp", "port"): "--port 2240",
+                             ("filters", "ignore"): "--ignore K1ABC"})
+    assert box.notes(("udp", "port")) == ["The command line's --port 2240 wins this run."]
+    assert box.notes(("filters", "ignore")) == [
+        "The command line adds to this list this run: --ignore K1ABC."]
+    assert box.notes(("display", "theme")) == ["Profile pota sets this: its value wins."]
+    assert box.notes(("udp", "host")) == []
+    marks = [w.text() for w in box.findChildren(QLabel) if w.text().startswith("⚑")]
+    assert len(marks) == 3
+
+
+def test_the_settings_menu_item(window, tmp_path):
+    win = window()
+    assert not items(menu(win, "File"))["Settings…"].isEnabled()     # no startup given
+    settings(win, tmp_path)
+    win.menus.settings.setEnabled(True)                       # as with a startup
+    press(win, "Ctrl+,")
+    box = win.menus.dialogs["settings"]
+    assert box.isVisible()
+    press(win, "Ctrl+,")                                       # a fresh one
+    assert win.menus.dialogs["settings"] is not box

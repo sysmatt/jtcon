@@ -1,6 +1,7 @@
 """Changing a config file in place (the window's settings editor): comments
 kept, only changed settings touched, checked before writing, a backup."""
 
+import re
 import tomllib
 
 import pytest
@@ -43,7 +44,7 @@ def test_setting_the_same_value_changes_nothing(tmp_path):
     f.set(("display", "show"), None)            # not set: nothing to remove
     assert f.text() == MINE and not f.changed
     assert f.save() is False
-    assert not f.backup_path.exists()
+    assert f.backups() == []
 
 
 def test_new_tables_and_removing(tmp_path):
@@ -72,8 +73,8 @@ def test_the_starter_config(tmp_path):
     assert text.startswith(CONFIG_TEMPLATE.split("[udp]")[0])
     assert text.index("port = 2240") < text.index("[display]")
     assert "\n[inputs.qrz]\nenabled = true\n\n[filters]\n" in text
-    assert f.save() is True
-    assert not f.backup_path.exists()                     # nothing to back up
+    assert f.save() is None                               # nothing to back up
+    assert f.backups() == []
     cfg = load_config(path)
     assert cfg.udp.port == 2240 and cfg.inputs.qrz.enabled
 
@@ -92,16 +93,34 @@ def test_save_checks_first_and_keeps_a_backup(tmp_path):
         f.check()
     assert path.read_text() == MINE                       # untouched
     f.set(("display", "theme"), "light")
-    assert f.save() is True
+    backup = f.save()
+    assert re.fullmatch(r"config\.toml\.\d{8}-\d{6}\.bak", backup.name)
     assert load_config(path).display.theme == "light"
-    assert f.backup_path.read_text() == MINE
-    for p in (path, f.backup_path):
+    assert backup.read_text() == MINE and f.backups() == [backup]
+    for p in (path, backup):
         assert p.stat().st_mode & 0o777 == 0o600
     assert not list(tmp_path.glob("*.new"))
-    # Again: the backup is the file as it was just before.
+    # Again, in the same second: another copy, of the file as it was just before.
     f.set(("udp", "port"), 2241)
-    f.save()
-    assert "light" in f.backup_path.read_text() and "2241" in path.read_text()
+    again = f.save()
+    assert again.name.endswith("-2.bak") and f.backups() == [backup, again]
+    assert "light" in again.read_text() and "2241" in path.read_text()
+
+
+def test_the_newest_backups_are_kept(tmp_path, monkeypatch):
+    import jtcon.config_edit as ce
+    path = tmp_path / "config.toml"
+    path.write_text(MINE)
+    (tmp_path / "config.toml.notes.bak").write_text("mine")     # not one of ours
+    monkeypatch.setattr(ce, "BACKUPS_KEPT", 3)
+    made = []
+    for port in range(3000, 3005):
+        f = ConfigFile(path)
+        f.set(("udp", "port"), port)
+        made.append(f.save())
+    # The file as it was before each of the last three saves.
+    assert [ConfigFile(p).get(("udp", "port")) for p in f.backups()] == [3001, 3002, 3003]
+    assert (tmp_path / "config.toml.notes.bak").exists()
 
 
 def test_a_profile_is_checked_on_top_of_its_base(tmp_path):

@@ -6,7 +6,9 @@ the new file passes the same checks jtcon runs when it starts.  tomlkit comes
 with jtcon[gui]; nothing else imports this module.
 """
 
+import re
 import tomllib
+from datetime import datetime
 from pathlib import Path
 
 import tomlkit
@@ -16,7 +18,7 @@ from tomlkit.items import Whitespace
 from jtcon.config import (CONFIG_TEMPLATE, Config, ConfigError, build_config, check_layer,
                           merge, replace_private)
 
-BACKUP_SUFFIX = ".bak"
+BACKUPS_KEPT = 10       # dated copies of the file as it was before each save
 
 
 class ConfigFile:
@@ -110,18 +112,35 @@ class ConfigFile:
         except ConfigError as exc:
             raise ConfigError(f"{self.path}: {exc}") from None
 
-    def save(self) -> bool:
-        """Check, then write the file, keeping the old one as config.toml.bak.
-        Both are private (0600).  False if there was nothing to write."""
+    def save(self) -> Path | None:
+        """Check, then write the file, keeping the old one as a dated copy
+        beside it (config.toml.20261015-142233.bak; the newest BACKUPS_KEPT).
+        All private (0600).  The copy made, if any; False if there was
+        nothing to write."""
         self.check()
         if not self.changed:
             return False
+        backup = None
         if self.existed:
-            replace_private(self.backup_path, self.original)
+            backup = self._backup_path()
+            replace_private(backup, self.original)
+            for old in self.backups()[:-BACKUPS_KEPT]:
+                old.unlink(missing_ok=True)
         replace_private(self.path, self.text())
         self.original, self.existed = self.text(), True
-        return True
+        return backup or None
 
-    @property
-    def backup_path(self) -> Path:
-        return self.path.with_name(self.path.name + BACKUP_SUFFIX)
+    def backups(self) -> list:
+        """The dated copies, oldest first."""
+        pattern = re.compile(re.escape(self.path.name) + r"\.\d{8}-\d{6}(-\d+)?\.bak")
+        found = [p for p in self.path.parent.glob(self.path.name + ".*.bak")
+                 if pattern.fullmatch(p.name)]
+        return sorted(found, key=lambda p: (p.stat().st_mtime_ns, p.name))
+
+    def _backup_path(self) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path, n = self.path.with_name(f"{self.path.name}.{stamp}.bak"), 1
+        while path.exists():            # two saves in one second
+            n += 1
+            path = self.path.with_name(f"{self.path.name}.{stamp}-{n}.bak")
+        return path

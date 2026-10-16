@@ -478,6 +478,36 @@ def load_config(config_file: str | Path | None = None, profile: str | None = Non
     return cfg
 
 
+@dataclass
+class Startup:
+    """How jtcon was started, to read the config again the same way (the
+    window's File › Reload config): the config file, the profile, and the
+    command line's settings, which win over the files.  *flags* names the
+    option behind each setting it sets, for the settings editor:
+    {("udp", "port"): "--port 2238"}."""
+    config_file: Path | None = None
+    profile:     str | None  = None
+    overrides:   dict        = field(default_factory=dict)
+    wanted:      str | None  = None
+    ignore:      list        = field(default_factory=list)
+    flags:       dict        = field(default_factory=dict)
+
+    def load(self) -> Config:
+        return load_config(self.config_file, self.profile, self.overrides or None,
+                           self.wanted, ignore=self.ignore or None)
+
+    @property
+    def file(self) -> Path:
+        """The main config file (which may not exist yet)."""
+        if self.config_file:
+            return Path(self.config_file).expanduser()
+        return default_config_dir() / CONFIG_FILE
+
+    @property
+    def profile_file(self) -> Path | None:
+        return profile_path(self.profile, self.file) if self.profile else None
+
+
 def _api_key(layer: dict):
     return layer.get("inputs", {}).get("qrz", {}).get("api_key")
 

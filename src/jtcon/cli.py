@@ -12,7 +12,7 @@ from pathlib import Path
 from jtcon import __version__
 from jtcon.config import (CONFIG_FILE, CONFIG_TEMPLATE, RULES, ConfigError,
                           default_config_dir, list_rules, load_config, profile_from_config,
-                          profile_path, show_config, write_private)
+                          profile_path, show_config, Startup, write_private)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -114,6 +114,31 @@ def cli_overrides(args: argparse.Namespace) -> dict:
     return layer
 
 
+def cli_flags(args: argparse.Namespace) -> dict:
+    """The option behind each setting the command line sets, as typed:
+    {("udp", "port"): "--port 2238"}; ignore and wanted too."""
+    flags = {}
+    for keys, value, text in (
+            (("udp", "port"), args.port, f"--port {args.port}"),
+            (("scope", "decodes"), args.scope, f"--scope {args.scope}"),
+            (("display", "mouse"), args.mouse, "--mouse"),
+            (("display", "color"), args.color, "--no-color"),
+            (("display", "debug"), args.debug, "--debug"),
+            (("display", "ui"), args.ui, f"--ui {args.ui}"),
+            (("actions", "json_log", "file"), args.save, f"--save {args.save}"),
+            (("filters", "ignore"), args.ignore,
+             " ".join(f"--ignore {c}" for c in args.ignore or [])),
+            (("wanted",), args.wanted, f"--wanted {args.wanted}")):
+        if value is not None:
+            flags[keys] = text
+    return flags
+
+
+def startup(args: argparse.Namespace) -> Startup:
+    return Startup(args.config, args.profile, cli_overrides(args), args.wanted,
+                   args.ignore or [], cli_flags(args))
+
+
 def _config_file(args: argparse.Namespace) -> Path:
     return Path(args.config).expanduser() if args.config else default_config_dir() / CONFIG_FILE
 
@@ -212,8 +237,7 @@ def main(argv: list | None = None) -> None:
         sys.exit(_edit_config(args))
 
     try:
-        cfg = load_config(args.config, args.profile, cli_overrides(args), args.wanted,
-                          ignore=args.ignore)
+        cfg = startup(args).load()
     except ConfigError as exc:
         print(f"jtcon: config error: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -239,8 +263,7 @@ def main(argv: list | None = None) -> None:
     if cfg.display.ui == "gui":
         from jtcon.gui.app import JtconGui
         # File › Reload config reads the config again with this command line.
-        tui = JtconGui(Engine(cfg, sock, tx_sock), reload=lambda: load_config(
-            args.config, args.profile, cli_overrides(args), args.wanted, ignore=args.ignore))
+        tui = JtconGui(Engine(cfg, sock, tx_sock), startup=startup(args))
     elif cfg.display.ui == "textual":
         from jtcon.tui.textual_app import JtconTextual
         tui = JtconTextual(Engine(cfg, sock, tx_sock))

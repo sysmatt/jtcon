@@ -66,6 +66,7 @@ KEYS_HELP = """\
 <h3>Other keys</h3>
 <table cellspacing="6">
 <tr><td><b>Ctrl-+ Ctrl-- Ctrl-0</b></td><td>text size (View › Text size)</td></tr>
+<tr><td><b>Ctrl-,</b></td><td>settings (File › Settings)</td></tr>
 <tr><td><b>Ctrl-R</b></td><td>reload the config (File › Reload config)</td></tr>
 <tr><td><b>Ctrl-Q</b></td><td>quit</td></tr>
 </table>"""
@@ -105,6 +106,9 @@ class Menus:
     # ── File ──────────────────────────────────────────────────────────────────
 
     def _file(self, menu) -> None:
+        self.settings = self._action(menu, "&Settings…", self.show_settings, keys=["Ctrl+,"],
+                                     tip="The config file's settings; Save reloads them")
+        self.settings.setEnabled(self.window.startup is not None)
         self._action(menu, "&Edit config file", self.edit_config,
                      tip="Open the config file in your editor; File › Reload config uses"
                          " your changes")
@@ -115,6 +119,15 @@ class Menus:
         self.reload.setEnabled(self.window.reload is not None)
         menu.addSeparator()
         self.quit = self._action(menu, "&Quit", self.window.close, keys=["Ctrl+Q"])
+
+    def show_settings(self) -> None:
+        """A new Settings box each time: the file as it is now."""
+        from jtcon.gui.settings import SettingsDialog
+        old = self.dialogs.pop("settings", None)
+        if old is not None:
+            old.close()
+        box = self.dialogs["settings"] = SettingsDialog(self.window)
+        box.open()
 
     def config_file(self):
         """The file to edit: the profile if one is in use, else the config file

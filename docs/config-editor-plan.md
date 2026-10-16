@@ -16,6 +16,7 @@ and Textual screens keep `--edit-config`.
 | E5 | Profiles | Later (stage D), with a profile selector and a profile editor.  In a profile, each setting has a **"set here"** checkbox |
 | E6 | The API key | An ordinary field, shown as typed: it's plain text in the file anyway.  Still never written to the log |
 | E7 | File › Edit config file | Stays, for editing by hand |
+| E8 | Backups | A dated copy at each save, the newest 10 kept |
 
 ## Saving
 
@@ -25,7 +26,10 @@ and Textual screens keep `--edit-config`.
 - Before anything is written, the new file is checked with jtcon's own checks
   (the ones `--show-config` runs), so a bad value is shown in the editor and
   the file stays as it was.
-- The old file is kept as `config.toml.bak`; both are private (0600).  The new
+- The old file is kept as a dated copy beside it,
+  `config.toml.20261015-142233.bak`, the newest 10 of them (Matt, 2026-10-15:
+  until we trust the editor; `BACKUPS_KEPT` in config_edit.py); all private
+  (0600).  The new
   file replaces the old in one step, so a crash mid-save can't leave half a file.
 
 ## Reloading (restart in the window)
@@ -44,7 +48,7 @@ and Textual screens keep `--edit-config`.
    off (where the rule still exists).  QRZ uploads still waiting are saved and
    retried by the new Engine, as at a restart.
 
-## The editor (File › Settings…)
+## The editor (File › Settings…, Ctrl-,)
 
 A dialog with a page per section, built from the config's own list of settings
 (`_SCHEMA` in config.py), so new settings appear without new editor code:
@@ -58,8 +62,13 @@ A dialog with a page per section, built from the config's own list of settings
 | colour | colour button (colour picker) |
 | list (ignore, adif, proxy) | small list editor: Add, Remove |
 
-- Each field has its explanation from the starter config's comments, and its
-  default.  A setting left at its default isn't written to the file.
+- Each field has its explanation (`FIELDS` in gui/settings.py; a test checks
+  every setting has one, and a place on a page) and its default.  Only the
+  settings you change are written; emptying a text or list field removes the
+  setting (back to its default).
+- Pages: WSJT-X, Display, Checking, Logs and data, QRZ logbook, Actions.
+- Save works on the file as it is then, so changes made in an editor
+  meanwhile are kept.
 - **Overridden by the command line:** a setting the command line sets this run
   is marked, e.g. *"--port 2238 on the command line wins this run"*, with the
   value in use.  It can still be edited: the file changes, the command line
@@ -88,7 +97,7 @@ A dialog with a page per section, built from the config's own list of settings
 A. **Save and reload.** ✅ (2026-10-15)  tomlkit; the file editing and checking code (no Qt),
    saving with the backup; restart in the window; File › Reload config;
    Edit config file says to use it.
-B. **Settings dialog.**  The section pages, explanations, command-line marks.
+B. **Settings dialog.** ✅ (2026-10-15)  The section pages, explanations, command-line marks.
 C. **Wanted rules page.**
 D. **Profiles.**  Selector, editor with "set here", new / duplicate / delete.
 
