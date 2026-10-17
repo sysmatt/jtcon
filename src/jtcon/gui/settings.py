@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDia
 from jtcon.config import _CALL, _COLOR, _PATH, _SCHEMA, Config, ConfigError
 from jtcon.config_edit import ConfigFile
 from jtcon.core.messages import _CALLSIGN_RE
+from jtcon.gui.wanted_page import WantedPage
 
 # (label, help) for every setting.  The pages list them in order.
 FIELDS = {
@@ -309,9 +310,17 @@ class SettingsDialog(QDialog):
             self.load_error = None
         self.profile_sets = self._profile_settings()
         self.fields: dict = {}
+        self.page_of: dict = {}             # setting -> its page's row
         self.pages = QListWidget()
         self.stack = QStackedWidget()
+        self.file_wanted = file.wanted() if file is not None else None
+        self.wanted_page = WantedPage(self.file_wanted, self.notes(("wanted",)))
         for title, keys in PAGES:
+            if title == "Checking":         # the rules first: what jtcon looks for
+                self.wanted_row = self.pages.count()
+                self.pages.addItem("Wanted rules")
+                self.stack.addWidget(self.wanted_page)
+            self.page_of.update({k: self.pages.count() for k in keys})
             self.pages.addItem(title)
             self.stack.addWidget(self._page(keys, file))
         self.pages.currentRowChanged.connect(self.stack.setCurrentIndex)
@@ -358,7 +367,7 @@ class SettingsDialog(QDialog):
                 layer = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError):
             return set()
-        return {keys for keys in FIELDS if _lookup(layer, keys) is not None}
+        return {keys for keys in [*FIELDS, ("wanted",)] if _lookup(layer, keys) is not None}
 
     def _page(self, keys_list: list, file) -> QWidget:
         page = QWidget()
@@ -418,7 +427,14 @@ class SettingsDialog(QDialog):
                 out.append(f"The command line adds to this list this run: {flag}.")
             else:
                 out.append(f"The command line's {flag} wins this run.")
-        if keys in self.profile_sets:
+        if keys == ("wanted",):
+            if flag:
+                out[-1] = (f"The command line's {flag} wins this run: these rules are"
+                           " used when jtcon starts without it.")
+            if keys in self.profile_sets:
+                out.append(f"Profile {self.startup.profile} has its own rules, which win"
+                           " over these.")
+        elif keys in self.profile_sets:
             out.append(f"Profile {self.startup.profile} sets this: its value wins.")
         return out
 
@@ -439,6 +455,13 @@ class SettingsDialog(QDialog):
                     file.remove(keys)       # empty: back to the default
                 else:
                     file.set(keys, value)
+            if self.wanted_page.changed:
+                if file.wanted() != self.file_wanted:
+                    raise ConfigError("The rules in the config file changed since this box"
+                                      " opened (in an editor?).  Cancel, then open Settings"
+                                      " again.")
+                file.set_wanted(self.wanted_page.result())
+            self._check_rule_files(file)
             backup = file.save()
         except (ConfigError, FieldError) as exc:
             self.show_error(str(exc))
@@ -451,14 +474,24 @@ class SettingsDialog(QDialog):
         log(f"[config] Saved {self.path}" + (f" (the old one: {backup.name})" if backup else ""))
         self.window.reload_config()
 
+    def _check_rule_files(self, file) -> None:
+        """The rules' files must be there: jtcon can't start without them."""
+        for spec in file.check().wanted:
+            settings = spec.settings
+            paths = list(settings.get("files") or []) + (
+                [settings["file"]] if settings.get("file") else [])
+            for path in paths:
+                if not path.exists():
+                    raise ConfigError(f"Wanted rule {spec.name}: {path}: no such file")
+
     def show_error(self, text: str) -> None:
         """Show *text*, and the page of the setting it's about."""
         self.message.setText(text)
         # Longest names first: display.show_time before display.show.
         for keys, field in sorted(self.fields.items(), key=lambda kf: -len(kf[1].name)):
             if field.name in text or text.startswith(field.label + ":"):
-                for row, (_, page_keys) in enumerate(PAGES):
-                    if keys in page_keys:
-                        self.pages.setCurrentRow(row)
+                self.pages.setCurrentRow(self.page_of[keys])
                 field.edit.setFocus()
-                break
+                return
+        if "wanted" in text or "rule" in text:
+            self.pages.setCurrentRow(self.wanted_row)

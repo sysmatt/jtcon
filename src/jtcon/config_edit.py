@@ -13,12 +13,27 @@ from pathlib import Path
 
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
-from tomlkit.items import Whitespace
+from tomlkit.items import AoT, Whitespace
 
 from jtcon.config import (CONFIG_TEMPLATE, Config, ConfigError, build_config, check_layer,
                           merge, replace_private)
 
 BACKUPS_KEPT = 10       # dated copies of the file as it was before each save
+
+
+def _put(table, key: str, value) -> None:
+    """Set *key* in *table*: in its place if it's there (its comment kept),
+    else after the table's last setting, before the blank line that ends it."""
+    if key in table:
+        if table[key] != value:
+            table[key] = value
+        return
+    body = table.value.body
+    trail = body.pop()[1] if body and body[-1][0] is None and isinstance(
+        body[-1][1], Whitespace) else None
+    table[key] = value
+    if trail is not None:
+        table.add(trail)
 
 
 class ConfigFile:
@@ -67,19 +82,7 @@ class ConfigFile:
                 table[key] = tomlkit.table()
                 table[key].add(tomlkit.nl())    # a blank line before the next table
             table = table[key]
-        key = keys[-1]
-        if key in table:
-            if self.get(keys) != value:
-                table[key] = value              # in its place, its comment kept
-            return
-        # A new setting goes after the table's last one, before the blank line
-        # that ends it.
-        body = table.value.body
-        trail = body.pop()[1] if body and body[-1][0] is None and isinstance(
-            body[-1][1], Whitespace) else None
-        table[key] = value
-        if trail is not None:
-            table.add(trail)
+        _put(table, keys[-1], value)
 
     def remove(self, keys: tuple) -> None:
         table = self.doc
@@ -89,6 +92,51 @@ class ConfigFile:
                 return
         if keys[-1] in table:
             del table[keys[-1]]
+
+    # ── The [[wanted]] list ───────────────────────────────────────────────────
+
+    def wanted(self) -> list | None:
+        """The [[wanted]] entries as dicts, in order; None if the file has none."""
+        entries = self.doc.get("wanted")
+        if entries is None:
+            return None
+        return [dict(e.unwrap() if hasattr(e, "unwrap") else e) for e in entries]
+
+    def set_wanted(self, entries: list) -> None:
+        """Make the [[wanted]] list *entries*: [(origin, {"rule": …, …})], where
+        origin is the entry's place in wanted() (it's changed in place, its
+        comments kept) or None for a new one.  The comments after the last
+        entry (the starter config's examples, say) stay at the end."""
+        old = self.doc.get("wanted")
+        tables = list(old) if isinstance(old, AoT) else []
+        tail = []
+        if tables:
+            body = tables[-1].value.body
+            keyed = [i for i, (key, _) in enumerate(body) if key is not None]
+            cut = keyed[-1] + 1 if keyed else 0
+            tail, body[cut:] = body[cut:], []
+        new = []
+        for origin, entry in entries:
+            table = tables[origin] if origin is not None and origin < len(tables) else None
+            if table is None:
+                table = tomlkit.table()
+            for key in [k for k in table if k not in entry]:
+                del table[key]
+            for key, value in entry.items():
+                if table.get(key) != value:
+                    _put(table, key, value)
+            body = table.value.body         # one blank line between entries
+            while body and body[-1][0] is None and isinstance(body[-1][1], Whitespace):
+                body.pop()
+            new.append(table)
+        if not new:
+            self.doc["wanted"] = []         # no rules at all
+            return
+        new[-1].value.body.extend(tail)
+        aot = tomlkit.aot()
+        for table in new:
+            aot.append(table)
+        self.doc["wanted"] = aot
 
     def text(self) -> str:
         return tomlkit.dumps(self.doc)

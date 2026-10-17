@@ -258,7 +258,8 @@ The Rules menu (or F6) switches rules on and off for the session, and has the
 scope (F7) and show (F8) switches; the Logbook menu runs a QRZ sync.
 
 **File › Settings** (Ctrl-,) edits the config file's settings, a page per
-subject, each with its explanation and default.  It marks a setting the command
+subject, each with its explanation and default, and the Wanted rules: add,
+remove and reorder rules, and set each one's confirmations, name and files.  It marks a setting the command
 line (or a profile) sets this run, since theirs wins.  Save writes only what you
 changed, keeps your comments, keeps a dated copy of the old file
 (`config.toml.20261015-142233.bak`, the last 10), and reloads.  File › Edit

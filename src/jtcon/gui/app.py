@@ -45,7 +45,7 @@ class JtconGui:
             finally:
                 signal.signal(signal.SIGINT, signal.default_int_handler)
                 await self._stop_engine(window)
-            if self._next is None or window.fatal_msg:
+            if self._next is None:
                 break
             log = window.log_view.lines()
             self.engine = self._restarted(*self._next)

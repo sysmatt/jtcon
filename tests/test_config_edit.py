@@ -136,3 +136,98 @@ def test_unreadable_files(tmp_path):
     path.write_text("[udp\nport = 1\n")
     with pytest.raises(ConfigError, match="config.toml"):
         ConfigFile(path)
+
+
+RULES = """\
+[udp]
+port = 2238
+
+# My rules.
+[[wanted]]
+rule = "dxcc"   # the big one
+
+[[wanted]]
+rule = "was"
+confirm = ["lotw"]
+
+# Ideas for later:
+# [[wanted]]
+# rule = "pota"
+
+[display]
+ui = "gui"
+"""
+
+
+def test_the_wanted_list(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(RULES)
+    f = ConfigFile(path)
+    assert f.wanted() == [{"rule": "dxcc"}, {"rule": "was", "confirm": ["lotw"]}]
+    assert ConfigFile(tmp_path / "none.toml").wanted() == [
+        {"rule": "dxcc"}, {"rule": "cqz"}, {"rule": "country"}]   # the starter's
+    (tmp_path / "bare.toml").write_text("[udp]\nport = 1\n")
+    assert ConfigFile(tmp_path / "bare.toml").wanted() is None
+
+
+def test_changing_the_wanted_list_keeps_the_comments(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(RULES)
+    f = ConfigFile(path)
+    # was first, with QRZ too and a name; dxcc as it was; a new pota at the end.
+    f.set_wanted([(1, {"rule": "was", "name": "WAS-QRZ", "confirm": ["lotw", "qrz"]}),
+                  (0, {"rule": "dxcc"}),
+                  (None, {"rule": "pota"})])
+    assert f.text() == """\
+[udp]
+port = 2238
+
+# My rules.
+[[wanted]]
+rule = "was"
+confirm = ["lotw", "qrz"]
+name = "WAS-QRZ"
+
+[[wanted]]
+rule = "dxcc"   # the big one
+
+[[wanted]]
+rule = "pota"
+
+# Ideas for later:
+# [[wanted]]
+# rule = "pota"
+
+[display]
+ui = "gui"
+"""
+    f.save()
+    assert [w.name for w in load_config(path).wanted] == ["WAS-QRZ", "dxcc", "pota"]
+
+
+def test_removing_rules(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(RULES)
+    f = ConfigFile(path)
+    f.set_wanted([(0, {"rule": "dxcc"})])            # was removed
+    assert f.wanted() == [{"rule": "dxcc"}]
+    assert "# Ideas for later:" in f.text() and 'confirm' not in f.text()
+    f.set_wanted([])                                 # none at all
+    assert tomllib.loads(f.text())["wanted"] == []
+    assert load_config_text(f, tmp_path).wanted == []
+
+
+def load_config_text(f, tmp_path):
+    out = tmp_path / "out.toml"
+    out.write_text(f.text())
+    return load_config(out)
+
+
+def test_adding_rules_to_a_file_without_any(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[udp]\nport = 2238\n")
+    f = ConfigFile(path)
+    f.set_wanted([(None, {"rule": "dxcc"}), (None, {"rule": "states", "states": ["AK"]})])
+    assert f.text() == ('[udp]\nport = 2238\n\n[[wanted]]\nrule = "dxcc"\n\n'
+                        '[[wanted]]\nrule = "states"\nstates = ["AK"]\n')
+    assert [w.rule for w in load_config_text(f, tmp_path).wanted] == ["dxcc", "states"]

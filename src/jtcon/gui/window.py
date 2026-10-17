@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self.engine = engine
         self.reload = reload
         self.startup = startup
+        self.reloaded = log is not None
         self.settings = settings if settings is not None else window_settings()
         self.config = engine.config
         self.start_engine = start_engine    # False in tests: the engine is set up
@@ -462,9 +463,18 @@ class MainWindow(QMainWindow):
     # ── Closing ───────────────────────────────────────────────────────────────
 
     def fatal(self, msg: str) -> None:
-        """Show *msg*, then close; it's repeated on the terminal after exit."""
+        """Show *msg*, then close; it's repeated on the terminal after exit.
+        After a reload, the window stays, to fix the settings and reload."""
         self.log_view.add(msg)
         self.fatal_msg = msg
+        if self.reloaded and self.reload is not None:
+            hint = ("jtcon has stopped: fix the settings (File › Settings, or Edit config"
+                    " file), then File › Reload config (Ctrl-R).")
+            self.log_view.add(f"[config] {hint}")
+            if self.dialogs:
+                QMessageBox(QMessageBox.Icon.Critical, "jtcon", f"{msg}\n\n{hint}",
+                            parent=self).open()
+            return
         if not self.dialogs:
             self.close()
             return

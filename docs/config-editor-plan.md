@@ -77,6 +77,11 @@ A dialog with a page per section, built from the config's own list of settings
 - **Wanted rules page** (stage C): the `[[wanted]]` list.  Add, remove, move
   up and down; each rule's own settings (name, confirm sources, files, states).
   `--wanted` on the command line overrides the whole list and is marked so.
+  An entry from the file is changed in place, keeping its comments; the
+  comments after the last entry (the starter config's examples) stay at the
+  end of the list.  With no `[[wanted]]` in the file, jtcon's defaults are
+  shown and written only if changed.  An empty Confirm is written
+  (`confirm = []`: worked is enough), since leaving it out means LoTW.
 
 ## Profiles (stage D)
 
@@ -98,7 +103,9 @@ A. **Save and reload.** ✅ (2026-10-15)  tomlkit; the file editing and checking
    saving with the backup; restart in the window; File › Reload config;
    Edit config file says to use it.
 B. **Settings dialog.** ✅ (2026-10-15)  The section pages, explanations, command-line marks.
-C. **Wanted rules page.**
+C. **Wanted rules page.** ✅ (2026-10-15)  Also: Save checks the rules' files
+   exist, and after a reload a startup error keeps the window open (fix the
+   settings, reload) instead of quitting.
 D. **Profiles.**  Selector, editor with "set here", new / duplicate / delete.
 
 ## Testing

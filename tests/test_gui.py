@@ -1102,7 +1102,8 @@ def test_the_settings_show_the_file_and_the_defaults(window, tmp_path):
     assert f["inputs", "qrz", "api_key"].value() is None
     assert not box.changes() and box.save_button.isEnabled()
     assert [box.pages.item(i).text() for i in range(box.pages.count())] == [
-        "WSJT-X", "Display", "Checking", "Logs and data", "QRZ logbook", "Actions"]
+        "WSJT-X", "Display", "Wanted rules", "Checking", "Logs and data", "QRZ logbook",
+        "Actions"]
     assert str(tmp_path / "config.toml") in box.windowTitle()
 
 
@@ -1209,3 +1210,132 @@ def test_the_settings_menu_item(window, tmp_path):
     assert box.isVisible()
     press(win, "Ctrl+,")                                       # a fresh one
     assert win.menus.dialogs["settings"] is not box
+
+
+MY_RULES = SHACK + """
+# My rules.
+[[wanted]]
+rule = "dxcc"   # the big one
+
+[[wanted]]
+rule = "was"
+
+[[wanted]]
+rule = "pota"
+"""
+
+
+def rule_rows(page) -> list:
+    return [page.list.item(i).text() for i in range(page.list.count())]
+
+
+def test_the_wanted_rules_page_with_the_default_rules(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path)               # SHACK has no [[wanted]]
+    page = box.wanted_page
+    assert rule_rows(page) == ["DXCC  —  DXCC entity", "CQZ  —  CQ zone (WAZ)",
+                               "CTRY  —  Country name"]
+    assert not page.from_file and not page.changed
+    box.fields["udp", "port"].set(2240)
+    box.save()
+    assert "[[wanted]]" not in conf.read_text()        # unchanged: not written
+    # Add WAS by QRZ, named, and move it to the top.
+    box, conf = settings(win, tmp_path, text=conf.read_text())
+    page = box.wanted_page
+    page.add("was")
+    page.editors["name"].setText("WAS-QRZ")
+    assert rule_rows(page)[-1].startswith("WAS-QRZ  —")             # as it's typed
+    page.editors["confirm"].boxes["lotw"].setChecked(False)
+    page.editors["confirm"].boxes["qrz"].setChecked(True)
+    for _ in range(3):
+        page.move(-1)
+    assert rule_rows(page)[0] == "WAS-QRZ  —  Worked All States; needs hamdat"
+    assert not page.up_button.isEnabled() and page.down_button.isEnabled()
+    box.save()
+    from jtcon.config import load_config
+    wanted = load_config(conf).wanted
+    assert [(w.name, w.settings.get("confirm")) for w in wanted] == [
+        ("WAS-QRZ", ["qrz"]), ("dxcc", ["lotw"]), ("cqz", ["lotw"]), ("country", ["lotw"])]
+    assert conf.read_text().endswith('[[wanted]]\nrule = "country"\n')
+
+
+def test_changing_the_files_rules_keeps_their_comments(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path, text=MY_RULES)
+    page = box.wanted_page
+    assert page.from_file and len(rule_rows(page)) == 3
+    page.list.setCurrentRow(1)                         # WAS: worked is enough
+    page.editors["confirm"].boxes["lotw"].setChecked(False)
+    page.list.setCurrentRow(2)
+    page.remove()                                      # POTA
+    assert rule_rows(page) == ["DXCC  —  DXCC entity", "WAS  —  Worked All States; needs hamdat"]
+    assert page.list.currentRow() == 1
+    box.save()
+    text = conf.read_text()
+    assert '# My rules.\n[[wanted]]\nrule = "dxcc"   # the big one\n' in text
+    assert '[[wanted]]\nrule = "was"\nconfirm = []\n' in text and "pota" not in text
+    from jtcon.config import load_config
+    assert load_config(conf).wanted[1].settings["confirm"] == []
+
+
+def test_a_rule_missing_its_settings_is_shown(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path, text=MY_RULES)
+    box.pages.setCurrentRow(0)
+    box.wanted_page.add("callsigns")                   # needs files
+    box.save()
+    assert "needs a 'files' setting" in box.message.text()
+    assert box.pages.currentRow() == box.wanted_row
+    assert conf.read_text() == MY_RULES
+    (tmp_path / "wanted.txt").write_text("^K1\n")
+    box.wanted_page.editors["files"].edit.setPlainText("wanted.txt")   # beside the config
+    box.save()
+    assert '[[wanted]]\nrule = "callsigns"\nfiles = ["wanted.txt"]' in conf.read_text()
+
+
+def test_rules_changed_in_the_file_meanwhile(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path, text=MY_RULES)
+    conf.write_text(MY_RULES.replace('rule = "pota"', 'rule = "sota"'))
+    box.wanted_page.remove()
+    box.save()
+    assert box.message.text().startswith("The rules in the config file changed")
+    assert "sota" in conf.read_text()
+
+
+def test_the_command_line_and_a_profiles_rules_are_marked(window, tmp_path):
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "profiles" / "pota.toml").write_text('[[wanted]]\nrule = "pota"\n')
+    win = window()
+    box, _ = settings(win, tmp_path, profile="pota", flags={("wanted",): "--wanted dxcc"})
+    assert box.notes(("wanted",)) == [
+        "The command line's --wanted dxcc wins this run: these rules are used when jtcon"
+        " starts without it.",
+        "Profile pota has its own rules, which win over these."]
+    marks = [w.text() for w in box.wanted_page.findChildren(QLabel) if w.text().startswith("⚑")]
+    assert len(marks) == 2
+
+
+def test_a_rule_file_that_isnt_there_is_shown(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path, text=MY_RULES)
+    box.wanted_page.add("callsigns")
+    box.wanted_page.editors["files"].edit.setPlainText(str(tmp_path / "nope.txt"))
+    box.save()
+    assert box.message.text() == (f"Wanted rule callsigns: {tmp_path / 'nope.txt'}:"
+                                  " no such file")
+    assert conf.read_text() == MY_RULES and win.reloads == []
+    (tmp_path / "nope.txt").write_text("^K1\n")
+    box.save()
+    assert "nope.txt" in conf.read_text() and win.reloads == [1]
+
+
+def test_after_a_reload_a_fatal_error_keeps_the_window(make_engine, qtbot):
+    engine = make_engine("--no-color")
+    win = MainWindow(engine, start_engine=False, dialogs=False, reload=lambda: None,
+                     log=["[ready] earlier"])
+    win.show()
+    engine._emit(Fatal("[wanted] Cannot read pattern file: nope.txt"))
+    assert win.isVisible() and win.fatal_msg
+    assert win.log_view.lines()[-1].startswith("[config] jtcon has stopped: fix the settings")
+    win.close()
