@@ -268,6 +268,16 @@ config file opens the config in your editor instead, and File › Reload config
 command line's options still winning, and the stations you ignored and the rules
 you switched off this session staying so.
 
+The **Profile** menu lists your profiles (`profiles/*.toml` beside the config):
+pick one to restart with it for this session, or (none) for the config alone;
+the next start is the command line's again.  Its settings item opens the same
+pages on the profile, each setting with a **Set here** box: unticked, it's the
+config file's value (greyed); ticked, the profile sets it.  On the Wanted rules
+page one box covers the whole list, since a profile's rules replace the config's.
+New profile starts an empty one (everything is the config's until you tick
+something), Duplicate copies the one in use, and Delete keeps the file as a
+dated `.bak` in case you want it back.
+
 It's dark by default.  `theme = "light"` under `[display]` makes it light, and
 `theme = "system"` takes your desktop's own look; View › Theme switches for the
 session.  View › Text size (Ctrl-plus, Ctrl-minus, Ctrl-0) makes the panels'

@@ -94,8 +94,21 @@ A dialog with a page per section, built from the config's own list of settings
   the whole list, because a profile with any `[[wanted]]` entries replaces the
   main config's whole list (as now); ticking it starts the profile's list as a
   copy of the main config's rules.
-- New profile (a copy of the config, as `--edit-config --profile` makes one),
-  Duplicate, Delete.
+- **New profile** starts empty: just a header saying what it is, everything
+  the config file's until a box is ticked.  (Changed from "a copy of the
+  config", 2026-10-17: with Set here boxes a copy would tick every setting the
+  config has, and stop following the config.  `--edit-config --profile` still
+  makes a copy, for editing by hand.)  Then its settings open.
+- **Duplicate** copies the profile in use (its comments' `--profile` name
+  changed), then its settings open.
+- **Delete** the profile in use: renamed to a dated `.bak` beside it (no
+  longer listed, but there to get back), and jtcon carries on with no profile.
+- Saving a profile's settings restarts with that profile ("Save and use").
+- A profile is checked on top of the config file, as jtcon will use it.  A
+  setting a profile can't make empty (a path) says to untick Set here instead;
+  an empty list is written (`ignore = []`: nobody ignored with this profile).
+- Unticking the Wanted rules box removes the profile's `[[wanted]]` entries;
+  the comments after them stay.
 
 ## Stages
 
@@ -106,7 +119,8 @@ B. **Settings dialog.** ✅ (2026-10-15)  The section pages, explanations, comma
 C. **Wanted rules page.** ✅ (2026-10-15)  Also: Save checks the rules' files
    exist, and after a reload a startup error keeps the window open (fix the
    settings, reload) instead of quitting.
-D. **Profiles.**  Selector, editor with "set here", new / duplicate / delete.
+D. **Profiles.** ✅ (2026-10-17)  The Profile menu, the editor with "Set here",
+   new / duplicate / delete; the profile in use in the window's title.
 
 ## Testing
 

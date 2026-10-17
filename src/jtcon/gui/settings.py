@@ -5,7 +5,12 @@ checkbox for true/false, a drop-down for a choice, and so on.  Each shows the
 file's value, else the default.  Save writes only what changed (ConfigFile:
 the file's comments and layout stay), after the same checks as at startup,
 then reloads.  A setting the command line or a profile sets this run is
-marked: theirs wins."""
+marked: theirs wins.
+
+On a profile (Profile › settings), each setting has a "Set here" box:
+unticked, it's the config file's value, greyed; ticked, the profile sets it.
+The Wanted rules page has one for the whole list, which a profile's rules
+replace."""
 
 import html
 import re
@@ -19,7 +24,8 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDia
                                QSpinBox,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from jtcon.config import _CALL, _COLOR, _PATH, _SCHEMA, Config, ConfigError
+from jtcon.config import (_CALL, _COLOR, _PATH, _SCHEMA, Config, ConfigError, _load_layer,
+                          profile_path)
 from jtcon.config_edit import ConfigFile
 from jtcon.core.messages import _CALLSIGN_RE
 from jtcon.gui.wanted_page import WantedPage
@@ -147,6 +153,8 @@ class FieldError(Exception):
 
 class Field:
     """One setting's row: its widget, the value shown, and what it was."""
+
+    here = None                 # on a profile: its Set here box
 
     def __init__(self, keys: tuple, value):
         self.keys = keys
@@ -294,27 +302,39 @@ def _wrapping(text: str) -> QLabel:
 
 
 class SettingsDialog(QDialog):
-    """The settings of *window*'s config file (window.startup.file)."""
+    """The settings of *window*'s config file (window.startup.file), or of
+    its *profile*."""
 
-    def __init__(self, window):
+    def __init__(self, window, profile: str | None = None):
         super().__init__(window)
         self.window = window
         self.startup = window.startup
-        self.path = self.startup.file
-        self.setWindowTitle(f"Settings — {self.path}")
+        self.profile = profile
+        self.main_path = self.startup.file
+        self.path = profile_path(profile, self.main_path) if profile else self.main_path
+        self.setWindowTitle(f"Settings — profile {profile} — {self.path}" if profile
+                            else f"Settings — {self.path}")
+        self.load_error = None
+        file = self.main = None
         try:
             file = ConfigFile(self.path)
+            if profile:
+                self.main = ConfigFile(self.main_path)  # what's not set here
         except ConfigError as exc:
             file, self.load_error = None, str(exc)
-        else:
-            self.load_error = None
-        self.profile_sets = self._profile_settings()
+        self.profile_sets = set() if profile else self._profile_settings()
         self.fields: dict = {}
         self.page_of: dict = {}             # setting -> its page's row
         self.pages = QListWidget()
         self.stack = QStackedWidget()
         self.file_wanted = file.wanted() if file is not None else None
-        self.wanted_page = WantedPage(self.file_wanted, self.notes(("wanted",)))
+        if profile:
+            self.wanted_page = WantedPage(
+                self.file_wanted, self.notes(("wanted",)),
+                base=self.main.wanted() if self.main is not None else None,
+                base_name=self.main_path.name)
+        else:
+            self.wanted_page = WantedPage(self.file_wanted, self.notes(("wanted",)))
         for title, keys in PAGES:
             if title == "Checking":         # the rules first: what jtcon looks for
                 self.wanted_row = self.pages.count()
@@ -335,7 +355,8 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                    | QDialogButtonBox.StandardButton.Cancel)
         self.save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        self.save_button.setText("&Save and reload")
+        self.save_button.setText("&Save and use" if profile and profile != self.startup.profile
+                                 else "&Save and reload")
         self.save_button.setEnabled(file is not None)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
@@ -349,6 +370,12 @@ class SettingsDialog(QDialog):
         self.resize(820, 600)
 
     def _note(self) -> str:
+        if self.profile:
+            main = self.main_path.name
+            return (f"Profile {self.profile} ({self.path}): layered on top of {main}.  Tick"
+                    f" Set here for each setting this profile changes; the others are {main}'s"
+                    " (greyed).  Save writes only what you change, keeps a dated copy of the"
+                    f" file as it was, and restarts with profile {self.profile}.")
         text = (f"The settings in {self.path}, used when jtcon starts.  Save writes only"
                 " what you change (the file's comments stay), keeps a dated copy of the"
                 " file as it was, and reloads.")
@@ -380,8 +407,12 @@ class SettingsDialog(QDialog):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         for keys in keys_list:
             value = file.get(keys) if file is not None else None
+            here = value is not None
+            inherited = self.main.get(keys) if self.main is not None else None
+            if inherited is None:
+                inherited = default_of(keys)
             if value is None:
-                value = default_of(keys)
+                value = inherited
             field = self.fields[keys] = Field(keys, value)
             field.widget.setToolTip(field.help)
             default = default_of(keys)
@@ -396,10 +427,23 @@ class SettingsDialog(QDialog):
             column = QVBoxLayout(cell)
             column.setContentsMargins(0, 0, 0, 8)
             column.setSpacing(2)
-            if field.kind is bool or isinstance(field.kind, tuple) or field.kind in (int, _COLOR):
+            short = (field.kind is bool or isinstance(field.kind, tuple)
+                     or field.kind in (int, _COLOR))
+            if self.profile:
+                field.here = QCheckBox("Set here")
+                field.here.setToolTip(f"Ticked: this profile sets it.  Unticked:"
+                                      f" {self.main_path.name}'s value (shown greyed).")
+                field.here.setChecked(here)
+                field.here_initial, field.inherited = here, inherited
+                field.widget.setEnabled(here)
+                field.here.toggled.connect(lambda on, f=field: self._set_here(f, on))
+            if short or self.profile:
                 row = QHBoxLayout()             # its own width, at the left
-                row.addWidget(field.widget)
-                row.addStretch()
+                if self.profile:
+                    row.addWidget(field.here, alignment=Qt.AlignmentFlag.AlignTop)
+                row.addWidget(field.widget, 0 if short else 1)
+                if short:
+                    row.addStretch()
                 column.addLayout(row)
             else:
                 column.addWidget(field.widget)
@@ -417,6 +461,11 @@ class SettingsDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         return scroll
+
+    def _set_here(self, field, on: bool) -> None:
+        field.widget.setEnabled(on)
+        if not on:
+            field.set(field.inherited)      # what's used without it
 
     def notes(self, keys: tuple) -> list:
         """Why the setting saved here isn't what's in use this run."""
@@ -441,26 +490,52 @@ class SettingsDialog(QDialog):
     # ── Saving ────────────────────────────────────────────────────────────────
 
     def changes(self) -> dict:
-        """{keys: new value} for the fields changed; FieldError if one can't be read."""
-        return {keys: f.value() for keys, f in self.fields.items() if f.changed}
+        """{keys: new value, or None to remove it} for the fields changed;
+        FieldError if one can't be read."""
+        out = {}
+        for keys, f in self.fields.items():
+            here = getattr(f, "here", None)
+            if here is None:                # the config file: empty is the default
+                if f.changed:
+                    value = f.value()
+                    out[keys] = None if value in (None, []) else value
+            elif here.isChecked():          # a profile: empty means empty
+                if not f.here_initial or f.changed:
+                    out[keys] = self._profile_value(f)
+            elif f.here_initial:
+                out[keys] = None
+        return out
+
+    def _profile_value(self, field):
+        value = field.value()
+        if value is None:
+            if field.kind is not str:
+                raise FieldError(f"{field.label}: a profile can't set this to nothing; untick"
+                                 f" Set here for {self.main_path.name}'s")
+            value = ""
+        return value
 
     def save(self) -> None:
         """Write the changes to the file as it is now (it may have been edited
         meanwhile: only these settings change), check, save, reload."""
         try:
             changes = self.changes()
-            file = ConfigFile(self.path)
+            base = None
+            if self.profile:                # checked on top of the config file
+                base = _load_layer(self.main_path) if self.main_path.exists() else {}
+            file = ConfigFile(self.path, base=base)
             for keys, value in changes.items():
-                if value in (None, []):
-                    file.remove(keys)       # empty: back to the default
-                else:
-                    file.set(keys, value)
+                file.set(keys, value)       # None removes it
             if self.wanted_page.changed:
                 if file.wanted() != self.file_wanted:
-                    raise ConfigError("The rules in the config file changed since this box"
+                    where = f"profile {self.profile}" if self.profile else "the config file"
+                    raise ConfigError(f"The rules in {where} changed since this box"
                                       " opened (in an editor?).  Cancel, then open Settings"
                                       " again.")
-                file.set_wanted(self.wanted_page.result())
+                if self.wanted_page.own:
+                    file.set_wanted(self.wanted_page.result())
+                else:
+                    file.remove_wanted()
             self._check_rule_files(file)
             backup = file.save()
         except (ConfigError, FieldError) as exc:
@@ -468,11 +543,17 @@ class SettingsDialog(QDialog):
             return
         self.accept()
         log = self.window.log_view.add
+        switch = self.profile is not None and self.profile != self.startup.profile
         if backup is False:
             log("[config] Settings: nothing changed.")
+            if switch:
+                self.window.use_profile(self.profile)
             return
         log(f"[config] Saved {self.path}" + (f" (the old one: {backup.name})" if backup else ""))
-        self.window.reload_config()
+        if switch:
+            self.window.use_profile(self.profile)
+        else:
+            self.window.reload_config()
 
     def _check_rule_files(self, file) -> None:
         """The rules' files must be there: jtcon can't start without them."""

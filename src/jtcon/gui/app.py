@@ -68,11 +68,13 @@ class JtconGui:
 
     # ── Reloading ─────────────────────────────────────────────────────────────
 
-    def reload_config(self) -> str | None:
+    def reload_config(self, startup=None) -> str | None:
         """Read the config again and restart with it; or why not (jtcon then
-        carries on as it was)."""
+        carries on as it was).  *startup*: start that way from now on instead
+        (another profile, from the Profile menu)."""
+        startup = startup or self.startup
         try:
-            config = self.startup.load()
+            config = startup.load()
         except ConfigError as exc:
             return f"Config error: {exc}"
         from jtcon.cli import bind_udp
@@ -80,6 +82,7 @@ class JtconGui:
             sock = bind_udp(config)
         except OSError as exc:
             return f"Can't listen on {config.udp.host}:{config.udp.port}: {exc.strerror or exc}"
+        self.startup = startup
         self._next = (config, sock)
         self.window.close()
         return None

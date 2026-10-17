@@ -415,6 +415,32 @@ def profile_path(profile: str, config_file: Path) -> Path:
     return config_file.parent / PROFILES_DIR / f"{profile}.toml"
 
 
+PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def profile_names(config_file: Path) -> list:
+    """The profiles in profiles/ next to the config file, by name."""
+    folder = config_file.parent / PROFILES_DIR
+    try:
+        return sorted((p.stem for p in folder.glob("*.toml") if p.is_file()), key=str.lower)
+    except OSError:
+        return []
+
+
+def new_profile_text(name: str, source: str, day: str) -> str:
+    """A new, empty profile: what it is, and nothing set yet."""
+    return (
+        f'# Profile "{name}", made on {day}.\n'
+        f"# Use it with:  jtcon --profile {name}   (or the window's Profile menu)\n"
+        "#\n"
+        f"# A profile is layered on top of {source}: only what's set here is\n"
+        f"# different; everything else is {source}'s.  Any [[wanted]] entries here\n"
+        f"# replace {source}'s whole list.  Relative paths here are relative to this\n"
+        "# file's folder.\n"
+        "# Check it with:  jtcon --show-config --profile " + name + "\n"
+    )
+
+
 _API_KEY_LINE_RE = re.compile(r"^([ \t]*)api_key[ \t]*=.*$", re.MULTILINE)
 
 

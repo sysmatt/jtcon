@@ -53,6 +53,10 @@ A profile only needs the settings it changes.  Tables merge setting by setting, 
 alone.  If a profile has any `[[wanted]]` entries, they replace the main file's
 whole list; if it has none, the main file's rules stay.
 
+In the desktop window (`--ui gui`), the **Profile** menu does all this too:
+switch profile for the session, make a new (empty) one, duplicate or delete one,
+and edit one with a **Set here** box beside each setting.
+
 ```toml
 # profiles/parks.toml: just POTA, checking every decode
 [scope]

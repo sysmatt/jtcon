@@ -13,7 +13,7 @@ from pathlib import Path
 
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
-from tomlkit.items import AoT, Whitespace
+from tomlkit.items import AoT, Table, Whitespace
 
 from jtcon.config import (CONFIG_TEMPLATE, Config, ConfigError, build_config, check_layer,
                           merge, replace_private)
@@ -138,6 +138,27 @@ class ConfigFile:
             aot.append(table)
         self.doc["wanted"] = aot
 
+    def remove_wanted(self) -> None:
+        """No [[wanted]] list at all (a profile then uses its main config's).
+        The comments after the last entry stay, at the end of the table before."""
+        old = self.doc.get("wanted")
+        if old is None:
+            return
+        tail = []
+        if isinstance(old, AoT) and len(old):
+            body = list(old)[-1].value.body
+            keyed = [i for i, (key, _) in enumerate(body) if key is not None]
+            tail = body[keyed[-1] + 1 if keyed else 0:]
+        keys = [key.key if key is not None else None for key, _ in self.doc.body]
+        place = keys.index("wanted")
+        before = self.doc.body[place - 1][1] if place else None
+        del self.doc["wanted"]
+        if isinstance(before, Table):
+            before.value.body.extend((None, item) for _, item in tail)
+        else:
+            for _, item in tail:
+                self.doc.add(item)
+
     def text(self) -> str:
         return tomlkit.dumps(self.doc)
 
@@ -186,9 +207,22 @@ class ConfigFile:
         return sorted(found, key=lambda p: (p.stat().st_mtime_ns, p.name))
 
     def _backup_path(self) -> Path:
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        path, n = self.path.with_name(f"{self.path.name}.{stamp}.bak"), 1
-        while path.exists():            # two saves in one second
-            n += 1
-            path = self.path.with_name(f"{self.path.name}.{stamp}-{n}.bak")
-        return path
+        return _dated(self.path)
+
+
+def _dated(path: Path) -> Path:
+    """A dated name beside *path* for a copy of it: config.toml.20261015-142233.bak."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out, n = path.with_name(f"{path.name}.{stamp}.bak"), 1
+    while out.exists():                 # two in one second
+        n += 1
+        out = path.with_name(f"{path.name}.{stamp}-{n}.bak")
+    return out
+
+
+def set_aside(path: Path) -> Path:
+    """Deleting a profile: rename it to a dated .bak beside it, which jtcon
+    no longer lists, so it can still be got back.  The new name."""
+    out = _dated(path)
+    path.rename(out)
+    return out

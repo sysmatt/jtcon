@@ -9,6 +9,7 @@ The window remembers its size, its panels and the tables' columns between runs
 import asyncio
 import json
 import time
+from dataclasses import replace
 
 from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut
@@ -120,8 +121,11 @@ class MainWindow(QMainWindow):
         else:
             for line in log:
                 self.log_view.add(line)
-            self.log_view.add("[config] Reloaded: the decodes start afresh; the stations"
-                              " ignored and the rules switched off this session still are.")
+            using = (f"profile {startup.profile}" if startup is not None and startup.profile
+                     else "no profile")
+            self.log_view.add(f"[config] Reloaded, with {using}: the decodes start afresh;"
+                              " the stations ignored and the rules switched off this session"
+                              " still are.")
 
         self._timer = QTimer(self, interval=TICK_MS, timeout=self._tick)
         self._timer.start()
@@ -370,6 +374,8 @@ class MainWindow(QMainWindow):
         self.changes.setText(changes)
         self.changes.setVisible(bool(changes))
         title = ["jtcon"]
+        if self.startup is not None and self.startup.profile:
+            title.append(f"profile {self.startup.profile}")
         if freq:
             ct = eng.cycle_tracker
             title.append(f"{freq} {ct.current_mode}" if ct and ct.current_mode else freq)
@@ -425,17 +431,27 @@ class MainWindow(QMainWindow):
         self.refresh_wanted(force=True)
         self.menus.ignored_changed()
 
-    def reload_config(self) -> None:
+    def reload_config(self, startup=None) -> None:
         """File › Reload config: restart with the config read again, or say
-        why not and carry on."""
+        why not and carry on.  *startup*: another way to start (a profile)."""
         if self.reload is None:
             return
-        self.log_view.add("[config] Reloading the config …")
-        error = self.reload()
+        if startup is None:
+            self.log_view.add("[config] Reloading the config …")
+        error = self.reload(startup) if startup is not None else self.reload()
         if error:
             self.log_view.add(f"[config] {error}  (carrying on as before)")
             if self.dialogs:
                 QMessageBox(QMessageBox.Icon.Warning, "jtcon", error, parent=self).open()
+
+    def use_profile(self, name: str | None) -> None:
+        """Profile menu: restart with profile *name* (None: none), for this
+        session; the next start is the command line's again."""
+        if self.startup is None:
+            return
+        self.log_view.add(f"[config] Switching to profile {name} …" if name
+                          else "[config] Switching to no profile …")
+        self.reload_config(replace(self.startup, profile=name))
 
     # ── Engine events ─────────────────────────────────────────────────────────
 

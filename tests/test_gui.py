@@ -851,7 +851,7 @@ def items(m) -> dict:
 def test_the_menus_and_the_startup_hint(window):
     win = window()
     assert [a.text().replace("&", "") for a in win.menuBar().actions()] == [
-        "File", "View", "Station", "Rules", "Logbook", "Help"]
+        "File", "Profile", "View", "Station", "Rules", "Logbook", "Help"]
     assert win.first_log[0].startswith("[keys] F1 help · F2–F5 layouts")
     assert "double-click or Enter answers" in win.first_log[0]
     assert list(items(menu(win, "View")))[:5] == [
@@ -1339,3 +1339,182 @@ def test_after_a_reload_a_fatal_error_keeps_the_window(make_engine, qtbot):
     assert win.isVisible() and win.fatal_msg
     assert win.log_view.lines()[-1].startswith("[config] jtcon has stopped: fix the settings")
     win.close()
+
+
+# ── Profiles ──────────────────────────────────────────────────────────────────
+
+def profiles(win, tmp_path, current=None, text=SHACK, **files):
+    """A config file, profiles/NAME.toml for each of *files*, and the window
+    started with profile *current*.  win.reloads: the profile each reload
+    asked for (1: the same as before)."""
+    from jtcon.config import Startup
+    folder = tmp_path / "profiles"
+    folder.mkdir(exist_ok=True)
+    for name, body in files.items():
+        (folder / f"{name}.toml").write_text(body)
+    conf = tmp_path / "config.toml"
+    conf.write_text(text)
+    win.startup = Startup(conf, profile=current)
+    reloads = win.reloads = []
+    win.reload = lambda startup=None: reloads.append(startup.profile if startup else 1)
+    win.menus.fill_profiles()
+    return conf, folder
+
+
+def test_the_profile_menu(window, tmp_path):
+    win = window()
+    assert not items(menu(win, "Profile"))["Profiles need the config (jtcon --ui gui)"].isEnabled()
+    profiles(win, tmp_path, None, pota="", Contest="")
+    (tmp_path / "profiles" / "pota.toml.20261017-101010.bak").write_text("")   # not listed
+    win.menus.fill_profiles()
+    got = items(menu(win, "Profile"))
+    assert list(got)[:3] == ["(none)", "Contest", "pota"]
+    assert got["(none)"].isChecked() and not got["pota"].isChecked()
+    assert not got["Profile settings…"].isEnabled() and got["New profile…"].isEnabled()
+    assert not got["Delete profile…"].isEnabled()
+    got["(none)"].trigger()                                 # already in use: nothing
+    got["pota"].trigger()
+    assert win.reloads == ["pota"]
+    assert win.log_view.lines()[-1] == "[config] Switching to profile pota …"
+    profiles(win, tmp_path, "pota")
+    got = items(menu(win, "Profile"))
+    assert got["pota"].isChecked() and got["pota settings…"].isEnabled()
+    assert got["Delete profile…"].isEnabled()
+    got["(none)"].trigger()
+    assert win.reloads == [None]
+
+
+def test_switching_profiles_restarts_with_it(window, tmp_path):
+    """JtconGui.reload_config with another startup: used from then on, only
+    if it works."""
+    from dataclasses import replace
+    from jtcon.config import Startup
+    win = window()
+    free = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    free.bind(("127.0.0.1", 0))
+    port = free.getsockname()[1]
+    free.close()
+    conf, folder = profiles(win, tmp_path, None, pota=f'[udp]\nport = {port}\n',
+                            bad='[udp]\nport = "x"\n')
+    gui = JtconGui(win.engine, startup=Startup(conf, overrides={"udp": {"host": "127.0.0.1"}}))
+    gui.window, win.reload, win.startup = win, gui.reload_config, gui.startup
+    win.use_profile("bad")
+    assert gui.startup.profile is None and gui._next is None
+    assert "udp.port must be an integer" in win.log_view.lines()[-1]
+    win.use_profile("pota")
+    assert gui.startup.profile == "pota" and gui._next is not None
+    config, sock = gui._next
+    assert config.sources == [conf, folder / "pota.toml"] and sock.getsockname()[1] == port
+    sock.close()
+    assert replace(gui.startup, profile=None).load().sources == [conf]
+
+
+def test_a_profiles_settings_set_here(window, tmp_path):
+    from jtcon.gui.settings import SettingsDialog
+    win = window()
+    conf, folder = profiles(win, tmp_path, "pota",
+                            pota='# Parks.\n[display]\ntheme = "dark"\n')
+    box = SettingsDialog(win, profile="pota")
+    assert box.windowTitle() == f"Settings — profile pota — {folder / 'pota.toml'}"
+    f = box.fields
+    theme, port, ignore = f["display", "theme"], f["udp", "port"], f["filters", "ignore"]
+    assert theme.here.isChecked() and theme.value() == "dark" and theme.widget.isEnabled()
+    # Not set here: config.toml's value, or the default, greyed.
+    assert not port.here.isChecked() and port.value() == 2238 and not port.widget.isEnabled()
+    assert f["udp", "host"].value() == "0.0.0.0"
+    assert box.notes(("display", "theme")) == []            # not "the profile wins"
+    assert not box.changes()
+    port.here.setChecked(True)
+    assert port.widget.isEnabled()
+    port.set(2250)
+    ignore.here.setChecked(True)
+    ignore.edit.setText("")                                 # empty here: no one ignored
+    theme.here.setChecked(False)
+    assert theme.value() == "light"                         # back to config.toml's
+    assert box.changes() == {("udp", "port"): 2250, ("filters", "ignore"): [],
+                             ("display", "theme"): None}
+    box.save()
+    text = (folder / "pota.toml").read_text()
+    assert text.startswith("# Parks.\n[display]\n") and "theme" not in text
+    assert "port = 2250" in text and "ignore = []" in text
+    assert conf.read_text() == SHACK                        # the config file untouched
+    assert next(folder.glob("pota.toml.*.bak")).name.startswith("pota.toml.2")
+    assert win.reloads == [1]                               # in use: reloaded
+    from jtcon.config import load_config
+    cfg = load_config(conf, "pota")
+    assert (cfg.udp.port, cfg.filters.ignore, cfg.display.theme) == (2250, [], "light")
+
+
+def test_a_profile_is_checked_on_top_of_the_config(window, tmp_path):
+    from jtcon.gui.settings import SettingsDialog
+    win = window()
+    conf, folder = profiles(win, tmp_path, None, ft4="")
+    box = SettingsDialog(win, profile="ft4")
+    assert box.save_button.text() == "&Save and use"        # not the profile in use
+    json_log = box.fields["actions", "json_log", "file"]
+    json_log.here.setChecked(True)
+    box.save()
+    assert box.message.text().startswith("JSON log: a profile can't set this to nothing")
+    json_log.here.setChecked(False)
+    box.fields["display", "wanted_timeout_minutes"].here.setChecked(True)
+    box.fields["display", "wanted_timeout_minutes"].set(0)
+    box.save()
+    assert f"{folder / 'ft4.toml'}: display.wanted_timeout_minutes" in box.message.text()
+    box.fields["display", "wanted_timeout_minutes"].set(5)
+    box.save()
+    assert "wanted_timeout_minutes = 5" in (folder / "ft4.toml").read_text()
+    assert win.reloads == ["ft4"]                           # saved, then switched to it
+
+
+def test_a_profiles_own_rules(window, tmp_path):
+    from jtcon.config import load_config
+    from jtcon.gui.settings import SettingsDialog
+    win = window()
+    conf, folder = profiles(win, tmp_path, "pota", text=MY_RULES, pota="[udp]\nport = 2240\n")
+    page = SettingsDialog(win, profile="pota").wanted_page
+    # Not its own: config.toml's rules, greyed.
+    assert not page.own and not page.body.isEnabled()
+    assert rule_rows(page) == ["DXCC  —  DXCC entity", "WAS  —  Worked All States; needs hamdat",
+                               "POTA  —  POTA activators (POTA in the message)"]
+    page.here.setChecked(True)                              # a copy, to change
+    assert page.body.isEnabled() and page.changed
+    page.remove()                                           # dxcc
+    box = page.window()
+    box.save()
+    assert [w.rule for w in load_config(conf, "pota").wanted] == ["was", "pota"]
+    assert conf.read_text() == MY_RULES
+    # And back: the config file's rules again, the comments after them kept.
+    path = folder / "pota.toml"
+    path.write_text(path.read_text() + "\n# Ideas: sota.\n")
+    page = SettingsDialog(win, profile="pota").wanted_page
+    assert page.own and rule_rows(page)[0].startswith("WAS")
+    page.here.setChecked(False)
+    assert rule_rows(page)[0].startswith("DXCC")
+    page.window().save()
+    text = path.read_text()
+    assert "[[wanted]]" not in text and "# Ideas: sota." in text
+    assert [w.rule for w in load_config(conf, "pota").wanted] == ["dxcc", "was", "pota"]
+
+
+def test_new_duplicate_and_delete_profiles(window, tmp_path):
+    win = window()
+    conf, folder = profiles(win, tmp_path, None)
+    win.menus.new_profile("parks")
+    path = folder / "parks.toml"
+    assert path.read_text().startswith('# Profile "parks", made on ')
+    assert path.stat().st_mode & 0o777 == 0o600
+    from jtcon.config import load_config
+    assert load_config(conf, "parks").udp.port == 2238      # nothing set: all config.toml's
+    box = win.menus.dialogs["settings"]
+    assert box.profile == "parks" and box.isVisible()
+    box.reject()
+    profiles(win, tmp_path, "parks")
+    win.menus.duplicate_profile("parks-cw")
+    copy = (folder / "parks-cw.toml").read_text()
+    assert "jtcon --profile parks-cw" in copy and "--profile parks\n" not in copy
+    assert win.menus.dialogs["settings"].profile == "parks-cw"
+    win.menus.dialogs["settings"].reject()
+    win.menus.delete_profile(confirm=False)
+    assert not path.exists() and win.reloads == [None]
+    assert [p.name.startswith("parks.toml.2") for p in folder.glob("*.bak")] == [True]
+    assert win.log_view.lines()[-2].startswith("[config] Deleted profile parks (kept as ")

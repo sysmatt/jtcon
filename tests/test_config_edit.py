@@ -231,3 +231,43 @@ def test_adding_rules_to_a_file_without_any(tmp_path):
     assert f.text() == ('[udp]\nport = 2238\n\n[[wanted]]\nrule = "dxcc"\n\n'
                         '[[wanted]]\nrule = "states"\nstates = ["AK"]\n')
     assert [w.rule for w in load_config_text(f, tmp_path).wanted] == ["dxcc", "states"]
+
+
+def test_removing_a_profiles_rules_keeps_the_comments_after_them(tmp_path):
+    """A profile made by --edit-config --profile is a copy of the config, the
+    starter's commented examples and Actions after its rules."""
+    from jtcon.config import profile_from_config
+    path = tmp_path / "pota.toml"
+    path.write_text(profile_from_config(CONFIG_TEMPLATE, "pota", "config.toml", "2026-10-17"))
+    f = ConfigFile(path, base={})
+    f.remove_wanted()
+    text = f.text()
+    assert "\n[[wanted]]" not in text and f.wanted() is None
+    assert '# [[wanted]]\n# rule = "pota"' in text and "# [actions.highlight]" in text
+    assert text.index("# [actions.ntfy]") > text.index("[filters]")
+    f.save()
+    (tmp_path / "config.toml").write_text("")
+    assert [w.rule for w in load_config(tmp_path / "config.toml", str(path)).wanted] == [
+        "dxcc", "cqz", "country"]                                 # jtcon's defaults
+    f.remove_wanted()                                             # none: nothing to do
+    (tmp_path / "rules.toml").write_text('[[wanted]]\nrule = "pota"\n# The end.\n')
+    f = ConfigFile(tmp_path / "rules.toml")
+    f.remove_wanted()                                             # nothing before them
+    assert f.text() == "# The end.\n"
+
+
+def test_a_deleted_profile_is_set_aside(tmp_path):
+    from jtcon.config import new_profile_text, profile_names
+    from jtcon.config_edit import set_aside
+    folder = tmp_path / "profiles"
+    folder.mkdir()
+    for name in ("pota", "Contest"):
+        (folder / f"{name}.toml").write_text(new_profile_text(name, "config.toml", "2026-10-17"))
+    (folder / "notes.txt").write_text("")
+    assert profile_names(tmp_path / "config.toml") == ["Contest", "pota"]
+    assert profile_names(tmp_path / "elsewhere" / "config.toml") == []
+    kept = set_aside(folder / "pota.toml")
+    assert re.fullmatch(r"pota\.toml\.\d{8}-\d{6}\.bak", kept.name)
+    assert profile_names(tmp_path / "config.toml") == ["Contest"]
+    (tmp_path / "config.toml").write_text("")
+    assert load_config(tmp_path / "config.toml", "Contest").udp.port == 2237  # nothing set

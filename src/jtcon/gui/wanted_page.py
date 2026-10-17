@@ -3,7 +3,11 @@ rules; each rule's own settings beside the list.
 
 Each entry remembers where it came from in the file (its place in
 ConfigFile.wanted()), so saving changes it in place and its comments stay.
-A setting is written only if the file had it or it's not the rule's default."""
+A setting is written only if the file had it or it's not the rule's default.
+
+On a profile, one box says whether the profile has its own rules (they
+replace the config file's whole list); unticked, the config file's rules
+are shown, greyed."""
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
@@ -52,26 +56,40 @@ class Entry:
 class WantedPage(QWidget):
     """The list on the left, the selected rule's settings on the right.
     *entries* are the file's [[wanted]] entries (None: it has none, so
-    jtcon's defaults are shown)."""
+    jtcon's defaults are shown).  On a profile, *base_name* is the config
+    file's name and *base* its entries (None: the defaults)."""
 
-    def __init__(self, entries: list | None, notes: list, parent=None):
+    def __init__(self, entries: list | None, notes: list, parent=None,
+                 base: list | None = None, base_name: str | None = None):
         super().__init__(parent)
+        self.profile = base_name is not None
         self.from_file = entries is not None
+        self.base = base if base is not None else [{"rule": r} for r in DEFAULT_WANTED]
+        self.own_entries = entries          # the profile's own, to go back to
         if entries is None:
-            entries = [{"rule": r} for r in DEFAULT_WANTED]
+            entries = self.base if self.profile else [{"rule": r} for r in DEFAULT_WANTED]
         self.entries = [Entry(i if self.from_file else None, e) for i, e in enumerate(entries)]
         self.editors: dict = {}             # setting -> its widget, for the selected rule
         self.current: Entry | None = None
-        self.initial = self.result()
+        self.here = None
 
-        intro = QLabel("Each rule makes a station wanted for its own reason; the Wanted"
-                       " column shows which.  Award rules (DXCC, zones, WAS…) want what you"
-                       " haven't confirmed; the others watch for activators or your lists."
-                       + ("" if self.from_file else "  The config file has no rules, so"
-                          " jtcon uses these; they're written to it only if you change"
-                          " them."))
+        if self.profile:
+            text = (f"Unticked, this profile uses {base_name}'s rules (shown greyed).  Ticked,"
+                    f" it has its own, which replace {base_name}'s whole list; they start as"
+                    " a copy of them.")
+        else:
+            text = ("Each rule makes a station wanted for its own reason; the Wanted column"
+                    " shows which.  Award rules (DXCC, zones, WAS…) want what you haven't"
+                    " confirmed; the others watch for activators or your lists."
+                    + ("" if self.from_file else "  The config file has no rules, so jtcon"
+                       " uses these; they're written to it only if you change them."))
+        intro = QLabel(text)
         intro.setWordWrap(True)
         layout = QVBoxLayout(self)
+        if self.profile:
+            self.here = QCheckBox("This profile has its own rules")
+            self.here.setChecked(self.from_file)
+            layout.addWidget(self.here)
         layout.addWidget(intro)
         for note in notes:
             mark = QLabel(f"⚑ {note}")
@@ -109,9 +127,32 @@ class WantedPage(QWidget):
         left.addLayout(buttons)
         body.addLayout(left, 1)
         body.addWidget(self.editor, 1)
-        layout.addLayout(body, 1)
+        self.body = QWidget()
+        self.body.setLayout(body)
+        body.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.body, 1)
         self._fill()
         self.list.setCurrentRow(0)
+        self.initial = (self.own, self.result())
+        if self.here is not None:
+            self.body.setEnabled(self.here.isChecked())
+            self.here.toggled.connect(self._set_own)
+
+    @property
+    def own(self) -> bool:
+        """The file has its own rules (always, for the config file)."""
+        return self.here is None or self.here.isChecked()
+
+    def _set_own(self, on: bool) -> None:
+        """Ticked: the profile's own rules (as they were, or a copy of the
+        config file's); unticked: the config file's, greyed."""
+        self.current = None
+        if on and self.own_entries is not None:
+            self.entries = [Entry(i, e) for i, e in enumerate(self.own_entries)]
+        else:
+            self.entries = [Entry(None, e) for e in self.base]
+        self.body.setEnabled(on)
+        self._refresh(0)
 
     # ── The list ──────────────────────────────────────────────────────────────
 
@@ -247,7 +288,7 @@ class WantedPage(QWidget):
 
     @property
     def changed(self) -> bool:
-        return self.result() != self.initial
+        return (self.own, self.result()) != self.initial
 
 
 class _PathEdit(QWidget):

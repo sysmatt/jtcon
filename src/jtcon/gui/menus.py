@@ -3,14 +3,18 @@
 Every menu item with a key works from anywhere in the window (Qt runs an
 action's shortcut whether or not its menu is open)."""
 
+import re
 import sys
+from datetime import date
 
 from PySide6.QtCore import QProcess, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import QDialog, QLabel, QScrollArea, QVBoxLayout
+from PySide6.QtWidgets import (QDialog, QInputDialog, QLabel, QLineEdit, QMessageBox,
+                               QScrollArea, QVBoxLayout)
 
 from jtcon import __version__
-from jtcon.config import CONFIG_FILE, CONFIG_TEMPLATE, default_config_dir, write_private
+from jtcon.config import (CONFIG_FILE, CONFIG_TEMPLATE, PROFILE_NAME_RE, default_config_dir,
+                          new_profile_text, profile_names, profile_path, write_private)
 from jtcon.core.wanted import rule_label
 from jtcon.gui.ignored import IgnoredDialog
 from jtcon.gui.theme import THEMES
@@ -82,6 +86,9 @@ class Menus:
         self.dialogs: dict = {}         # "keys", "about", "ignored": kept while open
         bar = window.menuBar()
         self._file(bar.addMenu("&File"))
+        self.profile_menu = bar.addMenu("&Profile")
+        self.profile_menu.aboutToShow.connect(self.fill_profiles)
+        self.fill_profiles()
         self._view(bar.addMenu("&View"))
         self.station_menu = bar.addMenu("&Station")
         self.station_menu.aboutToShow.connect(self.fill_station)
@@ -106,13 +113,14 @@ class Menus:
     # ── File ──────────────────────────────────────────────────────────────────
 
     def _file(self, menu) -> None:
-        self.settings = self._action(menu, "&Settings…", self.show_settings, keys=["Ctrl+,"],
+        self.settings = self._action(menu, "&Settings…", lambda: self.show_settings(),
+                                     keys=["Ctrl+,"],
                                      tip="The config file's settings; Save reloads them")
         self.settings.setEnabled(self.window.startup is not None)
         self._action(menu, "&Edit config file", self.edit_config,
                      tip="Open the config file in your editor; File › Reload config uses"
                          " your changes")
-        self.reload = self._action(menu, "&Reload config", self.window.reload_config,
+        self.reload = self._action(menu, "&Reload config", lambda: self.window.reload_config(),
                                    keys=["Ctrl+R"],
                                    tip="Read the config again and restart with it, in this"
                                        " window (the command line's options still win)")
@@ -120,13 +128,14 @@ class Menus:
         menu.addSeparator()
         self.quit = self._action(menu, "&Quit", self.window.close, keys=["Ctrl+Q"])
 
-    def show_settings(self) -> None:
-        """A new Settings box each time: the file as it is now."""
+    def show_settings(self, profile: str | None = None) -> None:
+        """A new Settings box each time: the file as it is now.  *profile*:
+        that profile's settings instead of the config file's."""
         from jtcon.gui.settings import SettingsDialog
         old = self.dialogs.pop("settings", None)
         if old is not None:
             old.close()
-        box = self.dialogs["settings"] = SettingsDialog(self.window)
+        box = self.dialogs["settings"] = SettingsDialog(self.window, profile=profile)
         box.open()
 
     def config_file(self):
@@ -147,6 +156,109 @@ class Menus:
             return
         self.window.log_view.add(f"[config] Opened {path} in your editor.  Save it, then"
                                  " File › Reload config (Ctrl-R) to use your changes.")
+
+    # ── Profile ───────────────────────────────────────────────────────────────
+
+    def fill_profiles(self) -> None:
+        """The profiles in profiles/ (read each time the menu opens), the one
+        in use ticked; and what to do with them."""
+        win, menu = self.window, self.profile_menu
+        menu.clear()
+        startup = win.startup
+        if startup is None:
+            none = menu.addAction("Profiles need the config (jtcon --ui gui)")
+            none.setEnabled(False)
+            return
+        current = startup.profile
+        names = profile_names(startup.file)
+        if current and current not in names:
+            names.append(current)       # --profile with a path
+        for name in [None, *names]:
+            action = menu.addAction(name or "(none)", lambda _=False, n=name: self.use_profile(n))
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.setStatusTip(f"Restart with profile {name}, for this session" if name
+                                else "Restart with the config file alone, for this session")
+        menu.addSeparator()
+        edit = menu.addAction(f"{current} &settings…" if current else "Profile &settings…",
+                              lambda: self.show_settings(profile=current))
+        edit.setEnabled(bool(current))
+        menu.addAction("&New profile…", self.new_profile)
+        dup = menu.addAction("&Duplicate profile…", self.duplicate_profile)
+        delete = menu.addAction("De&lete profile…", self.delete_profile)
+        for action in (dup, delete):
+            action.setEnabled(bool(current) and current in profile_names(startup.file))
+        menu.addSeparator()
+        note = menu.addAction("For this session; --profile NAME picks one at startup")
+        note.setEnabled(False)
+
+    def use_profile(self, name: str | None) -> None:
+        if name != self.window.startup.profile:
+            self.window.use_profile(name)
+
+    def _ask_name(self, title: str, text: str = "") -> str | None:
+        """A new profile's name, asked until it's usable; None: cancelled."""
+        startup = self.window.startup
+        prompt = "Name (letters, digits, - and _):"
+        while True:
+            name, ok = QInputDialog.getText(self.window, title, prompt,
+                                            QLineEdit.EchoMode.Normal, text)
+            name = name.strip()
+            if not ok or not name:
+                return None
+            if not PROFILE_NAME_RE.fullmatch(name):
+                prompt = f"{name!r} won't do: letters, digits, - and _ only.  Name:"
+            elif profile_path(name, startup.file).exists():
+                prompt = f"There's a profile {name} already.  Name:"
+            else:
+                return name
+            text = name
+
+    def new_profile(self, name: str | None = None) -> None:
+        """An empty profile (nothing set: all the config file's), then its settings."""
+        startup = self.window.startup
+        name = name or self._ask_name("New profile")
+        if not name:
+            return
+        path = profile_path(name, startup.file)
+        write_private(path, new_profile_text(name, startup.file.name, date.today().isoformat()))
+        self.window.log_view.add(f"[config] Made profile {name}: {path}")
+        self.show_settings(profile=name)
+
+    def duplicate_profile(self, name: str | None = None) -> None:
+        """A copy of the profile in use, then its settings."""
+        startup = self.window.startup
+        old = startup.profile
+        name = name or self._ask_name(f"Duplicate profile {old}", f"{old}-copy")
+        if not name:
+            return
+        text = startup.profile_file.read_text(encoding="utf-8")
+        # Its comments' "--profile parks" become the new name's.
+        text = re.sub(rf"^(#.*--profile ){re.escape(old)}\b", rf"\g<1>{name}", text,
+                      flags=re.MULTILINE)
+        path = profile_path(name, startup.file)
+        write_private(path, text)
+        self.window.log_view.add(f"[config] Made profile {name} from {old}: {path}")
+        self.show_settings(profile=name)
+
+    def delete_profile(self, confirm: bool = True) -> None:
+        """Delete the profile in use (kept as a dated .bak), and carry on with none."""
+        from jtcon.config_edit import set_aside
+        win = self.window
+        name, path = win.startup.profile, win.startup.profile_file
+        if confirm and QMessageBox.question(
+                win, "Delete profile",
+                f"Delete profile {name}?\n\n{path} is kept as a dated .bak beside it,"
+                " in case you want it back.  jtcon carries on with no profile."
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            kept = set_aside(path)
+        except OSError as exc:
+            win.log_view.add(f"[config] Can't delete {path}: {exc.strerror or exc}")
+            return
+        win.log_view.add(f"[config] Deleted profile {name} (kept as {kept.name})")
+        win.use_profile(None)
 
     # ── View ──────────────────────────────────────────────────────────────────
 
