@@ -122,14 +122,19 @@ Watch rules have no column.  They want a station or they don't.
 | `pota` | `POTA` | `POTA` as a word in the message (`CQ POTA K5TX EM10`) | |
 | `sota` | `SOTA` | `SOTA` as a word in the message | |
 | `iota` | `IOTA` | `IOTA` as a word in the message | |
-| `callsigns` | `CALLS` | A callsign matching a pattern in your watchlist files | `files` (required) |
-| `message` | `MSG` | A message matching a pattern in your watchlist files | `files` (required) |
+| `callsigns` | `CALLS` | A callsign on your list | `calls`, and/or `files` |
+| `message` | `MSG` | A message matching one of your patterns | `patterns`, and/or `files` |
 | `states` | `STATE` | A station in one of these US states (needs hamdat) | `states`, or `file` |
 
 ```toml
 [[wanted]]
 rule  = "callsigns"
-files = ["~/ham/wanted.txt", "~/ham/club.txt"]   # one file is fine too: files = "x.txt"
+calls = ["K1ABC", "W1AW", "^VK0"]                # the list itself, in the config
+files = ["~/ham/wanted.txt", "~/ham/club.txt"]   # and/or files; one is fine: files = "x.txt"
+
+[[wanted]]
+rule     = "message"
+patterns = ['\bQRP\b']        # single quotes: the backslashes stay as typed
 
 [[wanted]]
 rule   = "states"
@@ -143,13 +148,26 @@ jtcon --wanted callsigns:~/ham/wanted.txt+~/ham/club.txt
 jtcon --wanted 5bwas,states:AK+DE
 ```
 
+In `calls`, a plain callsign means that station: `K1ABC` wants K1ABC,
+K1ABC/P and VE3/K1ABC, but not K1ABCD.  Anything with other characters is a
+pattern searched in the callsign, as in a file: `^VK0` for calls starting VK0.
+`patterns` are always patterns, searched in the whole message.  A list can be
+empty, to fill later.
+
+In the desktop window, right-click a station (or use the Station menu) and pick
+**Watch CALL in** › a list, or **New list…**; **Stop watching** takes it off.
+The config file (or the profile in use, if it has its own rules) is saved with
+a dated backup, and the change applies at once.  Settings › Wanted rules edits
+the lists too.
+
 ### Watchlist files
 
 One entry per line.  Lines starting with `#`, and blank lines, are skipped.  jtcon
 reloads a file as soon as you save it.
 
 `callsigns` files hold regular expressions, searched in the callsign; upper and
-lower case are the same:
+lower case are the same.  (In a file every line is a pattern: `K1ABC` there also
+matches K1ABCD.)
 
 ```
 # wanted.txt

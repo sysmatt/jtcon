@@ -24,6 +24,7 @@ from jtcon.core.hamdat import HAMDAT_DB_DEFAULT, HamdatLookup
 from jtcon.core.inputs import AdifInput, PatternInput, StatesInput
 from jtcon.core.logbook import qso_from_logged
 from jtcon.core.messages import base_call, qso_stage
+from jtcon.core.patterns import inline_patterns
 from jtcon.core.qrz import (PENDING_FILE, QrzClient, QrzStore, QrzSync, key_file_warning,
                             resolve_key)
 from jtcon.core.protocol import (Close, Decode, LoggedAdif, QsoLogged, Status, encode_highlight,
@@ -308,13 +309,18 @@ class Engine:
         # ── Watchlists ────────────────────────────────────────────────────────
         for rule in self.rules:
             if isinstance(rule, CallsignsRule):        # and MessageRule
-                inp = PatternInput(rule.name, rule.spec.settings["files"], rule, log=log)
-                try:
-                    rule.patterns = inp.load()
-                except OSError as exc:
-                    return self._fatal(f"[wanted] Cannot read pattern file: {exc}")
-                self.inputs.append(inp)
-                log(f"[{rule.name}] {inp.describe(rule.patterns)}")
+                about = []
+                if rule.inline:
+                    about.append(f"{len(rule.inline)} in the config")
+                if rule.spec.settings["files"]:
+                    inp = PatternInput(rule.name, rule.spec.settings["files"], rule, log=log)
+                    try:
+                        rule.patterns = inp.load()
+                    except OSError as exc:
+                        return self._fatal(f"[wanted] Cannot read pattern file: {exc}")
+                    self.inputs.append(inp)
+                    about.append(inp.describe(rule.patterns))
+                log(f"[{rule.name}] {', '.join(about) or 'nothing to watch yet'}")
             elif isinstance(rule, ActivationRule):
                 log(f"[{rule.name}] {rule.word} in the message")
 
@@ -672,6 +678,19 @@ class Engine:
         (off.discard if on else off.add)(name)
         self.log(f"[rules] {name} {'on' if on else 'off'}")
         self.refresh_stations()
+
+    def set_watch_calls(self, name: str, calls: list) -> bool:
+        """Callsign watchlist *name*'s own calls changed (the window's Watch
+        this station saved them to the config): use them now, and judge the
+        buffered stations again.  False if there's no such rule running."""
+        rule = next((r for r in self.rules
+                     if r.name == name and type(r) is CallsignsRule), None)
+        if rule is None:
+            return False
+        rule.spec.settings["calls"] = list(calls)
+        rule.inline = inline_patterns(calls, calls=True)
+        self.refresh_stations()
+        return True
 
     def set_scope(self, decodes: str) -> None:
         """Check "cq" decodes only, or "all", for this session."""

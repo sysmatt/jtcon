@@ -21,6 +21,7 @@ from pathlib import Path
 from jtcon.core.cty import CTY_DAT_DEFAULT
 from jtcon.core.hamdat import HAMDAT_DB_DEFAULT
 from jtcon.core.messages import _CALLSIGN_RE
+from jtcon.core.patterns import inline_patterns
 import jtcon.core.qrz as _qrz
 
 
@@ -85,8 +86,10 @@ RULES = {r.key: r for r in (
     RuleInfo("pota",      "watch", "POTA activators (POTA in the message)"),
     RuleInfo("sota",      "watch", "SOTA activators (SOTA in the message)"),
     RuleInfo("iota",      "watch", "IOTA stations (IOTA in the message)"),
-    RuleInfo("callsigns", "watch", "Callsign watchlist: regex files",  {"files": _REQUIRED}),
-    RuleInfo("message",   "watch", "Message watchlist: regex files",   {"files": _REQUIRED}),
+    RuleInfo("callsigns", "watch", "Callsign watchlist",
+             {"calls": [], "files": []}),
+    RuleInfo("message",   "watch", "Message watchlist",
+             {"patterns": [], "files": []}),
     RuleInfo("states",    "watch", "US states; needs hamdat",
              {"states": [], "file": ""}),
 )}
@@ -276,6 +279,8 @@ _SCHEMA = {
 _RULE_SETTINGS = {
     "confirm": [_choice(*CONFIRM_SOURCES)],
     "files":   [_PATH],
+    "calls":   [str],
+    "patterns": [str],
     "states":  [str],
     "file":    _PATH,
 }
@@ -591,7 +596,8 @@ def _select_wanted(entries: list, selection: str) -> list:
                                   " or the name of a [[wanted]] entry")
             match = {"rule": low}
         if value or tok.endswith(":"):
-            match = {k: v for k, v in match.items() if k not in ("file", "states", "files")}
+            match = {k: v for k, v in match.items()
+                     if k not in ("file", "states", "files", "calls", "patterns")}
             match.update(_cli_value(match["rule"], value, tok))
         out.append(match)
     return out
@@ -616,6 +622,13 @@ def _wanted_spec(entry: dict) -> WantedSpec:
         settings["states"] = [s.upper() for s in settings["states"]]
     if entry["rule"] == "states" and not (settings["states"] or settings["file"]):
         raise ConfigError(f"wanted rule {name!r} needs 'states' or 'file'")
+    listed = {"callsigns": "calls", "message": "patterns"}.get(entry["rule"])
+    if listed:                  # empty is fine: a list kept in the window, say
+        try:
+            inline_patterns(settings[listed], calls=listed == "calls")
+        except re.error as exc:
+            raise ConfigError(f"wanted rule {name!r}: {listed}: {exc.pattern!r} isn't a"
+                              f" pattern jtcon can use: {exc}") from None
     return WantedSpec(info.key, name, settings)
 
 
@@ -762,7 +775,12 @@ Examples (config.toml):
 
   [[wanted]]
   rule  = "callsigns"
-  files = ["~/ham/wanted.txt", "~/ham/club.txt"]   # one file is fine too: files = "x.txt"
+  calls = ["K1ABC", "^VK0"]       # K1ABC: that station (and K1ABC/P); ^VK0: a pattern
+  files = ["~/ham/wanted.txt", "~/ham/club.txt"]   # and/or files; one: files = "x.txt"
+
+  [[wanted]]
+  rule     = "message"
+  patterns = ['\bQRP\b']          # searched in the whole message
 
   [[wanted]]
   rule   = "states"
@@ -883,7 +901,8 @@ rule = "country"
 
 # [[wanted]]
 # rule  = "callsigns"
-# files = ["~/ham/wanted.txt"]   # one regex per line, # for comments
+# calls = ["K1ABC", "^VK0"]      # K1ABC: that station (and K1ABC/P); ^VK0: a pattern
+# files = ["~/ham/wanted.txt"]   # and/or files: one regex per line, # for comments
 
 # [[wanted]]
 # rule   = "states"

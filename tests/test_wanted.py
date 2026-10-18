@@ -159,3 +159,19 @@ def test_newly_confirmed_items():
                    "country": ["AUSTRALIA", "FED. REP. OF GERMANY"],   # not GERMANY too
                    "5bwas": ["TX/40m"],
                    "grid": []}                     # worked is enough: never "confirmed"
+
+
+def test_watchlists_in_the_config():
+    """A plain callsign in the config's own list means that station, portable
+    or not; anything else is a regex.  File hits name their file."""
+    calls, msg = build_rules([spec("callsigns", "VIPS", calls=["k1abc", "^VK0", "W1AW/7"]),
+                              spec("message", patterns=[r"\bQRP\b"])])
+    calls.patterns = [(re.compile("^W1", re.I), "vips.txt")]
+    for call, marks in [("K1ABC", ["K1ABC"]), ("K1ABC/P", ["K1ABC"]),
+                        ("VE3/K1ABC", ["K1ABC"]), ("K1ABCD", []), ("AK1ABC", []),
+                        ("VK0EK", ["^VK0"]), ("W1AW/7", ["W1AW/7", "^W1 [vips.txt]"]),
+                        ("W1AW", ["^W1 [vips.txt]"])]:
+        _, wanted = judge([calls], spot(call=call, message=f"CQ {call}"), None)
+        assert [h.detail for h in wanted] == marks, call
+    _, wanted = judge([msg], spot(message="CQ QRP W1ABC FN42"), None)
+    assert [h.mark() for h in wanted] == [r"MSG(\bQRP\b)"]

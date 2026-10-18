@@ -29,6 +29,29 @@ def load_regex_patterns(file_paths: list, log=None) -> list:
     return patterns
 
 
+_PLAIN_CALL_RE = re.compile(r"[A-Za-z0-9/]+")
+
+
+def inline_patterns(entries: list, calls: bool = False) -> list:
+    """[(compiled, text)] for a watchlist given in the config.  With *calls*,
+    a plain callsign (letters, digits, /) means that station exactly, portable
+    or not (K1ABC: K1ABC, K1ABC/P, VE3/K1ABC; not K1ABCD); anything else is a
+    regex searched in the text, as in a watchlist file.  re.error if one isn't."""
+    out = []
+    for entry in entries:
+        text = entry.strip()
+        if not text:
+            continue
+        if calls and _PLAIN_CALL_RE.fullmatch(text):
+            parts = [re.escape(p) for p in text.split("/") if p]
+            regex = rf"(?:^|/){'/'.join(parts)}(?:/|$)"
+        else:
+            regex = text
+        out.append((re.compile(regex, re.IGNORECASE), text.upper() if calls and
+                    _PLAIN_CALL_RE.fullmatch(text) else text))
+    return out
+
+
 ACTIVATION_KEYWORDS = {"pota": "POTA", "sota": "SOTA", "iota": "IOTA"}
 
 

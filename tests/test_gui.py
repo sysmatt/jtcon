@@ -15,7 +15,7 @@ pytest.importorskip("qasync")
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QToolBar
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QToolBar
 
 import jtcon.gui.models
 from jtcon.core.events import Fatal, LogLine, Ready
@@ -1282,15 +1282,14 @@ def test_a_rule_missing_its_settings_is_shown(window, tmp_path):
     win = window()
     box, conf = settings(win, tmp_path, text=MY_RULES)
     box.pages.setCurrentRow(0)
-    box.wanted_page.add("callsigns")                   # needs files
+    box.wanted_page.add("states")                      # needs states or a file
     box.save()
-    assert "needs a 'files' setting" in box.message.text()
+    assert "needs 'states' or 'file'" in box.message.text()
     assert box.pages.currentRow() == box.wanted_row
     assert conf.read_text() == MY_RULES
-    (tmp_path / "wanted.txt").write_text("^K1\n")
-    box.wanted_page.editors["files"].edit.setPlainText("wanted.txt")   # beside the config
+    box.wanted_page.editors["states"].setText("ak de")
     box.save()
-    assert '[[wanted]]\nrule = "callsigns"\nfiles = ["wanted.txt"]' in conf.read_text()
+    assert '[[wanted]]\nrule = "states"\nstates = ["AK", "DE"]' in conf.read_text()
 
 
 def test_rules_changed_in_the_file_meanwhile(window, tmp_path):
@@ -1518,3 +1517,126 @@ def test_new_duplicate_and_delete_profiles(window, tmp_path):
     assert not path.exists() and win.reloads == [None]
     assert [p.name.startswith("parks.toml.2") for p in folder.glob("*.bak")] == [True]
     assert win.log_view.lines()[-2].startswith("[config] Deleted profile parks (kept as ")
+
+
+# ── Watch this station ────────────────────────────────────────────────────────
+
+FRIENDS = SHACK + """
+# My rules.
+[[wanted]]
+rule = "dxcc"   # the big one
+
+[[wanted]]
+rule  = "callsigns"
+name  = "Friends"
+calls = ["K9XX"]   # the club
+
+[[wanted]]
+rule  = "callsigns"
+name  = "DXpeditions"
+calls = ["^VK0"]
+"""
+
+
+def watch_menu(win, call: str) -> dict:
+    """The station's items as the right-click menu has them, submenus as
+    {"Watch W1ABC in": {...}}."""
+    menu = win.test_menu = QMenu()             # kept: its items go with it
+    win.watch_items(menu, call)
+    out = {}
+    for a in menu.actions():
+        if a.menu():
+            out[a.text().replace("&", "")] = items(a.menu())
+        elif a.text():
+            out[a.text().replace("&", "")] = a
+    return out
+
+
+def test_watch_this_station(window, tmp_path):
+    win = window(config={"wanted": [{"rule": "dxcc"},
+                                    {"rule": "callsigns", "name": "Friends", "calls": ["K9XX"]},
+                                    {"rule": "callsigns", "name": "DXpeditions",
+                                     "calls": ["^VK0"]}]})
+    conf, _ = profiles(win, tmp_path, None, text=FRIENDS)
+    win.engine.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    got = watch_menu(win, "W1ABC/P")                    # the home call is watched
+    assert list(got["Watch W1ABC in"]) == ["Friends", "DXpeditions", "New list…"]
+    assert not any(k.startswith("Stop") for k in got)
+    got["Watch W1ABC in"]["Friends"].trigger()
+    text = conf.read_text()
+    assert 'calls = ["K9XX", "W1ABC"]   # the club' in text and "# My rules." in text
+    assert win.reloads == []                            # used at once, no restart
+    assert [h.detail for h in win.engine.stations.find("W1ABC").wanted] == ["W1ABC"]
+    assert win.log_view.lines()[-1].startswith(
+        "[watch] Watching W1ABC in Friends (saved config.toml; the old one: config.toml.")
+    got = watch_menu(win, "W1ABC")
+    assert list(got["Watch W1ABC in"]) == ["DXpeditions", "New list…"]
+    got["Stop watching W1ABC in Friends"].trigger()
+    assert 'calls = ["K9XX"]   # the club' in conf.read_text()
+    assert win.engine.stations.hits() == []
+    # In two lists: a submenu to stop.
+    win.watch("W1ABC", 1)
+    win.watch("W1ABC", 2)
+    assert list(watch_menu(win, "W1ABC")["Stop watching W1ABC in"]) == ["Friends", "DXpeditions"]
+
+
+def test_a_new_watchlist_restarts_with_it(window, tmp_path):
+    win = window()
+    conf, folder = profiles(win, tmp_path, None)        # SHACK: no rules, the defaults
+    got = watch_menu(win, "W1ABC")
+    assert list(got["Watch W1ABC in"]) == ["New list…"]
+    win.new_watchlist("W1ABC", "Friends")
+    from jtcon.config import load_config
+    assert [(w.name, w.settings.get("calls")) for w in load_config(conf).wanted] == [
+        ("dxcc", None), ("cqz", None), ("country", None), ("Friends", ["W1ABC"])]
+    assert win.reloads == [1]                           # a new rule: restarted
+
+
+def test_watching_writes_the_profiles_own_rules(window, tmp_path):
+    win = window()
+    conf, folder = profiles(win, tmp_path, "pota", text=FRIENDS,
+                            pota='[[wanted]]\nrule = "pota"\n', parks="[udp]\nport = 2240\n")
+    win.new_watchlist("W1ABC", "Hunters")
+    assert 'name = "Hunters"\ncalls = ["W1ABC"]' in (folder / "pota.toml").read_text()
+    assert conf.read_text() == FRIENDS
+    profiles(win, tmp_path, "parks", text=FRIENDS)      # no rules of its own: the config's
+    win.watch("W1ABC", 1)
+    assert 'calls = ["K9XX", "W1ABC"]' in conf.read_text()
+
+
+def test_watching_needs_the_rules_from_the_config(window, tmp_path):
+    win = window()
+    assert watch_menu(win, "W1ABC") == {}               # no startup
+    conf, _ = profiles(win, tmp_path, None, text=FRIENDS)
+    win.startup.wanted = "dxcc"
+    got = watch_menu(win, "W1ABC")
+    assert not got["Watch W1ABC: not while --wanted sets the rules"].isEnabled()
+    win.startup.wanted = None
+    conf.write_text("[udp\n")
+    assert not watch_menu(win, "W1ABC")["Watch W1ABC: the config can't be read"].isEnabled()
+
+
+def test_the_watch_items_are_on_the_station_menus(window, tmp_path):
+    win = window()
+    profiles(win, tmp_path, None, text=FRIENDS)
+    win.engine.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    win.decodes.selectRow(0)
+    win.last_table = win.decodes
+    win.menus.fill_station()
+    assert "Watch W1ABC in" in items(win.menus.station_menu)
+    assert "Watch W1ABC in" in items(win.decodes.menu_for("W1ABC"))
+
+
+def test_the_settings_lists(window, tmp_path):
+    win = window()
+    box, conf = settings(win, tmp_path, text=FRIENDS)
+    page = box.wanted_page
+    page.list.setCurrentRow(1)
+    assert page.editors["calls"].toPlainText() == "K9XX"
+    page.editors["calls"].setPlainText("K9XX\n\nw1abc\n")
+    page.add("message")
+    page.editors["patterns"].setPlainText(r"\bQRP\b")
+    box.save()
+    text = conf.read_text()
+    assert 'calls = ["K9XX", "w1abc"]   # the club' in text
+    assert '[[wanted]]\nrule = "message"\npatterns = ["\\\\bQRP\\\\b"]' in text

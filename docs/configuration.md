@@ -149,7 +149,9 @@ One entry per rule.  See [Wanted rules](wanted-rules.md).
 | `rule` | Which rule: `dxcc`, `cqz`, `ituz`, `country`, `was`, `5bwas`, `grid`, `pota`, `sota`, `iota`, `callsigns`, `message`, `states` |
 | `name` | Its own name, to use a rule twice.  Shown on screen, and usable in `--wanted` |
 | `confirm` | Award rules: the confirmations that count, from `lotw`, `qrz`, `eqsl`, `card`.  Default `["lotw"]`; `[]` means worked is enough |
-| `files` | `callsigns` and `message`: watchlist files |
+| `calls` | `callsigns`: the callsigns (or patterns) to watch for, in the config itself |
+| `patterns` | `message`: the patterns to look for in the message, in the config itself |
+| `files` | `callsigns` and `message`: watchlist files, as well as or instead of the lists |
 | `states`, `file` | `states`: a list of states, or a file of them |
 
 ### Actions

@@ -14,10 +14,11 @@ from dataclasses import replace
 from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QDockWidget, QLabel, QMainWindow,
-                               QMessageBox, QToolTip, QWidget)
+                               QInputDialog, QMessageBox, QToolTip, QWidget)
 
-from jtcon.config import default_config_dir
+from jtcon.config import ConfigError, default_config_dir
 from jtcon.core.bands import _freq_to_band
+from jtcon.core.messages import base_call
 from jtcon.core.events import Fatal, LogLine, Ready, SpotEvent, StationUpdated, UdpDown
 from jtcon.gui.menus import Menus
 from jtcon.gui.models import DecodeRow, decode_columns
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
             view.answer.connect(self.answer)
             view.ignore.connect(self.ignore)
             view.can_answer = self.can_answer
+            view.more_items = self.watch_items
             view.focused.connect(lambda v=view: setattr(self, "last_table", v))
         self.wanted.sort_changed.connect(lambda name: self.log_view.add(f"[wanted] Sorted by {name}"))
         self.menus = Menus(self)        # with the keys F1-F8, Ctrl-arrows, Ctrl-Q
@@ -430,6 +432,99 @@ class MainWindow(QMainWindow):
         self.engine.ignore(call)
         self.refresh_wanted(force=True)
         self.menus.ignored_changed()
+
+    # ── Watchlists ────────────────────────────────────────────────────────────
+
+    def watch_items(self, menu, call: str) -> None:
+        """Watch this station: add its call to a callsign watchlist in the
+        config, or take it off one."""
+        if self.startup is None:
+            return
+        call = base_call(call)
+        menu.addSeparator()
+        if self.startup.wanted:
+            item = menu.addAction(f"Watch {call}: not while --wanted sets the rules")
+            item.setEnabled(False)
+            return
+        from jtcon.gui.watchlists import Watchlists
+        try:
+            lists = Watchlists(self.startup)
+        except ConfigError:
+            item = menu.addAction(f"Watch {call}: the config can't be read")
+            item.setEnabled(False)
+            return
+        holding = lists.holding(call)
+        watch = menu.addMenu(f"&Watch {call} in")
+        for place, name, _ in lists.lists():
+            if place not in holding:
+                watch.addAction(name, lambda _=False, p=place: self.watch(call, p))
+        watch.addSeparator()
+        watch.addAction("&New list…", lambda: self.new_watchlist(call))
+        names = {place: name for place, name, _ in lists.lists()}
+        if len(holding) == 1:
+            menu.addAction(f"Stop &watching {call} in {names[holding[0]]}",
+                           lambda: self.watch(call, holding[0], add=False))
+        elif holding:
+            stop = menu.addMenu(f"Stop &watching {call} in")
+            for place in holding:
+                stop.addAction(names[place],
+                               lambda _=False, p=place: self.watch(call, p, add=False))
+
+    def new_watchlist(self, call: str, name: str | None = None) -> None:
+        """A new callsign watchlist, named (the first can go without), with *call*."""
+        from jtcon.gui.watchlists import Watchlists
+        try:
+            lists = Watchlists(self.startup)
+        except ConfigError as exc:
+            self._watch_failed(str(exc))
+            return
+        first = not lists.lists()
+        prompt = "Its name (in the Wanted column and the Rules menu):"
+        while name is None:
+            text, ok = QInputDialog.getText(self, "New watchlist", prompt,
+                                            text="" if not first else "Watchlist")
+            if not ok:
+                return
+            text = text.strip()
+            if not text and first:
+                break
+            if not text or text.lower() in lists.names():
+                prompt = (f"There's a rule called {text} already.  Another name:" if text
+                          else "It needs a name.  Name:")
+                continue
+            name = text
+        self.watch(call, None, name=name)
+
+    def watch(self, call: str, place: int | None, add: bool = True,
+              name: str | None = None) -> None:
+        """Add *call* to the watchlist at *place* (None: a new one, *name*),
+        or take it off; save, and use it now."""
+        from jtcon.gui.watchlists import Watchlists
+        call = base_call(call)
+        try:
+            lists = Watchlists(self.startup)
+            if add:
+                place = lists.add(call, place, name)
+            else:
+                lists.remove(call, place)
+            backup = lists.save()
+        except ConfigError as exc:
+            self._watch_failed(str(exc))
+            return
+        entry = lists.entries[place]
+        rule = entry.get("name") or entry["rule"]
+        saved = f"saved {lists.path.name}" + (f"; the old one: {backup.name}" if backup else "")
+        self.log_view.add(f"[watch] {'Watching' if add else 'Stopped watching'} {call}"
+                          f" in {rule} ({saved})")
+        if self.engine.set_watch_calls(rule, entry.get("calls") or []):
+            self.refresh_wanted(force=True)
+        else:                           # a new rule: the Engine starts again with it
+            self.reload_config()
+
+    def _watch_failed(self, error: str) -> None:
+        self.log_view.add(f"[watch] Can't change the watchlist: {error}")
+        if self.dialogs:
+            QMessageBox(QMessageBox.Icon.Warning, "jtcon", error, parent=self).open()
 
     def reload_config(self, startup=None) -> None:
         """File › Reload config: restart with the config read again, or say

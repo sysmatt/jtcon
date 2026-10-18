@@ -630,3 +630,23 @@ def test_refresh_drops_stations_ignored_meanwhile(make_engine):
     e.ignored["VK3XY"] = "session"           # not through ignore(): refresh catches it
     e.refresh_stations()
     assert len(e.stations) == 0 and sent(e)[-1] == ("highlight", "VK3XY", (None, None))
+
+
+def test_a_watchlist_in_the_config(tmp_path, no_wsjt_logs):
+    e = _engine(tmp_path, {"wanted": [{"rule": "callsigns", "calls": ["K1ABC", "^VK"]},
+                                      {"rule": "message", "name": "MSGS"}]})
+    assert e._load_inputs()
+    assert "[callsigns] 2 in the config" in logs(e)
+    assert "[MSGS] nothing to watch yet" in logs(e)
+    assert e.inputs == [i for i in e.inputs if not isinstance(i, jtcon.core.inputs.PatternInput)]
+
+
+def test_watching_a_station_judges_the_buffer_again(make_engine):
+    e = make_engine(config={"wanted": [{"rule": "callsigns", "name": "Friends",
+                                        "calls": ["K9XX"]}]})
+    e.datagram_received(pk.decode("CQ W1ABC FN42"), ADDR)
+    assert e.stations.hits() == []
+    assert not e.set_watch_calls("nope", ["W1ABC"])
+    assert e.set_watch_calls("Friends", ["K9XX", "W1ABC"])
+    assert [s.callsign for s in e.stations.hits()] == ["W1ABC"]
+    assert e.config.wanted[0].settings["calls"] == ["K9XX", "W1ABC"]

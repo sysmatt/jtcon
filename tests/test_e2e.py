@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -249,7 +250,10 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     assert pk.parse_reply(wsjtx.recvfrom(4096)[0])["message"] == "W1ABC ZL2AB RF70"
 
     # ── QSO Logged: that station's highlight is cleared ───────────────────────
-    wsjtx.sendto(pk.qso_logged("K2XYZ"), jt)
+    # Logged today (UTC): "recently worked" whenever the tests run.
+    today = datetime.now(timezone.utc).replace(hour=12, minute=30, second=0, microsecond=0,
+                                               tzinfo=None)
+    wsjtx.sendto(pk.qso_logged("K2XYZ", when=today), jt)
     app.wait_for(r"\[qso\] Logged K2XYZ")
     assert highlight(wsjtx) == ("K2XYZ", None, None)
 
@@ -265,7 +269,7 @@ def test_live_session(launch, home, wsjtx, tmp_path):
     #    reported), and a LoTW-confirmed VK3XY QSO arrives: no longer needed ──
     adif = home / ".local" / "share" / "WSJT-X" / "wsjtx_log.adi"
     with adif.open("a") as f:
-        f.write("<call:5>K2XYZ <band:3>20m <mode:3>FT8 <qso_date:8>20261012"
+        f.write(f"<call:5>K2XYZ <band:3>20m <mode:3>FT8 <qso_date:8>{today:%Y%m%d}"
                 " <time_on:6>123000 <EOR>\n")
         f.write("<call:5>VK3XY <band:3>20m <mode:3>FT8 <qso_date:8>20240101"
                 " <lotw_qsl_rcvd:1>Y <EOR>\n")
@@ -366,7 +370,7 @@ def test_cli_v2_flag_is_refused(home):
 def test_cli_list_rules(home):
     r = _run_cli("--list-rules", home=home)
     assert r.returncode == 0
-    assert "5bwas" in r.stdout and "files: (required)" in r.stdout
+    assert "5bwas" in r.stdout and "calls: default []" in r.stdout
     assert 'files = ["~/ham/wanted.txt", "~/ham/club.txt"]' in r.stdout
     assert r"\bPOTA\b     POTA as a word" in r.stdout
     assert "jtcon --wanted dxcc,callsigns:~/ham/wanted.txt+~/ham/club.txt" in r.stdout

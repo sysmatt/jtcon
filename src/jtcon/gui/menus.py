@@ -328,6 +328,7 @@ class Menus:
         call = win.current_call()
         if call:
             station_items(menu, call, win.answer, win.ignore, win.can_answer(call))
+            win.watch_items(menu, call)
         else:
             none = menu.addAction("Select a station in the Wanted or Decodes panel")
             none.setEnabled(False)

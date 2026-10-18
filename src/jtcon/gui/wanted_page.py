@@ -19,11 +19,18 @@ from jtcon.core.wanted.base import LABELS
 
 SOURCE_LABELS = {"lotw": "LoTW", "qrz": "QRZ", "eqsl": "eQSL", "card": "Card"}
 
+LABEL = {"calls": "Callsigns"}
+
 HELP = {
     "name": "Its name in the Wanted column and the Rules menu.  Needed when a rule is used"
             " twice (WAS by LoTW and WAS by QRZ, say).",
     "confirm": "The confirmations that count.  None ticked: worked is enough.",
-    "files": "Files of regular expressions, one per line (# starts a comment).",
+    "calls": "One per line.  A callsign means that station (K1ABC: also K1ABC/P); anything"
+             " else is a pattern searched in the call: ^VK0 for calls starting VK0.",
+    "patterns": "One per line: patterns searched in the whole message, upper or lower case"
+                " alike.  \\bQRP\\b: QRP as a word.",
+    "files": "And/or files of them, one per line (# starts a comment), for lists kept"
+             " elsewhere.",
     "states": "State codes, separated by spaces or commas: AK DE.",
     "file": "Or a file listing the states.",
 }
@@ -229,13 +236,16 @@ class WantedPage(QWidget):
                     row.addWidget(box)
                 row.addStretch()
                 widget.boxes = boxes
+            elif key in ("calls", "patterns"):
+                widget = QPlainTextEdit("\n".join(value or []))
+                widget.setFixedHeight(widget.fontMetrics().height() * 8 + 12)
             elif key == "files":
                 widget = _PathList("\n".join(value or []))
             elif key == "states":
                 widget = QLineEdit(" ".join(value or []))
             else:                           # "file"
                 widget = _PathEdit(value or "")
-            self._row(key.capitalize(), key, widget)
+            self._row(LABEL.get(key, key.capitalize()), key, widget)
 
     def _row(self, label: str, key: str, widget: QWidget) -> None:
         self.editors[key] = widget
@@ -262,6 +272,9 @@ class WantedPage(QWidget):
             widget = self.editors[key]
             if key == "confirm":
                 value = [s for s, box in widget.boxes.items() if box.isChecked()]
+            elif key in ("calls", "patterns"):
+                value = [line.strip() for line in widget.toPlainText().splitlines()
+                         if line.strip()]
             elif key == "files":
                 value = widget.paths()
             elif key == "states":

@@ -203,7 +203,7 @@ BASE = {"wanted": [{"rule": "was", "name": "WAS-ARRL"},
 def test_wanted_selects_by_name_or_rule_keeping_settings():
     cfg = make_config(BASE, wanted="was-arrl, callsigns")
     assert rules(cfg) == [("was", "WAS-ARRL", {"confirm": ["lotw"]}),
-                          ("callsigns", "callsigns", {"files": [Path("/w.txt")]})]
+                          ("callsigns", "callsigns", {"calls": [], "files": [Path("/w.txt")]})]
     assert make_config(BASE, wanted="dxcc").rule("dxcc").settings["confirm"] == []
 
 
@@ -216,8 +216,10 @@ def test_wanted_none_and_errors():
     assert make_config(BASE, wanted="none").wanted == []
     with pytest.raises(ConfigError, match="'bogus' is not a rule"):
         make_config(BASE, wanted="bogus")
-    with pytest.raises(ConfigError, match="'message' needs a 'files' setting"):
-        make_config(BASE, wanted="message")
+    assert make_config(BASE, wanted="message").wanted[0].settings == {"patterns": [],
+                                                                     "files": []}  # empty: fine
+    with pytest.raises(ConfigError, match="'states' needs 'states' or 'file'"):
+        make_config(BASE, wanted="states")
 
 
 def test_wanted_values_on_the_command_line(monkeypatch, tmp_path):
@@ -226,8 +228,9 @@ def test_wanted_values_on_the_command_line(monkeypatch, tmp_path):
     cfg = make_config(BASE, wanted="callsigns:~/ham/a.txt+club.txt,message:m.txt,"
                                    "states:ak+DE,dxcc:worked,pota")
     assert rules(cfg) == [
-        ("callsigns", "callsigns", {"files": [Path("/home/op/ham/a.txt"), tmp_path / "club.txt"]}),
-        ("message", "message", {"files": [tmp_path / "m.txt"]}),
+        ("callsigns", "callsigns", {"calls": [], "files": [Path("/home/op/ham/a.txt"),
+                                                   tmp_path / "club.txt"]}),
+        ("message", "message", {"patterns": [], "files": [tmp_path / "m.txt"]}),
         ("states", "states", {"states": ["AK", "DE"], "file": None}),
         ("dxcc", "dxcc", {"confirm": []}),
         ("pota", "pota", {})]
@@ -411,3 +414,10 @@ def test_ignore_list_from_the_config_and_the_command_line(tmp_path):
     with pytest.raises(ConfigError, match="--ignore must be a callsign, not 'RR'"):
         load_config(config_dir=tmp_path, ignore=["RR"])
     assert make_config({}).filters.ignore == []
+
+
+def test_a_watchlist_pattern_that_isnt_one():
+    with pytest.raises(ConfigError, match=r"wanted rule 'callsigns': calls: '\^VK\(' isn't"):
+        make_config({"wanted": [{"rule": "callsigns", "calls": ["K1ABC", "^VK("]}]})
+    assert make_config({"wanted": [{"rule": "callsigns", "calls": ["K1ABC"]}]}
+                       ).wanted[0].settings == {"calls": ["K1ABC"], "files": []}

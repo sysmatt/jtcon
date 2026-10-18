@@ -131,6 +131,7 @@ class Table(QTableView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.can_answer = lambda call: True     # the window's: is there a CQ to answer
+        self.more_items = lambda menu, call: None   # the window's: Watch this station
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
@@ -208,6 +209,7 @@ class Table(QTableView):
         menu = QMenu(self)
         if call:
             station_items(menu, call, self.answer.emit, self.ignore.emit, self.can_answer(call))
+            self.more_items(menu, call)
         return menu
 
     def _row_height(self, extra: int) -> None:

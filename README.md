@@ -243,7 +243,9 @@ Wanted table or in the decodes (any station calling CQ, wanted or not).  Delete
 ignores it for the session.  Right-click a station to answer it, ignore it, copy
 its call, or look it up on QRZ.com; the Station menu does the same for the
 selected one, and Station › Ignored stations lists what's ignored, to unignore
-a call or add one.  Click a Wanted column header to sort (again to reverse), or
+a call or add one.  **Watch CALL in** adds the station to one of your callsign
+watchlists (or a new one), kept in the config file and used at once; **Stop
+watching** takes it off.  Click a Wanted column header to sort (again to reverse), or
 Ctrl-S.  Right-click the decodes or the log to clear them.
 
 View › Layout (or F2–F5) lays the panels out in the Textual screen's four
