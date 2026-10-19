@@ -122,6 +122,16 @@ C. **Wanted rules page.** ✅ (2026-10-15)  Also: Save checks the rules' files
 D. **Profiles.** ✅ (2026-10-17)  The Profile menu, the editor with "Set here",
    new / duplicate / delete; the profile in use in the window's title.
 
+After the stages (Matt, 2026-10-18): watchlists kept in the config itself.
+The callsigns rule takes `calls = [...]` and the message rule `patterns = [...]`
+beside `files` (now optional), edited one per line on the Wanted rules page.
+Right-click a station (or the Station menu): **Watch CALL in ▸** a callsigns
+list, or **New list…**; **Stop watching CALL in …**.  It saves the file whose
+rules are in use (the profile if it has its own), with the dated backup; adding
+to an existing list applies live (`Engine.set_watch_calls`), a new list reloads.
+Greyed out under `--wanted`.  `gui/watchlists.py`.  Matt: the editor is "a
+little clunky and basic but fine for now"; tweak later.
+
 ## Testing
 
 - The file editing code is tested without Qt: comments survive, only changed

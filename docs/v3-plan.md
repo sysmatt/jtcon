@@ -1,6 +1,6 @@
 # jtcon v3 plan
 
-Working document for the v3 rewrite, developed on the `v3` branch.  Tick items off as
+Working document for the v3 rewrite, developed on the `v3` branch (now `dev`).  Tick items off as
 they land; update the design sections when a decision changes.
 
 ## Goals
@@ -143,8 +143,8 @@ Planned built-in rules:
 | `5bwas` | award | lotw | Per state × band, 5 WAS bands |
 | `grid` | award | any | New; 4-character grid |
 | `pota` / `sota` / `iota` | watch | — | Keyword in the CQ |
-| `callsigns` | watch | — | Regex list file |
-| `message` | watch | — | Regex list over the decoded text |
+| `callsigns` | watch | — | `calls` in the config (a plain call matches that station, /P too; anything else is a regex) and/or regex list `files` |
+| `message` | watch | — | Regexes over the decoded text: `patterns` in the config and/or list `files` |
 | `states` | watch | — | List of states |
 
 Later candidates: per-band / per-mode variants ("new DXCC on this band"), continent,
@@ -645,9 +645,33 @@ Matt: keep it simple; per-rule routing of alerts can come later if it's needed.
 ### Phase 9: front ends (separate plans)
 Textual TUI: [tui-textual-plan.md](tui-textual-plan.md) (decisions made 2026-10-14).
 GUI (PySide6): [gui-plan.md](gui-plan.md) (decisions made 2026-10-14).
-- [ ] TUI on Textual: stations table plus live log, select-and-Enter to reply, rule
-      toggles
-- [ ] GUI, on the same Engine
+- [x] TUI on Textual (`--ui textual`), all 5 stages done (2026-10-14)
+- [x] GUI (`--ui gui`, PySide6), stages 1–6 done (2026-10-15); stage 7 (Windows,
+      macOS) deferred.  Config editor: [config-editor-plan.md](config-editor-plan.md),
+      stages A–D done (2026-10-17)
+- [x] Watchlists in the config (Matt, 2026-10-18): `calls` / `patterns` beside
+      `files`; GUI right-click › Watch CALL in a list / Stop watching
+
+## Where things stand (2026-10-18)
+
+Everything above is on `dev`, unreleased (`main` is still v3.0.0).  Next:
+
+1. Matt uses the GUI day to day; fixes on `dev`.
+2. Release `dev` → `main` as **v3.1.0** (commands under Git workflow).  Decide first
+   which front end is the default (leaning: keep it, `--ui gui` opt-in for now).
+3. Then the next big piece; leaning **alert routing** (Phase 6).
+
+Small loose ends, any time:
+- Log messages shared by the front ends still say "[cmd]" and "unignore"
+  (terminal wording, odd in the GUI).
+- `--wanted callsigns:` on the command line takes only files, not calls.
+- `BACKUPS_KEPT` (10, `config_edit.py`) could be a setting.
+- Patterns with backslashes are saved as escaped basic strings
+  (`"\\bQRP\\b"`); literal strings (`'\bQRP\b'`) would read better.
+
+Parked, each to be discussed first: alert routing (Phase 6), station memory (D6),
+multicast (D3), Windows and macOS (gui-plan stage 7), tray icon and installers
+(gui-plan parking lot).
 
 ## v2 quirks found while writing tests
 
@@ -695,7 +719,7 @@ git push                      # goes to origin/dev
 Trying dev with pipx:
 
 ```bash
-pipx install --force "git+https://github.com/sysmatt/jtcon@dev"
+pipx install --force "jtcon[gui] @ git+https://github.com/sysmatt/jtcon@dev"
 ```
 
 Publishing (a fast-forward, as long as nothing is committed to `main` directly):
